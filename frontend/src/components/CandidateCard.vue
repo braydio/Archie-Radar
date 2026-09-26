@@ -40,6 +40,10 @@ export default {
     const title = computed(() => props.post.name || `${statusLabel(props.post.status) || 'Found'} cat`)
     const usefulTitle = computed(() => !/^(found\s+)?cat$|^unknown$/i.test(String(title.value || '').trim()))
     const detailsAvailable = computed(() => Boolean(props.post.nearest_landmark || props.post.finder_message || props.post.contact_info || props.post.contact_url))
+    const candidateHeading = computed(() => props.post.holding_entity || props.post.custody_label || statusLabel(props.post.status) || 'Found report')
+    const candidateSubheading = computed(() => [props.post.custody_label && props.post.holding_entity ? props.post.custody_label : null,
+      props.post.source_platform ? `via ${props.post.source_platform}` : sourceLabel(props.post.source)].filter(Boolean).join(' · '))
+    const identityIds = computed(() => props.post.external_ids || [])
     const mapHref = computed(() => {
       const lat = props.post.map_latitude
       const lon = props.post.map_longitude
@@ -106,7 +110,7 @@ export default {
     function review(reviewState) { emit('review', props.post, reviewState) }
 
     return {
-      imageFailed, priorityClass, photoPct, hasPhoto, sourceAccent,
+      imageFailed, priorityClass, photoPct, hasPhoto, sourceAccent, candidateHeading, candidateSubheading, identityIds,
       sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText,
       traitTokens, primaryTraitTokens, reasonSummary, colorClass,
       sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review
@@ -124,9 +128,9 @@ export default {
 
     <div class="candidate-body">
       <div class="candidate-topline">
-        <div class="source-line">
-          <span class="source-name">{{ sourceLabel(post.source) }}</span>
-          <span v-if="statusLabel(post.status)" class="status-tag">{{ statusLabel(post.status) }}</span>
+        <div class="source-line candidate-case-heading">
+          <span class="source-name candidate-holder">{{ candidateHeading }}</span>
+          <span class="status-tag candidate-subheading">{{ candidateSubheading }}</span>
           <span v-if="!hasPhoto" class="no-photo-tag">No photo</span>
         </div>
         <div class="rank-badge" :title="'Top of the queue is #1. Score is shown separately.'">
@@ -137,6 +141,11 @@ export default {
       <div class="title-row">
         <h2 :class="{ 'generic-title': !usefulTitle }">{{ title }}</h2>
         <a v-if="post.source_url" class="original-link prominent" :href="post.source_url" target="_blank" rel="noopener">Original ↗</a>
+      </div>
+
+      <div v-if="identityIds.length || post.record_count > 1" class="case-identity-row">
+        <strong v-for="identifier in identityIds" :key="identifier.namespace + identifier.value">{{ identifier.label }} {{ identifier.value }}</strong>
+        <span>Radar case #{{ post.case_id || post.id }}<template v-if="post.record_count > 1"> · {{ post.record_count }} source records</template></span>
       </div>
 
       <div class="date-facts primary-event-date">
@@ -187,6 +196,16 @@ export default {
             <template v-if="eventAt"><dt>Found / sighted</dt><dd>{{ exactDate(eventAt) }}</dd></template>
             <template v-if="addedAt"><dt>Added to Radar</dt><dd>{{ exactDate(addedAt) }}</dd></template>
           </dl>
+        </section>
+        <section v-if="post.source_records?.length > 1" class="more-detail-section source-history">
+          <h3>Source history</h3>
+          <article v-for="record in post.source_records" :key="record.post_id" class="source-history-row">
+            <time>{{ exactDate(record.last_seen_at || record.first_seen_at) }}</time>
+            <strong>{{ record.holding_entity || record.custody_label || record.source_label }}</strong>
+            <span v-if="record.source_id">{{ identityIds[0]?.label || 'Record ID' }} {{ record.source_id }}</span>
+            <small>{{ record.custody_label || statusLabel(record.status) }}<template v-if="record.source_platform"> · via {{ record.source_platform }}</template></small>
+            <a v-if="record.source_url" :href="record.source_url" target="_blank" rel="noopener">Open record ↗</a>
+          </article>
         </section>
         <section v-if="Object.keys(post.parsed_traits || {}).length" class="more-detail-section">
           <h3>Parsed traits</h3>

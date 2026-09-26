@@ -1350,23 +1350,21 @@ def queue_stats(
     not_before: datetime | None = None,
     db: Session = Depends(get_db),
 ):
-    conditions = []
-    if not_before is not None:
-        cutoff = not_before if not_before.tzinfo else not_before.replace(tzinfo=timezone.utc)
-        conditions.append(func.coalesce(PetPost.reported_at, PetPost.first_seen_at) >= cutoff)
-
-    grouped_stmt = select(PetPost.review_state, func.count(PetPost.id))
-    if conditions:
-        grouped_stmt = grouped_stmt.where(*conditions)
-    grouped = dict(db.execute(grouped_stmt.group_by(PetPost.review_state)).all())
-
-    high_stmt = select(func.count(PetPost.id)).where(PetPost.review_state == "new", PetPost.match_score >= 65)
-    photo_stmt = select(func.count(PetPost.id)).where(PetPost.review_state == "new", PetPost.image_url.is_not(None), PetPost.image_url != "")
-    if conditions:
-        high_stmt = high_stmt.where(*conditions)
-        photo_stmt = photo_stmt.where(*conditions)
-    high_new = db.scalar(high_stmt) or 0
-    with_photo = db.scalar(photo_stmt) or 0
+    ensure_candidate_cases(db)
+    cutoff = (not_before if not_before.tzinfo else not_before.replace(tzinfo=timezone.utc)) if not_before else None
+    grouped = {state: 0 for state in ("new", "possible", "needs_review", "dismissed", "confirmed")}
+    high_new = with_photo = 0
+    for case in db.scalars(select(CandidateCase)):
+        members = list(db.scalars(select(PetPost).join(CandidateCasePost, CandidateCasePost.post_id == PetPost.id)
+                                   .where(CandidateCasePost.case_id == case.id)))
+        recent = [row for row in members if not cutoff or (row.reported_at or row.first_seen_at) >= cutoff]
+        if not recent:
+            continue
+        grouped[case.review_state] = grouped.get(case.review_state, 0) + 1
+        if case.review_state == "new" and max((row.match_score for row in recent), default=0) >= 65:
+            high_new += 1
+        if case.review_state == "new" and any(row.image_url for row in recent):
+            with_photo += 1
     return {
         "new": grouped.get("new", 0),
         "possible": grouped.get("possible", 0),

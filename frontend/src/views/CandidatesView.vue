@@ -309,7 +309,7 @@ export default {
         if (f.notBefore) params.set('not_before', `${f.notBefore}T00:00:00Z`)
         if (f.maxDistance < 500) params.set('max_distance_miles', String(f.maxDistance))
         params.set('limit', '500')
-        const res = await fetch(`${API}/api/posts?${params}`)
+        const res = await fetch(`${API}/api/candidate-cases?${params}`)
         if (!res.ok) throw new Error(`Candidate feed ${res.status}`)
         posts.value = clientPrioritize(await res.json(), f)
       } catch (e) {
@@ -380,7 +380,7 @@ export default {
 
     async function review(post, review_state) {
       try {
-        const res = await fetch(`${API}/api/posts/${post.id}/review`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ review_state }) })
+        const res = await fetch(`${API}/api/candidate-cases/${post.case_id || post.id}/review`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ review_state }) })
         if (!res.ok) throw new Error(`Review update failed: ${res.status}`)
         posts.value = posts.value.filter(item => item.id !== post.id)
         await loadQueueStats()

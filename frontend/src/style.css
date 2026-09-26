@@ -679,6 +679,16 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
 .journal-list a { color: #315943; font-weight: 800; font-size: .78rem; }
 .journal-list pre { white-space: pre-wrap; margin: 5px 0 8px; color: #57655d; font-family: inherit; }
 .journal-empty { margin-top: 22px; padding: 20px; border: 1px dashed #aeb8ad; border-radius: 12px; color: #5e6c65; background: #f8f8f3; }
+.candidate-holder { display: block; font-size: 1rem; font-weight: 750; }
+.candidate-subheading { display: block; width: fit-content; margin-top: 3px; font-size: .78rem; }
+.candidate-case-heading { display: grid; justify-items: start; gap: 3px; }
+.case-identity-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; margin: 7px 0; font-size: .8rem; }
+.case-identity-row > strong { color: #2e5742; }
+.case-identity-row > span { color: var(--muted); }
+.source-history { display: grid; gap: 9px; }
+.source-history-row { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; border-left: 2px solid var(--line); padding-left: 9px; }
+.source-history-row > time, .source-history-row > small { color: var(--muted); }
+.source-history-row > span, .source-history-row > small, .source-history-row > a { grid-column: 2; }
 @media (max-width: 700px) {
   .archie-nav { height: 52px; padding: 0 8px; gap: 5px; }
   .archie-brand { font-size: .62rem; white-space: nowrap; }

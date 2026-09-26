@@ -455,7 +455,7 @@ async function finishSearch(result) {
 
 async function loadCandidates() {
   try {
-    const response = await fetch(`${API}/api/posts?limit=2000&sort=newest&max_distance_miles=500`)
+    const response = await fetch(`${API}/api/candidate-cases?limit=2000&sort=newest&max_distance_miles=500`)
     if (!response.ok) return
     candidates.value = (await response.json()).filter(post => post.map_latitude != null && post.map_longitude != null)
     refreshCandidates()
@@ -464,10 +464,11 @@ async function loadCandidates() {
 
 function candidateCollection() {
   return { type: 'FeatureCollection', features: candidates.value.filter(post => inTimeline(post.reported_at || post.posted_at || post.first_seen_at)).map(post => ({
-    type: 'Feature', id: post.id, properties: { id: post.id, title: post.name || 'Candidate report', source: post.source,
+    type: 'Feature', id: post.case_id || post.id, properties: { id: post.case_id || post.id, primary_post_id: post.primary_post_id, title: post.holding_entity || post.custody_label || post.name || 'Candidate report', source: post.source_platform || post.source,
       source_id: post.source_id, source_url: post.source_url || '', reported_at: post.reported_at || '', posted_at: post.posted_at || '',
       first_seen_at: post.first_seen_at || '', location_text: post.location_text || '', match_score: post.match_score ?? 0,
-      distance_from_home_miles: post.distance_from_home_miles ?? null, location_precision: post.location_precision || '', image_url: post.image_url || '' },
+      distance_from_home_miles: post.distance_from_home_miles ?? null, location_precision: post.location_precision || '', image_url: post.image_url || '',
+      record_count: post.record_count || 1, external_ids: post.external_ids || [], holding_entity: post.holding_entity || '', custody_label: post.custody_label || '' },
     geometry: { type: 'Point', coordinates: [Number(post.map_longitude), Number(post.map_latitude)] }
   })) }
 }
@@ -707,7 +708,7 @@ async function createEvidenceFromCandidate() {
   const payload = { object_type: 'evidence', subtype: 'reported_observation', name: post.name || 'Candidate report',
       geometry: { type: 'Point', coordinates: [Number(post.map_longitude), Number(post.map_latitude)] },
       occurred_at: post.reported_at || null, epistemic_state: 'observed', confidence: 'possible',
-      properties: { evidence_type: 'reported_observation', source_type: 'public_report', resolution: 'unresolved', candidate_id: post.id, source: post.source, source_id: post.source_id, source_url: post.source_url, snapshot_title: post.name, reported_at: post.reported_at } }
+      properties: { evidence_type: 'reported_observation', source_type: 'public_report', resolution: 'unresolved', candidate_case_id: post.case_id || post.id, candidate_id: post.primary_post_id || post.id, source: post.source, source_id: post.source_id, source_url: post.source_url, snapshot_title: post.name, reported_at: post.reported_at } }
   const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
   if (!response.ok) { error.value = 'Could not create evidence marker'; return }
   const object = await response.json(); objects.value.unshift(object); refreshSource(); selected.value = object; selectedCandidate.value = null; recordCreatedObject(payload, object)
