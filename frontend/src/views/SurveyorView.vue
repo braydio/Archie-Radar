@@ -42,6 +42,7 @@ const links = ref([])
 const linkStartId = ref(null)
 const linkType = ref('association')
 const attachments = ref([])
+const tasks = ref([])
 const draftObject = ref(null)
 const accessDraftCoordinates = ref(null)
 const draftDrawId = ref(null)
@@ -81,6 +82,7 @@ let resizeObserver
 let geoWatchId = null
 let checkpointBusy = false
 let cameraHandleDrag = null
+let screenWakeLock = null
 
 const types = PIN_TYPES
 watch(snapSettings, settings => { try { localStorage.setItem(SNAP_STORAGE, JSON.stringify(settings)) } catch {} }, { deep: true })
@@ -101,7 +103,7 @@ watch(layerSettings, settings => {
   if (map?.getLayer('annual-landcover')) map.setLayoutProperty('annual-landcover', 'visibility', settings.landcover ? 'visible' : 'none')
   refreshCameraSource()
 }, { deep: true })
-watch(() => selected.value?.id, id => { attachments.value = []; refreshCameraSource(); if (id) loadAttachments(id) })
+watch(() => selected.value?.id, id => { attachments.value = []; tasks.value = []; refreshCameraSource(); if (id) { loadAttachments(id); loadTasks(id) } })
 function inTimeline(value) {
   if (timelineWindow.value.preset === 'all' || !value) return true
   const time = new Date(value).getTime()
@@ -288,7 +290,7 @@ async function loadActiveSession() {
     const requestedId = Number(route.query.session)
     const session = sessions.find(item => item.id === requestedId) || sessions.find(item => !item.ended_at)
     if (!session) return
-    if (!session.ended_at) activeSession.value = session
+    if (!session.ended_at) { activeSession.value = session; requestScreenWakeLock() }
     trackCoords.value = session.track_geojson?.type === 'LineString' ? session.track_geojson.coordinates : []
     trackTimes.value = trackCoords.value.map(() => null)
     refreshTrack()
@@ -302,7 +304,18 @@ async function startSearch() {
     body: JSON.stringify({ method: sessionMethod.value }) })
   if (!response.ok) { error.value = 'Could not start search session'; return }
   activeSession.value = await response.json(); trackCoords.value = []; trackTimes.value = []; locationWarning.value = ''; refreshTrack()
+  requestScreenWakeLock()
   beginLocationWatch()
+}
+
+async function requestScreenWakeLock() {
+  if (!activeSession.value || !navigator.wakeLock?.request || (screenWakeLock && !screenWakeLock.released)) return
+  try { screenWakeLock = await navigator.wakeLock.request('screen') } catch { /* Wake lock is an optional field-use convenience. */ }
+}
+
+async function releaseScreenWakeLock() {
+  try { await screenWakeLock?.release() } catch { /* Ignore an already released lock. */ }
+  screenWakeLock = null
 }
 
 async function endSearch() {
@@ -327,7 +340,7 @@ async function finishSearch(result) {
     } catch (err) { error.value = `Search saved, but coverage was not created: ${err.message}` }
   }
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
-  geoWatchId = null; activeSession.value = null; searchResultOpen.value = false; setCoveragePreview(null)
+  geoWatchId = null; activeSession.value = null; searchResultOpen.value = false; setCoveragePreview(null); releaseScreenWakeLock()
 }
 
 async function loadCandidates() {
@@ -434,7 +447,8 @@ async function saveDraft(payload) {
   cameraHeading.value = camera.placement.heading_degrees; cameraFov.value = camera.placement.fov_degrees; cameraRange.value = camera.placement.range_meters
   } else {
     const isZone = payload.kind === 'zone', isLine = payload.kind === 'line'
-    const properties = isZone && payload.subtype === 'searched' ? { searched_at: new Date().toISOString(), search_session_id: activeSession.value?.id || null, search_method: activeSession.value?.method || null } : {}
+    const properties = activeSession.value ? { search_session_id: activeSession.value.id } : {}
+    if (isZone && payload.subtype === 'searched') Object.assign(properties, { searched_at: new Date().toISOString(), search_session_id: activeSession.value?.id || null, search_method: activeSession.value?.method || null })
     const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ object_type: isZone ? 'zone' : isLine ? 'corridor' : payload.kind === 'note' ? 'note' : 'pin',
         subtype: payload.subtype || (payload.kind === 'note' ? 'field_note' : null), name: payload.name || (payload.kind === 'note' ? 'Field note' : null),
@@ -548,6 +562,43 @@ async function loadAttachments(objectId) {
     const response = await fetch(`${API}/api/surveyor/objects/${objectId}/attachments`)
     if (response.ok) attachments.value = await response.json()
   } catch { attachments.value = [] }
+}
+
+async function loadTasks(objectId) {
+  try {
+    const response = await fetch(`${API}/api/surveyor/tasks?map_object_id=${objectId}`)
+    if (response.ok) tasks.value = await response.json()
+  } catch { tasks.value = [] }
+}
+
+async function createTask(payload) {
+  try {
+    const response = await fetch(`${API}/api/surveyor/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(result.detail || 'Could not create follow-up')
+    tasks.value.unshift(result)
+  } catch (err) { error.value = err.message }
+}
+
+async function updateTask(task, status) {
+  try {
+    const response = await fetch(`${API}/api/surveyor/tasks/${task.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(result.detail || 'Could not update follow-up')
+    tasks.value = tasks.value.map(item => item.id === task.id ? result : item)
+  } catch (err) { error.value = err.message }
+}
+
+async function saveEvidence(properties) {
+  if (!selected.value) return
+  saving.value = true
+  try {
+    const response = await fetch(`${API}/api/surveyor/objects/${selected.value.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ properties }) })
+    const result = await response.json().catch(() => ({}))
+    if (!response.ok) throw new Error(result.detail || 'Could not save evidence details')
+    objects.value = objects.value.map(item => item.id === result.id ? result : item); selected.value = result; refreshSource()
+  } catch (err) { error.value = err.message }
+  finally { saving.value = false }
 }
 
 async function uploadAttachment(event) {
@@ -814,10 +865,14 @@ onMounted(() => {
   resizeObserver.observe(mapEl.value)
 })
 
-function onVisibilityChange() { if (document.visibilityState === 'hidden' && activeSession.value) saveSessionCheckpoint() }
+function onVisibilityChange() {
+  if (document.visibilityState === 'hidden' && activeSession.value) saveSessionCheckpoint()
+  if (document.visibilityState === 'visible' && activeSession.value) requestScreenWakeLock()
+}
 
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  releaseScreenWakeLock()
   resizeObserver?.disconnect(); draw?.stop()
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
   if (activeSession.value) saveSessionCheckpoint()
@@ -838,7 +893,7 @@ onBeforeUnmount(() => {
       <LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" @update:model-value="layerSettings = $event" @close="layerDrawerOpen = false" />
       <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
       <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" />
-      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" />
+      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" />
     </div>
 
     <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button @click="activateTool('access'); mobileMoreOpen=false">Property / access</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>

@@ -34,7 +34,7 @@ from .connectors.petkey import PetkeyConnector
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
-from .models import ArchieProfile, ArchieReferencePhoto, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorObjectLink, utcnow
+from .models import ArchieProfile, ArchieReferencePhoto, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorObjectLink, SurveyorTask, utcnow
 from .schemas import (
     FacebookBridgeIn,
     PetPostIn,
@@ -655,6 +655,33 @@ def create_session_coverage(session_id: int, payload: SurveyorCoverageIn, db: Se
     return _surveyor_out(row)
 
 
+@app.get("/api/surveyor/sessions/{session_id}/summary")
+def surveyor_session_summary(session_id: int, db: Session = Depends(get_db)):
+    session = db.get(SurveyorSearchSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Search session not found")
+    linked = [obj for obj in db.scalars(select(SurveyorMapObject))
+        if json.loads(obj.properties_json or "{}").get("search_session_id") == session_id]
+    object_ids = [obj.id for obj in linked]
+    event_conditions = [(SurveyorEvent.entity_type == "search_session") & (SurveyorEvent.entity_id == str(session_id))]
+    attachment_conditions = [SurveyorAttachment.search_session_id == session_id]
+    task_conditions = [SurveyorTask.search_session_id == session_id]
+    if object_ids:
+        ids = [str(item) for item in object_ids]
+        event_conditions.append((SurveyorEvent.entity_type == "map_object") & SurveyorEvent.entity_id.in_(ids))
+        attachment_conditions.append(SurveyorAttachment.map_object_id.in_(object_ids))
+        task_conditions.append(SurveyorTask.map_object_id.in_(object_ids))
+    events = list(db.scalars(select(SurveyorEvent).where(or_(*event_conditions)).order_by(SurveyorEvent.occurred_at.asc())))
+    attachments = list(db.scalars(select(SurveyorAttachment).where(or_(*attachment_conditions))))
+    tasks = list(db.scalars(select(SurveyorTask).where(or_(*task_conditions))))
+    by_type = {}
+    for obj in linked: by_type[obj.object_type] = by_type.get(obj.object_type, 0) + 1
+    coverage = [obj.id for obj in linked if obj.object_type == "zone" and json.loads(obj.properties_json or "{}").get("generated_from_route")]
+    return {"session": _session_output(session), "object_count": len(linked), "objects_by_type": by_type,
+        "attachment_count": len(attachments), "events": [_event_output(item) for item in events],
+        "coverage_objects": coverage, "tasks_created": len(tasks), "objects": [_surveyor_out(item) for item in linked]}
+
+
 @app.get("/api/surveyor/events", response_model=list[SurveyorEventOut])
 def list_surveyor_events(event_type: str | None = None, from_date: datetime | None = Query(None, alias="from"),
                          to_date: datetime | None = Query(None, alias="to"), limit: int = Query(500, ge=1, le=2000),
@@ -667,6 +694,39 @@ def list_surveyor_events(event_type: str | None = None, from_date: datetime | No
     if to_date:
         query = query.where(SurveyorEvent.occurred_at <= to_date)
     return [_event_output(row) for row in db.scalars(query.order_by(SurveyorEvent.occurred_at.desc()).limit(limit))]
+
+
+@app.get("/api/surveyor/brief")
+def surveyor_brief(db: Session = Depends(get_db)):
+    now = utcnow(); today = now.date()
+    tasks = list(db.scalars(select(SurveyorTask).where(SurveyorTask.status == "open")))
+    due_today = overdue = 0
+    for task in tasks:
+        if task.due_at is None: continue
+        due_date = task.due_at.date()
+        due_today += due_date == today
+        overdue += due_date < today
+    objects = list(db.scalars(select(SurveyorMapObject).where(or_(SurveyorMapObject.status.is_(None), SurveyorMapObject.status != "archived"))))
+    needs_search = sum(obj.object_type == "zone" and obj.subtype == "needs_search" for obj in objects)
+    needs_recheck = sum(obj.object_type == "zone" and obj.subtype == "needs_recheck" for obj in objects)
+    stale = 0
+    for obj in objects:
+        if obj.object_type != "zone" or obj.subtype != "searched": continue
+        try:
+            searched = datetime.fromisoformat(json.loads(obj.properties_json).get("searched_at", ""))
+            if searched.tzinfo is None: searched = searched.replace(tzinfo=timezone.utc)
+            stale += (now - searched).days > 30
+        except (TypeError, ValueError):
+            continue
+    unresolved = sum(obj.object_type == "evidence" and json.loads(obj.properties_json).get("resolution", "unresolved") == "unresolved" for obj in objects)
+    active_session = db.scalar(select(SurveyorSearchSession).where(SurveyorSearchSession.ended_at.is_(None)).order_by(SurveyorSearchSession.started_at.desc()).limit(1))
+    recent = db.scalar(select(func.count(SurveyorMapObject.id)).where(SurveyorMapObject.occurred_at >= now - timedelta(hours=24), SurveyorMapObject.object_type.in_(["pin", "evidence"]))) or 0
+    return {"open_tasks": len(tasks), "due_today": due_today, "overdue_tasks": overdue,
+        "needs_search_zones": needs_search, "needs_recheck_zones": needs_recheck,
+        "stale_search_zones": stale, "unresolved_evidence": unresolved,
+        "active_cameras": db.scalar(select(func.count(SurveyorTrailCamera.id)).where(SurveyorTrailCamera.retired_at.is_(None))) or 0,
+        "active_search_session": _session_output(active_session).model_dump(mode="json") if active_session else None,
+        "recent_observations_24h": recent}
 
 
 @app.get("/api/surveyor/objects/{object_id}/attachments", response_model=list[SurveyorAttachmentOut])
@@ -916,6 +976,7 @@ def update_surveyor_object(object_id: int, payload: SurveyorObjectPatch, db: Ses
     if row is None:
         raise HTTPException(status_code=404, detail="Surveyor object not found")
     before = _surveyor_out(row).model_dump(mode="json")
+    old_resolution = before.get("properties", {}).get("resolution")
     values = payload.model_dump(exclude_unset=True)
     if "geometry" in values:
         _save_surveyor_geometry(row, values.pop("geometry"))
@@ -928,6 +989,12 @@ def update_surveyor_object(object_id: int, payload: SurveyorObjectPatch, db: Ses
             setattr(row, key, value)
     _record_surveyor_event(db, "object_updated", "map_object", row.id, f"Updated {row.object_type}", before=before,
         after=_surveyor_out(row).model_dump(mode="json"), reversible=True)
+    if row.object_type == "evidence" and "properties" in values:
+        new_resolution = json.loads(row.properties_json).get("resolution", "unresolved")
+        if new_resolution != old_resolution:
+            event_type = "evidence_reopened" if new_resolution == "unresolved" else "evidence_resolved"
+            _record_surveyor_event(db, event_type, "map_object", row.id, f"Evidence {new_resolution.replace('_', ' ')}",
+                before={"resolution": old_resolution or "unresolved"}, after={"resolution": new_resolution})
     db.commit(); db.refresh(row)
     return _surveyor_out(row)
 

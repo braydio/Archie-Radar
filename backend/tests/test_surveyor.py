@@ -173,3 +173,23 @@ def test_session_route_coverage_buffers_in_meters(client: TestClient) -> None:
     assert result["properties"]["buffer_meters"] == 15
     assert result["bbox"][2] - result["bbox"][0] < 0.01
     assert result["bbox"][3] - result["bbox"][1] < 0.01
+    summary = client.get(f"/api/surveyor/sessions/{session['id']}/summary")
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["objects_by_type"]["zone"] == 1
+    assert summary.json()["coverage_objects"] == [result["id"]]
+
+
+def test_evidence_resolution_is_durable_and_journaled(client: TestClient) -> None:
+    created = client.post("/api/surveyor/objects", json={
+        "object_type": "evidence", "subtype": "reported_observation", "name": "Possible sighting",
+        "geometry": {"type": "Point", "coordinates": [-79.1, 35.8]},
+        "properties": {"evidence_type": "visual_sighting", "resolution": "unresolved"},
+    })
+    assert created.status_code == 201, created.text
+    object_id = created.json()["id"]
+    updated = client.patch(f"/api/surveyor/objects/{object_id}", json={
+        "properties": {"evidence_type": "visual_sighting", "resolution": "likely_not_archie"},
+    })
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["properties"]["resolution"] == "likely_not_archie"
+    assert client.get("/api/surveyor/events?event_type=evidence_resolved").json()
