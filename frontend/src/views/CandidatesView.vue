@@ -1,6 +1,7 @@
 <script>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CandidateCard from '../components/CandidateCard.vue'
+import FilterSection from '../components/FilterSection.vue'
 import SearchMap from '../components/SearchMap.vue'
 import { sourceLabel, statusLabel } from '../lib/format.js'
 
@@ -33,7 +34,7 @@ const DEFAULT_FILTERS = Object.freeze({
 
 export default {
   name: 'App',
-  components: { CandidateCard, SearchMap },
+  components: { CandidateCard, FilterSection, SearchMap },
   setup() {
     const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
     const posts = ref([])
@@ -46,6 +47,8 @@ export default {
     const error = ref('')
     const scanSummary = ref(null)
     const filtersOpen = ref(false)
+    const filterSectionOpen = ref({ area: true, appearance: true, markings: false, identification: false, queue: false })
+    const defaultsExpanded = ref(false)
     const setupOpen = ref(false)
     const sourcesOpen = ref(false)
     const showMap = ref(false)
@@ -205,6 +208,38 @@ export default {
       if (microchip.value === 'none') items.push('not microchipped')
       if (ageCompatible.value) items.push('age ~8')
       return items
+    })
+
+    const defaultTraitCount = computed(() => selectedDraftTraits.value.length)
+    const filterSummaries = computed(() => {
+      const label = value => String(value || '').replaceAll('_', ' ')
+      const join = values => values.filter(Boolean).join(' · ')
+      const appearance = join([
+        sex.value && label(sex.value), color.value && label(color.value), pattern.value && (pattern.value === 'striped' ? 'tabby' : label(pattern.value)),
+        coat.value && `${coat.value} hair`, altered.value && label(altered.value)
+      ])
+      const markings = join([
+        whiteChest.value !== 'any' && `White chest ${whiteChest.value}`,
+        whiteBelly.value !== 'any' && `White belly ${whiteBelly.value}`,
+        whitePaws.value !== 'any' && `White paws ${whitePaws.value}`,
+        whiteFace.value !== 'any' && `White face ${whiteFace.value}`
+      ])
+      const identification = join([
+        collar.value && (collar.value === 'none' ? 'No collar' : 'Collar'),
+        microchip.value && (microchip.value === 'none' ? 'Not microchipped' : 'Microchipped'),
+        ageCompatible.value && 'Age ~8', archieCompatible.value && 'Archie-compatible',
+        photoFilter.value !== 'any' && (photoFilter.value === 'with' ? 'Has photo' : 'No photo')
+      ])
+      const area = join([
+        maxDistance.value !== DEFAULT_FILTERS.maxDistance && (Number(maxDistance.value) >= 500 ? 'Any distance' : `${maxDistance.value} mi`),
+        ageDays.value && `Past ${ageDays.value} days`, notBefore.value !== DEFAULT_FILTERS.notBefore && (notBefore.value ? `Since ${notBefore.value}` : 'Older dates'),
+        source.value && sourceLabel(source.value), status.value && statusLabel(status.value)
+      ])
+      const queue = join([minScore.value && `Signals ${minScore.value}+`, hideDuplicates.value !== DEFAULT_FILTERS.hideDuplicates && (hideDuplicates.value ? 'Hide reposts' : 'Show reposts')]) || 'Default'
+      return {
+        area: area || '25 mi · Since Jun 1', appearance: appearance || 'Archie defaults', markings,
+        identification, queue
+      }
     })
 
     function isDefaultDraft(key, value) { return DEFAULT_FILTERS[key] === value }
@@ -423,6 +458,7 @@ export default {
     return {
       API, posts, referencePhotos, searchConfig, queueStats, loading, uploading, error, scanSummary,
       filtersOpen, setupOpen, sourcesOpen, showMap, filterSheet, filterButton, state, sort,
+      filterSectionOpen, defaultsExpanded, defaultTraitCount, filterSummaries,
       source, status, sex, photoFilter, ageDays, minScore, maxDistance, hideDuplicates, color, pattern, coat,
       collar, microchip, altered, whiteChest, whiteBelly, whitePaws, whiteFace, ageCompatible, archieCompatible,
       notBefore, traitMode, queueTabs, sourceOptions, statusOptions, setupNeededCount, activeSourceCount, mappedCount,
@@ -465,19 +501,28 @@ export default {
     </div>
 
     <section v-if="filtersOpen" ref="filterSheet" class="filter-sheet">
-      <div class="filter-intro">
-        <div><p class="eyebrow">FILTERS</p><h2>Review selections</h2><p class="filter-intro-copy">Selections below are staged until you press <strong>Apply Selections</strong>.</p></div>
-        <button class="collapse-button" @click="filtersOpen = false">Collapse</button>
+      <div class="filter-sheet-top">
+        <div class="filter-intro">
+          <div><p class="eyebrow">FILTERS</p><h2>Review selections</h2><p class="filter-intro-copy">Selections below are staged until you press <strong>Apply Selections</strong>.</p></div>
+          <button class="collapse-button" @click="filtersOpen = false">Collapse</button>
+        </div>
+        <div class="filter-actions three-way top-actions">
+          <button class="secondary-button" @click="clearSelections">Clear Selections</button>
+          <button class="secondary-button" @click="applyDefaults">Apply Defaults</button>
+          <button class="primary" @click="applySelections">Apply Selections</button>
+        </div>
       </div>
 
       <div class="trait-mode-toggle">
-        <button :class="{ active: traitMode === 'prioritize' }" @click="traitMode = 'prioritize'">Prioritize selected traits</button>
-        <button :class="{ active: traitMode === 'hide' }" @click="traitMode = 'hide'">Hide non-matching traits</button>
+        <button :class="{ active: traitMode === 'prioritize' }" title="Move candidates matching selected traits higher without hiding others" @click="traitMode = 'prioritize'">Prioritize</button>
+        <button :class="{ active: traitMode === 'hide' }" title="Hide candidates that do not match selected traits" @click="traitMode = 'hide'">Hide mismatches</button>
       </div>
-      <div class="default-trait-strip"><span v-for="item in selectedDraftTraits" :key="item" class="default-trait-chip">{{ item }}</span></div>
+      <div class="default-trait-summary">
+        <button type="button" class="default-trait-summary-button" :aria-expanded="defaultsExpanded" @click="defaultsExpanded = !defaultsExpanded">Archie defaults · {{ defaultTraitCount }} traits <span>{{ defaultsExpanded ? 'Hide defaults' : 'Show defaults' }}</span></button>
+        <div v-if="defaultsExpanded" class="default-trait-strip"><span v-for="item in selectedDraftTraits" :key="item" class="default-trait-chip">{{ item }}</span></div>
+      </div>
 
-      <div class="filter-section">
-        <h3>Area & date</h3>
+      <FilterSection title="Area & Date" :open="filterSectionOpen.area" :summary="filterSummaries.area" @toggle="filterSectionOpen.area = !filterSectionOpen.area">
         <div class="filter-grid">
           <label>Distance<select v-model.number="maxDistance"><option :value="10">10 miles</option><option :value="25">25 miles</option><option :value="50">50 miles</option><option :value="100">100 miles</option><option :value="500">Any distance</option></select></label>
           <label>Report age<select v-model.number="ageDays"><option :value="0">Any age</option><option :value="1">Past 24 hours</option><option :value="3">Past 3 days</option><option :value="7">Past 7 days</option><option :value="14">Past 2 weeks</option><option :value="30">Past 30 days</option><option :value="60">Past 60 days</option></select></label>
@@ -485,10 +530,9 @@ export default {
           <label>Source<select v-model="source"><option value="">All sources</option><option v-for="item in sourceOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
           <label>Status<select v-model="status"><option value="">All statuses</option><option v-for="item in statusOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
         </div>
-      </div>
+      </FilterSection>
 
-      <div class="filter-section">
-        <h3>Core appearance</h3>
+      <FilterSection title="Appearance" :open="filterSectionOpen.appearance" :summary="filterSummaries.appearance" @toggle="filterSectionOpen.appearance = !filterSectionOpen.appearance">
         <div class="filter-grid grouped-filters">
           <label :class="{ defaulted: isDefaultDraft('sex', sex) }">Sex<select v-model="sex"><option value="">Any / unknown</option><option value="male">Male</option><option value="female">Female</option><option value="unknown">Unknown only</option></select></label>
           <label :class="{ defaulted: isDefaultDraft('color', color) }">Color<select v-model="color"><option value="">Any color</option><option value="orange">Orange / ginger</option><option value="black">Black</option><option value="gray">Gray / blue</option><option value="white">White</option><option value="brown">Brown</option><option value="cream">Cream / buff</option><option value="calico">Calico</option><option value="tortoiseshell">Tortoiseshell</option></select></label>
@@ -496,20 +540,18 @@ export default {
           <label :class="{ defaulted: isDefaultDraft('coat', coat) }">Coat<select v-model="coat"><option value="">Any coat</option><option value="short">Short hair</option><option value="medium">Medium hair</option><option value="long">Long hair</option></select></label>
           <label :class="{ defaulted: isDefaultDraft('altered', altered) }">Altered<select v-model="altered"><option value="">Any / unknown</option><option value="neutered">Neutered</option><option value="intact">Intact</option><option value="spayed">Spayed</option></select></label>
         </div>
-      </div>
+      </FilterSection>
 
-      <div class="filter-section">
-        <h3>Markings & body parts</h3>
+      <FilterSection title="Markings" :open="filterSectionOpen.markings" :summary="filterSummaries.markings" :badge-count="[whiteChest, whiteBelly, whitePaws, whiteFace].filter(v => v !== 'any').length" @toggle="filterSectionOpen.markings = !filterSectionOpen.markings">
         <div class="filter-grid grouped-filters">
           <label :class="{ defaulted: isDefaultDraft('whiteChest', whiteChest) }">White chest<select v-model="whiteChest"><option value="any">Any / unknown</option><option value="yes">White chest stated</option><option value="no">No white chest stated</option></select></label>
           <label>White belly<select v-model="whiteBelly"><option value="any">Any / unknown</option><option value="yes">White belly stated</option><option value="no">No white belly stated</option></select></label>
           <label>White paws / feet<select v-model="whitePaws"><option value="any">Any / unknown</option><option value="yes">White paws stated</option><option value="no">No white paws stated</option></select></label>
           <label>White face / muzzle<select v-model="whiteFace"><option value="any">Any / unknown</option><option value="yes">White face stated</option><option value="no">No white face stated</option></select></label>
         </div>
-      </div>
+      </FilterSection>
 
-      <div class="filter-section">
-        <h3>Identification & context</h3>
+      <FilterSection title="Identification" :open="filterSectionOpen.identification" :summary="filterSummaries.identification" :badge-count="[collar, microchip].filter(Boolean).length + Number(ageCompatible) + Number(archieCompatible) + Number(photoFilter !== 'any')" @toggle="filterSectionOpen.identification = !filterSectionOpen.identification">
         <div class="filter-grid grouped-filters">
           <label :class="{ defaulted: isDefaultDraft('collar', collar) }">Collar<select v-model="collar"><option value="">Any / unknown</option><option value="none">No collar</option><option value="wearing">Wearing collar</option></select></label>
           <label :class="{ defaulted: isDefaultDraft('microchip', microchip) }">Microchip<select v-model="microchip"><option value="">Any / unknown</option><option value="none">Not microchipped</option><option value="yes">Microchipped</option></select></label>
@@ -517,21 +559,14 @@ export default {
           <label class="checkbox-label"><input type="checkbox" v-model="archieCompatible" /> Archie-compatible only</label>
           <label>Photo<select v-model="photoFilter"><option value="any">With or without photo</option><option value="with">Has photo</option><option value="without">No photo</option></select></label>
         </div>
-      </div>
+      </FilterSection>
 
-      <div class="filter-section compact-filter-section">
-        <h3>Queue behavior</h3>
+      <FilterSection title="Queue Behavior" :open="filterSectionOpen.queue" :summary="filterSummaries.queue" :badge-count="Number(minScore !== 0) + Number(hideDuplicates !== DEFAULT_FILTERS.hideDuplicates)" @toggle="filterSectionOpen.queue = !filterSectionOpen.queue">
         <div class="filter-grid">
           <label>Match-signal floor<select v-model.number="minScore"><option :value="0">Show all</option><option :value="40">40+</option><option :value="55">55+</option><option :value="65">65+</option><option :value="75">75+</option></select></label>
           <label class="checkbox-label"><input type="checkbox" v-model="hideDuplicates" /> Hide confirmed image reposts</label>
         </div>
-      </div>
-
-      <div class="filter-actions three-way">
-        <button class="secondary-button" @click="clearSelections">Clear Selections</button>
-        <button class="secondary-button" @click="applyDefaults">Apply Defaults</button>
-        <button class="primary" @click="applySelections">Apply Selections</button>
-      </div>
+      </FilterSection>
     </section>
 
     <section v-if="setupOpen" class="setup-panel">

@@ -22,7 +22,6 @@ export default {
   emits: ['review'],
   setup(props, { emit }) {
     const imageFailed = ref(false)
-    const descriptionOpen = ref(false)
     watch(() => props.post.image_url, () => { imageFailed.value = false })
 
     const priorityClass = computed(() => {
@@ -39,6 +38,7 @@ export default {
     const eventAt = computed(() => props.post.reported_at || null)
     const addedAt = computed(() => props.post.first_seen_at || null)
     const title = computed(() => props.post.name || `${statusLabel(props.post.status) || 'Found'} cat`)
+    const usefulTitle = computed(() => !/^(found\s+)?cat$|^unknown$/i.test(String(title.value || '').trim()))
     const detailsAvailable = computed(() => Boolean(props.post.nearest_landmark || props.post.finder_message || props.post.contact_info || props.post.contact_url))
     const mapHref = computed(() => {
       const lat = props.post.map_latitude
@@ -63,7 +63,7 @@ export default {
       for (const value of traits.patterns || []) add(value === 'striped' ? 'striped / tabby' : value, value === 'striped' ? 'match' : 'conflict')
       if (traits.coat) add(`${traits.coat} hair`, traits.coat === 'short' ? 'match' : 'conflict')
       if (traits.white_chest === true) add('white chest', 'match')
-      if (traits.white_belly === true) add('white belly', 'conflict')
+      if (traits.white_belly === true) add('white belly', 'neutral')
       if (traits.white_belly === false) add('no white belly', 'neutral')
       if (traits.white_paws === true) add('white paws', 'neutral')
       if (traits.white_face === true) add('white face', 'neutral')
@@ -72,7 +72,18 @@ export default {
       if (traits.microchip === 'none') add('not microchipped', 'match')
       if (traits.microchip === 'yes') add('microchipped', 'conflict')
       if (traits.age_years != null) add(`~${traits.age_years} yr`, Math.abs(Number(traits.age_years) - 8) <= 2.5 ? 'match' : 'neutral')
-      return tokens.slice(0, 10)
+      return tokens
+    })
+
+    const primaryTraitTokens = computed(() => {
+      const priority = [/orange/i, /striped|tabby/i, /male|female/i, /white chest/i, /short hair/i, /neutered|spayed|intact/i, /collar/i, /microchip/i, /age|yr/i, /white paws/i, /white face/i]
+      return [...traitTokens.value].sort((a, b) => {
+        if (a.state === 'conflict' && b.state !== 'conflict') return -1
+        if (b.state === 'conflict' && a.state !== 'conflict') return 1
+        const ai = priority.findIndex(pattern => pattern.test(a.label))
+        const bi = priority.findIndex(pattern => pattern.test(b.label))
+        return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi)
+      }).slice(0, 5)
     })
 
     const reasonSummary = computed(() => {
@@ -82,7 +93,6 @@ export default {
       } catch { return [] }
     })
 
-    const descriptionLong = computed(() => String(props.post.description || '').length > 180)
     const colorClass = computed(() => {
       const colors = props.post.parsed_traits?.colors || []
       if (colors.includes('orange')) return 'coat-orange'
@@ -96,9 +106,9 @@ export default {
     function review(reviewState) { emit('review', props.post, reviewState) }
 
     return {
-      imageFailed, descriptionOpen, priorityClass, photoPct, hasPhoto, sourceAccent,
-      sourcePostedAt, eventAt, addedAt, title, detailsAvailable, mapHref, distanceText,
-      traitTokens, reasonSummary, descriptionLong, colorClass,
+      imageFailed, priorityClass, photoPct, hasPhoto, sourceAccent,
+      sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText,
+      traitTokens, primaryTraitTokens, reasonSummary, colorClass,
       sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review
     }
   }
@@ -125,7 +135,7 @@ export default {
       </div>
 
       <div class="title-row">
-        <h2>{{ title }}</h2>
+        <h2 :class="{ 'generic-title': !usefulTitle }">{{ title }}</h2>
         <a v-if="post.source_url" class="original-link prominent" :href="post.source_url" target="_blank" rel="noopener">Original ↗</a>
       </div>
 
@@ -139,12 +149,6 @@ export default {
           <span>· {{ dateOnly(sourcePostedAt) }}</span>
         </template>
       </div>
-      <div class="meta-bar">
-        <span v-if="Number(post.match_score || 0) > 0" class="score-pill">match signals {{ Math.round(post.match_score || 0) }}/100</span>
-        <span v-else class="score-pill weak">limited match signals</span>
-        <span v-if="sourcePostedAt && (!eventAt || dateOnly(sourcePostedAt) !== dateOnly(eventAt))" class="date-primary">Posted {{ dateOnly(sourcePostedAt) }}</span>
-      </div>
-
       <div v-if="post.location_text || distanceText" class="address-row">
         <div>
           <strong v-if="post.location_text">{{ post.location_text }}</strong>
@@ -153,42 +157,45 @@ export default {
         <a v-if="mapHref" :href="mapHref" target="_blank" rel="noopener">Map ↗</a>
       </div>
 
-      <div v-if="traitTokens.length" class="trait-row" aria-label="Traits parsed from listing text">
-        <span v-for="token in traitTokens" :key="`${token.label}-${token.state}`" :class="['trait-chip', token.state]">{{ token.label }}</span>
+      <div v-if="primaryTraitTokens.length" class="trait-row" aria-label="Most relevant traits parsed from listing text">
+        <span v-for="token in primaryTraitTokens" :key="`${token.label}-${token.state}`" :class="['trait-chip', token.state]">{{ token.label }}</span>
+        <span v-if="traitTokens.length > primaryTraitTokens.length" class="trait-overflow">+{{ traitTokens.length - primaryTraitTokens.length }} more</span>
       </div>
 
-      <div v-if="post.description" class="description-wrap">
-        <p :class="['description', { clamped: descriptionLong && !descriptionOpen }]">{{ post.description }}</p>
-        <button v-if="descriptionLong" class="inline-button" @click="descriptionOpen = !descriptionOpen">{{ descriptionOpen ? 'Show less' : 'More' }}</button>
+      <div class="meta-bar mobile-detail-summary">
+        <span v-if="Number(post.match_score || 0) > 0" class="score-pill">match signals {{ Math.round(post.match_score || 0) }}/100</span>
+        <span v-else class="score-pill weak">limited match signals</span>
+        <span v-if="sourcePostedAt && (!eventAt || dateOnly(sourcePostedAt) !== dateOnly(eventAt))" class="date-primary">Posted {{ dateOnly(sourcePostedAt) }}</span>
       </div>
 
-      <details v-if="reasonSummary.length" class="priority-details">
-        <summary>Other priority reasons</summary>
-        <ul><li v-for="reason in reasonSummary" :key="reason">{{ reason }}</li></ul>
-      </details>
-
-      <p v-if="post.duplicate_of_post_id" class="duplicate-note">Image matches candidate #{{ post.duplicate_of_post_id }}</p>
-
-      <details v-if="detailsAvailable" class="finder-details">
-        <summary>Contact & listing details</summary>
+      <details class="candidate-more-details">
+        <summary>More details</summary>
+        <section v-if="post.description" class="more-detail-section">
+          <h3>Description</h3><p class="description">{{ post.description }}</p>
+        </section>
+        <section v-if="reasonSummary.length || post.duplicate_of_post_id || post.match_score" class="more-detail-section">
+          <h3>Match information</h3>
+          <p v-if="post.match_score" class="score-pill">Match signals {{ Math.round(post.match_score) }}/100</p>
+          <p v-if="post.duplicate_of_post_id" class="duplicate-note">Image matches candidate #{{ post.duplicate_of_post_id }}</p>
+          <ul v-if="reasonSummary.length"><li v-for="reason in reasonSummary" :key="reason">{{ reason }}</li></ul>
+        </section>
+        <section class="more-detail-section">
+          <h3>Listing</h3>
+          <dl>
+            <template v-if="post.source_id"><dt>Source ID</dt><dd>{{ post.source_id }}</dd></template>
+            <template v-if="sourcePostedAt"><dt>Posted</dt><dd>{{ exactDate(sourcePostedAt) }}</dd></template>
+            <template v-if="eventAt"><dt>Found / sighted</dt><dd>{{ exactDate(eventAt) }}</dd></template>
+            <template v-if="addedAt"><dt>Added to Radar</dt><dd>{{ exactDate(addedAt) }}</dd></template>
+          </dl>
+        </section>
+        <section v-if="Object.keys(post.parsed_traits || {}).length" class="more-detail-section">
+          <h3>Parsed traits</h3>
         <dl>
-          <template v-if="post.nearest_landmark"><dt>Nearest landmark</dt><dd>{{ post.nearest_landmark }}</dd></template>
-          <template v-if="post.finder_message"><dt>Finder message</dt><dd>{{ post.finder_message }}</dd></template>
-          <template v-if="post.contact_info"><dt>Contact</dt><dd>{{ post.contact_info }}</dd></template>
-          <template v-if="post.contact_url"><dt>Contact link</dt><dd><a class="detail-link" :href="post.contact_url" target="_blank" rel="noopener">Open contact ↗</a></dd></template>
-        </dl>
-      </details>
-
-      <details class="full-details">
-        <summary>Full parsed details</summary>
-        <dl>
-          <template v-if="post.source_id"><dt>Source ID</dt><dd>{{ post.source_id }}</dd></template>
-          <template v-if="sourcePostedAt"><dt>Posted</dt><dd>{{ exactDate(sourcePostedAt) }}</dd></template>
-          <template v-if="eventAt"><dt>Found / sighted</dt><dd>{{ exactDate(eventAt) }}</dd></template>
-          <template v-if="addedAt"><dt>Added to Radar</dt><dd>{{ exactDate(addedAt) }}</dd></template>
           <template v-if="post.parsed_traits?.colors?.length"><dt>Colors</dt><dd>{{ post.parsed_traits.colors.join(', ') }}</dd></template>
           <template v-if="post.parsed_traits?.patterns?.length"><dt>Patterns</dt><dd>{{ post.parsed_traits.patterns.join(', ') }}</dd></template>
           <template v-if="post.parsed_traits?.coat"><dt>Coat</dt><dd>{{ post.parsed_traits.coat }}</dd></template>
+          <template v-if="post.sex"><dt>Sex</dt><dd>{{ post.sex }}</dd></template>
+          <template v-if="post.parsed_traits?.altered_status"><dt>Altered</dt><dd>{{ post.parsed_traits.altered_status }}</dd></template>
           <template v-if="post.parsed_traits?.white_chest != null"><dt>White chest</dt><dd>{{ post.parsed_traits.white_chest ? 'yes' : 'no' }}</dd></template>
           <template v-if="post.parsed_traits?.white_belly != null"><dt>White belly</dt><dd>{{ post.parsed_traits.white_belly ? 'yes' : 'no' }}</dd></template>
           <template v-if="post.parsed_traits?.white_paws != null"><dt>White paws</dt><dd>{{ post.parsed_traits.white_paws ? 'yes' : 'no' }}</dd></template>
@@ -197,6 +204,16 @@ export default {
           <template v-if="post.parsed_traits?.microchip && post.parsed_traits.microchip !== 'unknown'"><dt>Microchip</dt><dd>{{ post.parsed_traits.microchip }}</dd></template>
           <template v-if="post.parsed_traits?.age_years != null"><dt>Age</dt><dd>~{{ post.parsed_traits.age_years }} years</dd></template>
         </dl>
+        </section>
+        <section v-if="detailsAvailable" class="more-detail-section">
+          <h3>Contact & listing details</h3>
+          <dl>
+            <template v-if="post.nearest_landmark"><dt>Nearest landmark</dt><dd>{{ post.nearest_landmark }}</dd></template>
+            <template v-if="post.finder_message"><dt>Finder message</dt><dd>{{ post.finder_message }}</dd></template>
+            <template v-if="post.contact_info"><dt>Contact</dt><dd>{{ post.contact_info }}</dd></template>
+            <template v-if="post.contact_url"><dt>Contact link</dt><dd><a class="detail-link" :href="post.contact_url" target="_blank" rel="noopener">Open contact ↗</a></dd></template>
+          </dl>
+        </section>
       </details>
 
       <div class="review-actions">
