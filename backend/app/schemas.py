@@ -144,7 +144,7 @@ class SurveyorObjectIn(BaseModel):
     occurred_at: datetime | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None
-    notes: str = ""
+    notes: str = Field(default="", max_length=20000)
 
 
 class SurveyorObjectPatch(BaseModel):
@@ -160,7 +160,7 @@ class SurveyorObjectPatch(BaseModel):
     occurred_at: datetime | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None
-    notes: str | None = None
+    notes: str | None = Field(default=None, max_length=20000)
 
 
 class SurveyorObjectOut(BaseModel):
@@ -181,5 +181,132 @@ class SurveyorObjectOut(BaseModel):
     centroid_lat: float | None
     centroid_lon: float | None
     bbox: list[float] | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SurveyorCameraIn(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    heading_degrees: float = Field(default=0, ge=0, le=360)
+    fov_degrees: float = Field(default=60, ge=1, le=179)
+    range_meters: float = Field(default=15, gt=0, le=5000)
+    camera_model: str = ""
+    power_type: str = ""
+    notes: str = ""
+    installed_at: datetime | None = None
+
+
+class SurveyorCameraUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=180)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    heading_degrees: float | None = Field(default=None, ge=0, le=360)
+    fov_degrees: float | None = Field(default=None, ge=1, le=179)
+    range_meters: float | None = Field(default=None, gt=0, le=5000)
+    camera_model: str | None = None
+    power_type: str | None = None
+    notes: str | None = None
+    save_as_new_placement: bool = False
+
+
+class SurveyorCameraOut(BaseModel):
+    id: int
+    map_object_id: int
+    name: str
+    camera_model: str
+    power_type: str
+    notes: str
+    retired_at: datetime | None
+    placement: dict | None
+    history: list[dict]
+
+
+class SurveyorSessionIn(BaseModel):
+    method: Literal["walking", "bike", "car", "stationary_observation", "camera_maintenance", "flyering", "other"]
+    started_at: datetime | None = None
+    notes: str = ""
+
+
+class SurveyorSessionUpdate(BaseModel):
+    ended_at: datetime | None = None
+    track_geojson: dict | None = None
+    distance_meters: float | None = Field(default=None, ge=0)
+    notes: str | None = None
+    result_summary: str | None = None
+
+
+class SurveyorSessionCheckpoint(BaseModel):
+    track_geojson: dict
+    distance_meters: float = Field(ge=0)
+
+
+class SurveyorSessionOut(BaseModel):
+    id: int
+    method: str
+    started_at: datetime
+    ended_at: datetime | None
+    track_geojson: dict | None
+    distance_meters: float | None
+    notes: str
+    result_summary: str
+    created_at: datetime
+
+
+class SurveyorEventOut(BaseModel):
+    id: int
+    event_type: str
+    entity_type: str
+    entity_id: str
+    action: str
+    before: dict | None
+    after: dict | None
+    occurred_at: datetime
+    created_at: datetime
+    reversible: bool
+    notes: str
+
+
+class SurveyorAttachmentOut(BaseModel):
+    id: int
+    map_object_id: int | None
+    search_session_id: int | None
+    attachment_type: str
+    media_url: str | None
+    external_url: str | None
+    caption: str
+    observed_at: datetime | None
+    source: str
+    created_at: datetime
+
+
+class SurveyorLinkIn(BaseModel):
+    source_object_id: int
+    target_object_id: int
+    link_type: Literal["observed_movement", "hypothesized_movement", "association", "possible_corridor", "evidence_for", "evidence_against", "custom"] = "association"
+    line_style: Literal["solid", "dashed", "dotted", "double_arrow"] = "dotted"
+    label: str = ""
+    notes: str = ""
+    vertices: list[list[float]] = Field(default_factory=list)
+
+
+class SurveyorLinkPatch(BaseModel):
+    link_type: Literal["observed_movement", "hypothesized_movement", "association", "possible_corridor", "evidence_for", "evidence_against", "custom"] | None = None
+    line_style: Literal["solid", "dashed", "dotted", "double_arrow"] | None = None
+    label: str | None = None
+    notes: str | None = None
+    vertices: list[list[float]] | None = None
+
+
+class SurveyorLinkOut(BaseModel):
+    id: int
+    source_object_id: int
+    target_object_id: int
+    link_type: str
+    line_style: str
+    label: str
+    notes: str
+    geometry: dict
     created_at: datetime
     updated_at: datetime

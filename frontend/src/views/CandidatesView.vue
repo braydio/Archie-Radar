@@ -556,6 +556,6 @@ export default {
 
     <div class="results-heading"><div><p class="eyebrow">REVIEW QUEUE</p><h2>{{ posts.length }} {{ state === 'new' ? 'new candidates' : 'candidates' }}</h2></div><div class="results-meta"><span v-if="mappedCount">{{ mappedCount }} on map</span><span v-if="loading">Updating…</span></div></div>
     <p v-if="!loading && !posts.length" class="empty">Nothing in this view. Widen a filter or run a fresh scan.</p>
-    <section class="candidate-list"><CandidateCard v-for="(post, index) in posts" :key="post.id" :post="post" :rank="index + 1" @review="review" /></section>
+    <section class="candidate-list"><CandidateCard v-for="(post, index) in posts" :id="`post-${post.id}`" :key="post.id" :post="post" :rank="index + 1" @review="review" /></section>
   </main>
 </template>

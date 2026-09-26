@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import io
 import json
 import logging
 import re
@@ -11,12 +12,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete, desc, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from shapely.geometry import shape as shape_geojson
+from PIL import Image
 
 from .connectors.orange_county import OrangeCountyFoundCatsConnector
 from .connectors.pawboost import PawBoostConnector
@@ -28,7 +31,7 @@ from .connectors.petkey import PetkeyConnector
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
-from .models import ArchieProfile, ArchieReferencePhoto, PetPost, PostVision, SurveyorMapObject
+from .models import ArchieProfile, ArchieReferencePhoto, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorObjectLink, utcnow
 from .schemas import (
     FacebookBridgeIn,
     PetPostIn,
@@ -42,6 +45,18 @@ from .schemas import (
     SurveyorObjectIn,
     SurveyorObjectOut,
     SurveyorObjectPatch,
+    SurveyorCameraIn,
+    SurveyorCameraUpdate,
+    SurveyorCameraOut,
+    SurveyorSessionIn,
+    SurveyorSessionOut,
+    SurveyorSessionUpdate,
+    SurveyorSessionCheckpoint,
+    SurveyorEventOut,
+    SurveyorAttachmentOut,
+    SurveyorLinkIn,
+    SurveyorLinkPatch,
+    SurveyorLinkOut,
 )
 from .service import (
     get_or_create_profile,
@@ -367,6 +382,352 @@ def _save_surveyor_geometry(row: SurveyorMapObject, geometry: dict):
     row.bbox_west, row.bbox_south, row.bbox_east, row.bbox_north = west, south, east, north
 
 
+def _camera_output(db: Session, camera: SurveyorTrailCamera) -> SurveyorCameraOut:
+    placements = list(db.scalars(select(SurveyorCameraPlacement).where(
+        SurveyorCameraPlacement.camera_id == camera.id
+    ).order_by(SurveyorCameraPlacement.installed_at.desc())))
+    def placement_dict(row):
+        return {"id": row.id, "latitude": row.latitude, "longitude": row.longitude,
+                "heading_degrees": row.heading_degrees, "fov_degrees": row.fov_degrees,
+                "range_meters": row.range_meters, "installed_at": row.installed_at,
+                "removed_at": row.removed_at, "notes": row.notes}
+    active = next((item for item in placements if item.removed_at is None), None)
+    return SurveyorCameraOut(id=camera.id, map_object_id=camera.map_object_id, name=camera.name,
+        camera_model=camera.camera_model, power_type=camera.power_type, notes=camera.notes,
+        retired_at=camera.retired_at, placement=placement_dict(active) if active else None,
+        history=[placement_dict(item) for item in placements])
+
+
+def _record_surveyor_event(db: Session, event_type: str, entity_type: str, entity_id: int | str, action: str,
+                           before: dict | None = None, after: dict | None = None, reversible: bool = False, notes: str = ""):
+    db.add(SurveyorEvent(event_type=event_type, entity_type=entity_type, entity_id=str(entity_id), action=action,
+        before_json=json.dumps(before, default=str) if before is not None else None,
+        after_json=json.dumps(after, default=str) if after is not None else None, reversible=reversible, notes=notes))
+
+
+def _event_output(row: SurveyorEvent) -> SurveyorEventOut:
+    return SurveyorEventOut(id=row.id, event_type=row.event_type, entity_type=row.entity_type, entity_id=row.entity_id,
+        action=row.action, before=json.loads(row.before_json) if row.before_json else None,
+        after=json.loads(row.after_json) if row.after_json else None, occurred_at=row.occurred_at,
+        created_at=row.created_at, reversible=row.reversible, notes=row.notes)
+
+
+def _session_output(row: SurveyorSearchSession) -> SurveyorSessionOut:
+    return SurveyorSessionOut(id=row.id, method=row.method, started_at=row.started_at, ended_at=row.ended_at,
+        track_geojson=json.loads(row.track_geojson) if row.track_geojson else None,
+        distance_meters=row.distance_meters, notes=row.notes, result_summary=row.result_summary, created_at=row.created_at)
+
+
+def _attachment_output(row: SurveyorAttachment) -> SurveyorAttachmentOut:
+    url = f"/media/{row.storage_path}" if row.storage_path else None
+    return SurveyorAttachmentOut(id=row.id, map_object_id=row.map_object_id, search_session_id=row.search_session_id,
+        attachment_type=row.attachment_type, media_url=url, external_url=row.external_url, caption=row.caption,
+        observed_at=row.observed_at, source=row.source, created_at=row.created_at)
+
+
+def _link_output(db: Session, row: SurveyorObjectLink) -> SurveyorLinkOut:
+    source = db.get(SurveyorMapObject, row.source_object_id)
+    target = db.get(SurveyorMapObject, row.target_object_id)
+    if source is None or target is None:
+        raise HTTPException(status_code=409, detail="A linked object no longer exists")
+    coordinates = [[source.centroid_lon, source.centroid_lat]]
+    if row.vertices_geojson:
+        coordinates.extend(json.loads(row.vertices_geojson))
+    coordinates.append([target.centroid_lon, target.centroid_lat])
+    geometry = {"type": "LineString", "coordinates": coordinates}
+    return SurveyorLinkOut(id=row.id, source_object_id=row.source_object_id, target_object_id=row.target_object_id,
+        link_type=row.link_type, line_style=row.line_style, label=row.label, notes=row.notes, geometry=geometry,
+        created_at=row.created_at, updated_at=row.updated_at)
+
+
+@app.get("/api/surveyor/cameras", response_model=list[SurveyorCameraOut])
+def list_surveyor_cameras(db: Session = Depends(get_db)):
+    cameras = db.scalars(select(SurveyorTrailCamera).where(SurveyorTrailCamera.retired_at.is_(None)).order_by(SurveyorTrailCamera.name))
+    return [_camera_output(db, camera) for camera in cameras]
+
+
+@app.post("/api/surveyor/cameras", response_model=SurveyorCameraOut, status_code=201)
+def create_surveyor_camera(payload: SurveyorCameraIn, db: Session = Depends(get_db)):
+    map_object = SurveyorMapObject(object_type="trail_camera", subtype="camera", name=payload.name,
+        style_json="{}", properties_json="{}", status="active", epistemic_state="observed", notes=payload.notes)
+    _save_surveyor_geometry(map_object, {"type": "Point", "coordinates": [payload.longitude, payload.latitude]})
+    db.add(map_object); db.flush()
+    camera = SurveyorTrailCamera(map_object_id=map_object.id, name=payload.name,
+        camera_model=payload.camera_model, power_type=payload.power_type, notes=payload.notes)
+    db.add(camera); db.flush()
+    placement = SurveyorCameraPlacement(camera_id=camera.id, latitude=payload.latitude, longitude=payload.longitude,
+        heading_degrees=payload.heading_degrees % 360, fov_degrees=payload.fov_degrees,
+        range_meters=payload.range_meters, installed_at=payload.installed_at or utcnow(), notes=payload.notes)
+    db.add(placement); db.commit(); db.refresh(camera)
+    _record_surveyor_event(db, "camera_created", "trail_camera", camera.id, f"Installed {camera.name}",
+        after=_camera_output(db, camera).model_dump(mode="json"))
+    db.commit()
+    return _camera_output(db, camera)
+
+
+@app.get("/api/surveyor/cameras/{camera_id}", response_model=SurveyorCameraOut)
+def get_surveyor_camera(camera_id: int, db: Session = Depends(get_db)):
+    camera = db.get(SurveyorTrailCamera, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Trail camera not found")
+    return _camera_output(db, camera)
+
+
+@app.patch("/api/surveyor/cameras/{camera_id}", response_model=SurveyorCameraOut)
+def update_surveyor_camera(camera_id: int, payload: SurveyorCameraUpdate, db: Session = Depends(get_db)):
+    camera = db.get(SurveyorTrailCamera, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Trail camera not found")
+    before = _camera_output(db, camera).model_dump(mode="json")
+    values = payload.model_dump(exclude_unset=True)
+    save_as_new = values.pop("save_as_new_placement", False)
+    camera_fields = {key: values.pop(key) for key in list(values) if key in {"name", "camera_model", "power_type", "notes"}}
+    for key, value in camera_fields.items():
+        setattr(camera, key, value)
+    map_object = db.get(SurveyorMapObject, camera.map_object_id)
+    if "name" in camera_fields:
+        map_object.name = camera_fields["name"]
+    if "notes" in camera_fields:
+        map_object.notes = camera_fields["notes"]
+    placement = db.scalar(select(SurveyorCameraPlacement).where(
+        SurveyorCameraPlacement.camera_id == camera.id, SurveyorCameraPlacement.removed_at.is_(None)
+    ))
+    placement_keys = {"latitude", "longitude", "heading_degrees", "fov_degrees", "range_meters"}
+    placement_updates = {key: value for key, value in values.items() if key in placement_keys and value is not None
+        and (placement is None or value != getattr(placement, key))}
+    if placement_updates or save_as_new:
+        if placement is None:
+            raise HTTPException(status_code=409, detail="Camera has no active placement")
+        next_values = {key: getattr(placement, key) for key in placement_keys}
+        next_values.update(placement_updates)
+        placement.removed_at = utcnow()
+        db.add(SurveyorCameraPlacement(camera_id=camera.id, **next_values, installed_at=utcnow(), notes=placement.notes))
+        _save_surveyor_geometry(map_object, {"type": "Point", "coordinates": [next_values["longitude"], next_values["latitude"]]})
+    db.flush()
+    if placement_updates or save_as_new:
+        moved = any(key in placement_updates for key in {"latitude", "longitude"})
+        action = "camera_moved" if moved else "camera_aimed"
+        _record_surveyor_event(db, action, "trail_camera", camera.id,
+            f"{'Moved' if moved else 'Re-aimed'} {camera.name}", before=before,
+            after=_camera_output(db, camera).model_dump(mode="json"), reversible=True)
+    db.commit(); db.refresh(camera)
+    return _camera_output(db, camera)
+
+
+@app.get("/api/surveyor/cameras/{camera_id}/placements")
+def list_surveyor_camera_placements(camera_id: int, db: Session = Depends(get_db)):
+    if db.get(SurveyorTrailCamera, camera_id) is None:
+        raise HTTPException(status_code=404, detail="Trail camera not found")
+    placements = db.scalars(select(SurveyorCameraPlacement).where(
+        SurveyorCameraPlacement.camera_id == camera_id
+    ).order_by(SurveyorCameraPlacement.installed_at.desc()))
+    return [{
+        "id": item.id, "camera_id": item.camera_id, "latitude": item.latitude, "longitude": item.longitude,
+        "heading_degrees": item.heading_degrees, "fov_degrees": item.fov_degrees, "range_meters": item.range_meters,
+        "installed_at": item.installed_at, "removed_at": item.removed_at, "notes": item.notes
+    } for item in placements]
+
+
+@app.post("/api/surveyor/cameras/{camera_id}/deactivate", response_model=SurveyorCameraOut)
+def deactivate_surveyor_camera(camera_id: int, db: Session = Depends(get_db)):
+    camera = db.get(SurveyorTrailCamera, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Trail camera not found")
+    now = utcnow(); camera.retired_at = now
+    active = db.scalar(select(SurveyorCameraPlacement).where(
+        SurveyorCameraPlacement.camera_id == camera.id, SurveyorCameraPlacement.removed_at.is_(None)
+    ))
+    if active:
+        active.removed_at = now
+    map_object = db.get(SurveyorMapObject, camera.map_object_id); map_object.status = "inactive"
+    _record_surveyor_event(db, "camera_deactivated", "trail_camera", camera.id, f"Deactivated {camera.name}")
+    db.commit(); db.refresh(camera)
+    return _camera_output(db, camera)
+
+
+@app.get("/api/surveyor/sessions", response_model=list[SurveyorSessionOut])
+def list_surveyor_sessions(from_date: datetime | None = Query(None, alias="from"),
+                           to_date: datetime | None = Query(None, alias="to"), db: Session = Depends(get_db)):
+    query = select(SurveyorSearchSession)
+    if from_date:
+        query = query.where(SurveyorSearchSession.started_at >= from_date)
+    if to_date:
+        query = query.where(SurveyorSearchSession.started_at <= to_date)
+    return [_session_output(row) for row in db.scalars(query.order_by(SurveyorSearchSession.started_at.desc()))]
+
+
+@app.post("/api/surveyor/sessions", response_model=SurveyorSessionOut, status_code=201)
+def start_surveyor_session(payload: SurveyorSessionIn, db: Session = Depends(get_db)):
+    row = SurveyorSearchSession(method=payload.method, started_at=payload.started_at or utcnow(), notes=payload.notes)
+    db.add(row); db.flush()
+    _record_surveyor_event(db, "search_started", "search_session", row.id, f"Started {row.method} search", after=_session_output(row).model_dump(mode="json"))
+    db.commit(); db.refresh(row)
+    return _session_output(row)
+
+
+@app.patch("/api/surveyor/sessions/{session_id}", response_model=SurveyorSessionOut)
+def finish_surveyor_session(session_id: int, payload: SurveyorSessionUpdate, db: Session = Depends(get_db)):
+    row = db.get(SurveyorSearchSession, session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Search session not found")
+    if row.ended_at is not None:
+        raise HTTPException(status_code=409, detail="Search session is already complete")
+    if payload.track_geojson is not None:
+        _geometry_stats(payload.track_geojson)
+        row.track_geojson = json.dumps(payload.track_geojson, separators=(",", ":"))
+    if payload.distance_meters is not None:
+        row.distance_meters = payload.distance_meters
+    if payload.notes is not None:
+        row.notes = payload.notes
+    if payload.result_summary is not None:
+        row.result_summary = payload.result_summary
+    row.ended_at = payload.ended_at or utcnow()
+    _record_surveyor_event(db, "search_completed", "search_session", row.id, f"Completed {row.method} search",
+        after=_session_output(row).model_dump(mode="json"), reversible=False)
+    db.commit(); db.refresh(row)
+    return _session_output(row)
+
+
+@app.put("/api/surveyor/sessions/{session_id}/checkpoint", response_model=SurveyorSessionOut)
+def checkpoint_surveyor_session(session_id: int, payload: SurveyorSessionCheckpoint, db: Session = Depends(get_db)):
+    row = db.get(SurveyorSearchSession, session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Search session not found")
+    if row.ended_at is not None:
+        raise HTTPException(status_code=409, detail="Search session is already complete")
+    _geometry_stats(payload.track_geojson)
+    row.track_geojson = json.dumps(payload.track_geojson, separators=(",", ":"))
+    row.distance_meters = payload.distance_meters
+    db.commit(); db.refresh(row)
+    return _session_output(row)
+
+
+@app.get("/api/surveyor/events", response_model=list[SurveyorEventOut])
+def list_surveyor_events(event_type: str | None = None, from_date: datetime | None = Query(None, alias="from"),
+                         to_date: datetime | None = Query(None, alias="to"), limit: int = Query(500, ge=1, le=2000),
+                         db: Session = Depends(get_db)):
+    query = select(SurveyorEvent)
+    if event_type:
+        query = query.where(SurveyorEvent.event_type == event_type)
+    if from_date:
+        query = query.where(SurveyorEvent.occurred_at >= from_date)
+    if to_date:
+        query = query.where(SurveyorEvent.occurred_at <= to_date)
+    return [_event_output(row) for row in db.scalars(query.order_by(SurveyorEvent.occurred_at.desc()).limit(limit))]
+
+
+@app.get("/api/surveyor/objects/{object_id}/attachments", response_model=list[SurveyorAttachmentOut])
+def list_object_attachments(object_id: int, db: Session = Depends(get_db)):
+    if db.get(SurveyorMapObject, object_id) is None:
+        raise HTTPException(status_code=404, detail="Surveyor object not found")
+    rows = db.scalars(select(SurveyorAttachment).where(SurveyorAttachment.map_object_id == object_id).order_by(SurveyorAttachment.created_at.desc()))
+    return [_attachment_output(row) for row in rows]
+
+
+@app.post("/api/surveyor/objects/{object_id}/attachments", response_model=SurveyorAttachmentOut, status_code=201)
+async def upload_surveyor_attachment(object_id: int, file: UploadFile = File(...), caption: str = Form(""),
+                                    observed_at: datetime | None = Form(None), db: Session = Depends(get_db)):
+    map_object = db.get(SurveyorMapObject, object_id)
+    if map_object is None:
+        raise HTTPException(status_code=404, detail="Surveyor object not found")
+    file_types = {
+        "image/jpeg": ("image", ".jpg"), "image/png": ("image", ".png"), "image/webp": ("image", ".webp"),
+        "audio/mpeg": ("audio", ".mp3"), "audio/wav": ("audio", ".wav"),
+        "application/pdf": ("file", ".pdf"), "text/plain": ("file", ".txt"),
+    }
+    spec = file_types.get(file.content_type or "")
+    if spec is None:
+        raise HTTPException(status_code=415, detail="Supported uploads are JPG, PNG, WebP, MP3, WAV, PDF, and plain text")
+    data = await file.read(settings.max_image_bytes + 1)
+    if not data or len(data) > settings.max_image_bytes:
+        raise HTTPException(status_code=413, detail="Attachment is empty or exceeds the upload limit")
+    attachment_type, extension = spec
+    if attachment_type == "image":
+        try:
+            image = Image.open(io.BytesIO(data))
+            image.verify()
+            image = Image.open(io.BytesIO(data))
+            output = io.BytesIO()
+            image.save(output, format={".jpg": "JPEG", ".png": "PNG", ".webp": "WEBP"}[extension])
+            data = output.getvalue()
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="The selected file is not a valid image") from exc
+    subdirectory = "images" if attachment_type == "image" else "audio" if attachment_type == "audio" else "files"
+    filename = f"{uuid.uuid4().hex}{extension}"
+    target_dir = media_dir / "surveyor" / subdirectory
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / filename).write_bytes(data)
+    row = SurveyorAttachment(map_object_id=object_id, attachment_type=attachment_type,
+        storage_path=f"surveyor/{subdirectory}/{filename}", caption=caption, observed_at=observed_at,
+        metadata_json=json.dumps({"content_type": file.content_type, "source_filename": Path(file.filename or "upload").name, "size_bytes": len(data)}))
+    db.add(row); db.flush()
+    _record_surveyor_event(db, "evidence_added", "map_object", object_id, "Added evidence attachment",
+        after={"attachment_id": row.id, "attachment_type": attachment_type, "caption": caption})
+    db.commit(); db.refresh(row)
+    return _attachment_output(row)
+
+
+@app.get("/api/surveyor/links", response_model=list[SurveyorLinkOut])
+def list_surveyor_links(db: Session = Depends(get_db)):
+    return [_link_output(db, row) for row in db.scalars(select(SurveyorObjectLink).order_by(SurveyorObjectLink.created_at.desc()))]
+
+
+@app.post("/api/surveyor/links", response_model=SurveyorLinkOut, status_code=201)
+def create_surveyor_link(payload: SurveyorLinkIn, db: Session = Depends(get_db)):
+    if payload.source_object_id == payload.target_object_id:
+        raise HTTPException(status_code=422, detail="A link needs two different objects")
+    source = db.get(SurveyorMapObject, payload.source_object_id)
+    target = db.get(SurveyorMapObject, payload.target_object_id)
+    if source is None or target is None:
+        raise HTTPException(status_code=404, detail="Linked map object not found")
+    coordinates = [[source.centroid_lon, source.centroid_lat], *payload.vertices, [target.centroid_lon, target.centroid_lat]]
+    _geometry_stats({"type": "LineString", "coordinates": coordinates})
+    row = SurveyorObjectLink(source_object_id=source.id, target_object_id=target.id, link_type=payload.link_type,
+        line_style=payload.line_style, label=payload.label, notes=payload.notes,
+        vertices_geojson=json.dumps(payload.vertices))
+    db.add(row)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This object link already exists") from exc
+    _record_surveyor_event(db, "object_linked", "object_link", row.id, f"Linked {source.name or source.object_type} to {target.name or target.object_type}",
+        after={"source_object_id": source.id, "target_object_id": target.id, "link_type": row.link_type})
+    db.commit(); db.refresh(row)
+    return _link_output(db, row)
+
+
+@app.patch("/api/surveyor/links/{link_id}", response_model=SurveyorLinkOut)
+def update_surveyor_link(link_id: int, payload: SurveyorLinkPatch, db: Session = Depends(get_db)):
+    row = db.get(SurveyorObjectLink, link_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Object link not found")
+    before = _link_output(db, row).model_dump(mode="json")
+    values = payload.model_dump(exclude_unset=True)
+    if "vertices" in values:
+        source = db.get(SurveyorMapObject, row.source_object_id); target = db.get(SurveyorMapObject, row.target_object_id)
+        _geometry_stats({"type": "LineString", "coordinates": [[source.centroid_lon, source.centroid_lat], *values["vertices"], [target.centroid_lon, target.centroid_lat]]})
+        row.vertices_geojson = json.dumps(values.pop("vertices"))
+    for key, value in values.items():
+        setattr(row, key, value)
+    db.flush()
+    _record_surveyor_event(db, "object_link_updated", "object_link", row.id, "Updated object link", before=before,
+        after=_link_output(db, row).model_dump(mode="json"), reversible=True)
+    db.commit(); db.refresh(row)
+    return _link_output(db, row)
+
+
+@app.delete("/api/surveyor/links/{link_id}", status_code=204)
+def delete_surveyor_link(link_id: int, db: Session = Depends(get_db)):
+    row = db.get(SurveyorObjectLink, link_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Object link not found")
+    before = _link_output(db, row).model_dump(mode="json")
+    _record_surveyor_event(db, "object_link_deleted", "object_link", row.id, "Deleted object link", before=before)
+    db.delete(row); db.commit()
+    return None
+
+
 @app.get("/api/surveyor/objects", response_model=list[SurveyorObjectOut])
 def list_surveyor_objects(
     bbox: str | None = None,
@@ -377,7 +738,7 @@ def list_surveyor_objects(
     status: str | None = None,
     db: Session = Depends(get_db),
 ):
-    query = select(SurveyorMapObject)
+    query = select(SurveyorMapObject).where(or_(SurveyorMapObject.status.is_(None), SurveyorMapObject.status != "archived"))
     if object_type:
         query = query.where(SurveyorMapObject.object_type == object_type)
     if subtype:
@@ -413,7 +774,9 @@ def create_surveyor_object(payload: SurveyorObjectIn, db: Session = Depends(get_
         occurred_at=payload.occurred_at, valid_from=payload.valid_from, valid_to=payload.valid_to, notes=payload.notes,
     )
     _save_surveyor_geometry(row, payload.geometry)
-    db.add(row); db.commit(); db.refresh(row)
+    db.add(row); db.flush()
+    _record_surveyor_event(db, "object_created", "map_object", row.id, f"Created {row.object_type}", after=_surveyor_out(row).model_dump(mode="json"), reversible=True)
+    db.commit(); db.refresh(row)
     return _surveyor_out(row)
 
 
@@ -430,6 +793,7 @@ def update_surveyor_object(object_id: int, payload: SurveyorObjectPatch, db: Ses
     row = db.get(SurveyorMapObject, object_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Surveyor object not found")
+    before = _surveyor_out(row).model_dump(mode="json")
     values = payload.model_dump(exclude_unset=True)
     if "geometry" in values:
         _save_surveyor_geometry(row, values.pop("geometry"))
@@ -440,6 +804,8 @@ def update_surveyor_object(object_id: int, payload: SurveyorObjectPatch, db: Ses
             setattr(row, "style_json" if key == "style" else "properties_json", json.dumps(value))
         else:
             setattr(row, key, value)
+    _record_surveyor_event(db, "object_updated", "map_object", row.id, f"Updated {row.object_type}", before=before,
+        after=_surveyor_out(row).model_dump(mode="json"), reversible=True)
     db.commit(); db.refresh(row)
     return _surveyor_out(row)
 
@@ -449,7 +815,10 @@ def delete_surveyor_object(object_id: int, db: Session = Depends(get_db)):
     row = db.get(SurveyorMapObject, object_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Surveyor object not found")
-    db.delete(row); db.commit()
+    before = _surveyor_out(row).model_dump(mode="json")
+    _record_surveyor_event(db, "object_deleted", "map_object", row.id, f"Deleted {row.object_type}", before=before)
+    row.status = "archived"
+    db.commit()
     return None
 
 
@@ -524,7 +893,7 @@ def list_posts(
     include_duplicates: bool = True,
     max_distance_miles: float | None = Query(None, ge=0, le=500),
     sort: str = Query("smart", pattern="^(smart|newest|closest|score)$"),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=2000),
     db: Session = Depends(get_db),
 ):
     stmt = (
@@ -687,7 +1056,12 @@ def review_post(post_id: int, payload: ReviewIn, db: Session = Depends(get_db)):
     row = db.get(PetPost, post_id)
     if not row:
         raise HTTPException(404, "Post not found")
+    previous_state = row.review_state
     row.review_state = payload.review_state
+    _record_surveyor_event(db, "candidate_reviewed", "candidate_post", post_id,
+        f"Candidate #{post_id} marked {payload.review_state}",
+        before={"candidate_id": post_id, "review_state": previous_state, "source": row.source},
+        after={"candidate_id": post_id, "review_state": payload.review_state, "source": row.source})
     db.commit()
     db.refresh(row)
     vision = db.scalar(select(PostVision).where(PostVision.post_id == post_id))

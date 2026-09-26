@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -105,5 +105,98 @@ class SurveyorMapObject(Base):
     bbox_south: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     bbox_east: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
     bbox_north: Mapped[float | None] = mapped_column(Float, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SurveyorTrailCamera(Base):
+    __tablename__ = "surveyor_trail_cameras"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    map_object_id: Mapped[int] = mapped_column(ForeignKey("surveyor_map_objects.id", ondelete="CASCADE"), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(180))
+    camera_model: Mapped[str] = mapped_column(String(120), default="")
+    power_type: Mapped[str] = mapped_column(String(60), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SurveyorCameraPlacement(Base):
+    __tablename__ = "surveyor_camera_placements"
+    __table_args__ = (Index("uq_surveyor_camera_active_placement", "camera_id", unique=True, sqlite_where=text("removed_at IS NULL")),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    camera_id: Mapped[int] = mapped_column(ForeignKey("surveyor_trail_cameras.id", ondelete="CASCADE"), index=True)
+    latitude: Mapped[float] = mapped_column(Float)
+    longitude: Mapped[float] = mapped_column(Float)
+    heading_degrees: Mapped[float] = mapped_column(Float, default=0)
+    fov_degrees: Mapped[float] = mapped_column(Float, default=60)
+    range_meters: Mapped[float] = mapped_column(Float, default=15)
+    installed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SurveyorSearchSession(Base):
+    __tablename__ = "surveyor_search_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    method: Mapped[str] = mapped_column(String(50), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    track_geojson: Mapped[str | None] = mapped_column(Text, nullable=True)
+    distance_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    result_summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SurveyorEvent(Base):
+    __tablename__ = "surveyor_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(60), index=True)
+    entity_type: Mapped[str] = mapped_column(String(50), index=True)
+    entity_id: Mapped[str] = mapped_column(String(100), index=True)
+    action: Mapped[str] = mapped_column(String(120))
+    before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    reversible: Mapped[bool] = mapped_column(default=False)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class SurveyorAttachment(Base):
+    __tablename__ = "surveyor_attachments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    map_object_id: Mapped[int | None] = mapped_column(ForeignKey("surveyor_map_objects.id", ondelete="CASCADE"), nullable=True, index=True)
+    search_session_id: Mapped[int | None] = mapped_column(ForeignKey("surveyor_search_sessions.id", ondelete="CASCADE"), nullable=True, index=True)
+    attachment_type: Mapped[str] = mapped_column(String(30))
+    storage_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    caption: Mapped[str] = mapped_column(Text, default="")
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source: Mapped[str] = mapped_column(String(120), default="user upload")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SurveyorObjectLink(Base):
+    __tablename__ = "surveyor_object_links"
+    __table_args__ = (UniqueConstraint("source_object_id", "target_object_id", "link_type", name="uq_surveyor_object_link"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_object_id: Mapped[int] = mapped_column(ForeignKey("surveyor_map_objects.id", ondelete="CASCADE"), index=True)
+    target_object_id: Mapped[int] = mapped_column(ForeignKey("surveyor_map_objects.id", ondelete="CASCADE"), index=True)
+    link_type: Mapped[str] = mapped_column(String(50), default="association", index=True)
+    line_style: Mapped[str] = mapped_column(String(30), default="dotted")
+    label: Mapped[str] = mapped_column(String(180), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    vertices_geojson: Mapped[str | None] = mapped_column(Text, nullable=True)
+    properties_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

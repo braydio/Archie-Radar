@@ -16,7 +16,8 @@ dependencies = [
   "beautifulsoup4>=4.12,<5",
   "python-dateutil>=2.9,<3",
   "pillow>=10,<12",
-  "shapely>=2.0,<3"
+  "shapely>=2.0,<3",
+  "python-multipart>=0.0.20,<1"
 ]
 
 [project.optional-dependencies]
