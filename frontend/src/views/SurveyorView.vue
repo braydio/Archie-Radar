@@ -20,6 +20,7 @@ import CandidateInspector from '../components/surveyor/CandidateInspector.vue'
 import ObjectInspector from '../components/surveyor/ObjectInspector.vue'
 import AudioRecorder from '../components/surveyor/AudioRecorder.vue'
 import PhotoCapture from '../components/surveyor/PhotoCapture.vue'
+import AccessEditor from '../components/surveyor/AccessEditor.vue'
 import { cameraConePolygon, cameraHandlePoints } from '../surveyor/cameraGeometry.js'
 import { searchFreshness } from '../surveyor/zoneState.js'
 import { registerSurveyorIcons } from '../surveyor/iconRegistry.js'
@@ -42,6 +43,7 @@ const linkStartId = ref(null)
 const linkType = ref('association')
 const attachments = ref([])
 const draftObject = ref(null)
+const accessDraftCoordinates = ref(null)
 const draftDrawId = ref(null)
 const searchResultOpen = ref(false)
 const attachmentCaption = ref('')
@@ -386,6 +388,14 @@ async function createPin(coordinates) {
   draftObject.value = { kind: 'pin', geometry: { type: 'Point', coordinates }, subtype: subtype.value }
 }
 
+async function accessSaved(record) {
+  accessDraftCoordinates.value = null
+  const response = await fetch(`${API}/api/surveyor/objects/${record.map_object_id}`)
+  if (!response.ok) throw new Error('Access record was saved but its map marker could not be loaded')
+  const object = await response.json(); objects.value.unshift(object); refreshSource(); selected.value = object
+  title.value = object.name || ''; subtype.value = object.subtype || ''; notes.value = object.notes || ''; activeTool.value = 'select'
+}
+
 async function createCamera(coordinates) {
   draftObject.value = { kind: 'camera', geometry: { type: 'Point', coordinates } }
 }
@@ -646,10 +656,11 @@ function onMapClick(event) {
     createLink(objectId).catch(err => { error.value = err.message; linkStartId.value = null })
     return
   }
-  if (!['pin', 'note', 'camera'].includes(activeTool.value)) return
+  if (!['pin', 'note', 'camera', 'access'].includes(activeTool.value)) return
   const overlays = map.queryRenderedFeatures(event.point, { layers: ['surveyor-points', 'trail-camera-points', 'camera-history-points', 'selected-camera-handles', 'candidate-reports-point'] })
   if (overlays.length) return
   const coordinates = [event.lngLat.lng, event.lngLat.lat]
+  if (activeTool.value === 'access') { accessDraftCoordinates.value = coordinates; return }
   const create = activeTool.value === 'note' ? createNote : activeTool.value === 'camera' ? createCamera : createPin
   create(coordinates)
 }
@@ -805,14 +816,14 @@ onBeforeUnmount(() => {
     <p v-if="error" class="surveyor-error">{{ error }}</p><p v-if="locationWarning" class="location-warning">{{ locationWarning }}</p>
     <div class="surveyor-workspace">
       <SurveyorToolbar :active-tool="activeTool" @tool="activateTool" @more="mobileMoreOpen=!mobileMoreOpen" />
-      <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? 'Choose a marker type, then tap the map' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option value="searched">Searched</option><option value="needs_search">Needs search</option><option value="needs_recheck">Needs re-check</option><option value="known_cat_highway">Known cat highway</option><option value="wildlife_hotspot">Wildlife hotspot</option><option value="likely_shelter">Likely shelter</option><option value="dog_territory">Dog territory</option><option value="private_no_access">Private / no access</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
+      <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','access','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? 'Choose a marker type, then tap the map' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : activeTool === 'access' ? 'Tap a property to record access details' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option value="searched">Searched</option><option value="needs_search">Needs search</option><option value="needs_recheck">Needs re-check</option><option value="known_cat_highway">Known cat highway</option><option value="wildlife_hotspot">Wildlife hotspot</option><option value="likely_shelter">Likely shelter</option><option value="dog_territory">Dog territory</option><option value="private_no_access">Private / no access</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
       <LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" @update:model-value="layerSettings = $event" @close="layerDrawerOpen = false" />
       <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
       <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" />
       <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" />
     </div>
 
-    <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>
+    <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button @click="activateTool('access'); mobileMoreOpen=false">Property / access</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>
     <MobileInspectorSheet :open="Boolean(selected || selectedCandidate || selectedHistoricalPlacement)" @close="selected=null; selectedCandidate=null; selectedHistoricalPlacement=null">
       <template v-if="selectedCandidate"><p class="eyebrow">CANDIDATE REPORT · {{ selectedCandidate.source }}</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2><p>{{ selectedCandidate.location_text }}</p><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button></template>
       <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p></template>
@@ -820,6 +831,7 @@ onBeforeUnmount(() => {
     </MobileInspectorSheet>
     <CandidateClusterSheet v-if="candidateCluster" :cluster="candidateCluster" @close="candidateCluster=null" @open="openClusterCandidate" @evidence="createEvidenceForCandidate" @zoom="zoomCandidateCluster" />
     <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
+    <div v-if="accessDraftCoordinates" class="field-sheet-backdrop"><AccessEditor :coordinates="accessDraftCoordinates" :api="API" @save="accessSaved($event).catch(err => error=err.message)" @cancel="accessDraftCoordinates=null" /></div>
     <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet @save="finishSearch" @cancel="searchResultOpen=false" /></div>
     <footer class="surveyor-footer"><SurveyTimeline v-model="timelineWindow" /><span v-if="activeSession" class="active-session-status">SEARCH ACTIVE · {{ Math.round(sessionDistance()) }} m</span></footer>
   </main>

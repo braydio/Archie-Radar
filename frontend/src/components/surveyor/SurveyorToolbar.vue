@@ -1,7 +1,7 @@
 <script setup>
 defineProps({ activeTool: { type: String, required: true } })
 const emit = defineEmits(['tool', 'more'])
-const desktopTools = [['select', '↖', 'Select'], ['pin', '⌖', 'Pin'], ['camera', '◉', 'Camera'], ['zone', '▱', 'Zone'], ['line', '⌁', 'Line'], ['link', '⟷', 'Link'], ['note', '✎', 'Note']]
+const desktopTools = [['select', '↖', 'Select'], ['pin', '⌖', 'Pin'], ['camera', '◉', 'Camera'], ['zone', '▱', 'Zone'], ['line', '⌁', 'Line'], ['link', '⟷', 'Link'], ['note', '✎', 'Note'], ['access', '⌂', 'Access']]
 </script>
 <template>
   <aside class="surveyor-tools"><p>TOOLS</p><button v-for="[tool, icon, label] in desktopTools" :key="tool" :class="{ active: activeTool === tool }" @click="emit('tool', tool)">{{ icon }}<span>{{ label }}</span></button></aside>
