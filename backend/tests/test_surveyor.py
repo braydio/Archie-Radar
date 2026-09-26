@@ -1,0 +1,113 @@
+from collections.abc import Generator
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.db import Base, get_db
+from app.main import app
+
+
+@pytest.fixture
+def client() -> Generator[TestClient, None, None]:
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    def override_db():
+        db = sessions()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        # Avoid the production lifespan hook: the override owns this isolated DB.
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def create_pin(client: TestClient, coordinates: list[float], name: str = "Field marker") -> dict:
+    response = client.post("/api/surveyor/objects", json={
+        "object_type": "pin", "subtype": "sighting", "name": name,
+        "geometry": {"type": "Point", "coordinates": coordinates},
+    })
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_point_object_has_centroid_and_bbox(client: TestClient) -> None:
+    result = create_pin(client, [-79.1, 35.8])
+    assert result["centroid_lon"] == pytest.approx(-79.1)
+    assert result["centroid_lat"] == pytest.approx(35.8)
+    assert result["bbox"] == pytest.approx([-79.1, 35.8, -79.1, 35.8])
+
+
+def test_malformed_geojson_is_rejected(client: TestClient) -> None:
+    response = client.post("/api/surveyor/objects", json={
+        "object_type": "zone", "geometry": {"type": "Polygon", "coordinates": []},
+    })
+    assert response.status_code == 422
+
+
+def create_camera(client: TestClient) -> dict:
+    response = client.post("/api/surveyor/cameras", json={
+        "name": "CAM 2", "latitude": 35.8, "longitude": -79.1,
+        "heading_degrees": 60, "fov_degrees": 62, "range_meters": 45,
+    })
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_camera_aim_updates_active_placement_in_place(client: TestClient) -> None:
+    camera = create_camera(client)
+    response = client.patch(f"/api/surveyor/cameras/{camera['id']}", json={"heading_degrees": 75, "fov_degrees": 70, "range_meters": 55})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert len(result["history"]) == 1
+    assert result["placement"]["heading_degrees"] == 75
+    assert result["placement"]["fov_degrees"] == 70
+    assert result["placement"]["range_meters"] == 55
+    saved = client.patch(f"/api/surveyor/cameras/{camera['id']}", json={"save_as_new_placement": True})
+    assert saved.status_code == 200, saved.text
+    assert len(saved.json()["history"]) == 2
+
+
+def test_camera_move_creates_history(client: TestClient) -> None:
+    camera = create_camera(client)
+    response = client.patch(f"/api/surveyor/cameras/{camera['id']}", json={"latitude": 35.81, "longitude": -79.09})
+    assert response.status_code == 200, response.text
+    history = response.json()["history"]
+    assert len(history) == 2
+    assert sum(placement["removed_at"] is None for placement in history) == 1
+    assert sum(placement["removed_at"] is not None for placement in history) == 1
+
+
+def test_link_endpoint_follows_moved_source_object(client: TestClient) -> None:
+    source = create_pin(client, [-79.1, 35.8], "Source")
+    target = create_pin(client, [-79.08, 35.82], "Target")
+    linked = client.post("/api/surveyor/links", json={
+        "source_object_id": source["id"], "target_object_id": target["id"], "link_type": "association",
+    })
+    assert linked.status_code == 201, linked.text
+    original = linked.json()["geometry"]["coordinates"][0]
+    moved = client.patch(f"/api/surveyor/objects/{source['id']}", json={
+        "geometry": {"type": "Point", "coordinates": [-79.11, 35.8]},
+    })
+    assert moved.status_code == 200, moved.text
+    refreshed = client.get("/api/surveyor/links").json()[0]
+    assert refreshed["geometry"]["coordinates"][0] != original
+    assert refreshed["geometry"]["coordinates"][0] == pytest.approx([-79.11, 35.8])
+
+
+def test_archived_object_is_omitted_from_normal_list(client: TestClient) -> None:
+    obj = create_pin(client, [-79.1, 35.8])
+    response = client.delete(f"/api/surveyor/objects/{obj['id']}")
+    assert response.status_code == 204
+    objects = client.get("/api/surveyor/objects").json()
+    assert all(item["id"] != obj["id"] for item in objects)

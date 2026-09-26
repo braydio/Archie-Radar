@@ -132,15 +132,15 @@ class ReviewIn(BaseModel):
 
 
 class SurveyorObjectIn(BaseModel):
-    object_type: str = Field(min_length=1, max_length=40)
+    object_type: Literal["pin", "note", "zone", "corridor", "trail_camera", "evidence", "access", "search_location"]
     subtype: str | None = Field(default=None, max_length=60)
     name: str | None = Field(default=None, max_length=180)
     geometry: dict
     style: dict = Field(default_factory=dict)
     properties: dict = Field(default_factory=dict)
     status: str | None = None
-    confidence: str | None = None
-    epistemic_state: str | None = None
+    confidence: Literal["confirmed", "strong", "possible", "uncertain", "context"] | None = None
+    epistemic_state: Literal["observed", "inferred", "hypothesis", "planning"] | None = None
     occurred_at: datetime | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None
@@ -148,15 +148,15 @@ class SurveyorObjectIn(BaseModel):
 
 
 class SurveyorObjectPatch(BaseModel):
-    object_type: str | None = Field(default=None, min_length=1, max_length=40)
+    object_type: Literal["pin", "note", "zone", "corridor", "trail_camera", "evidence", "access", "search_location"] | None = None
     subtype: str | None = Field(default=None, max_length=60)
     name: str | None = Field(default=None, max_length=180)
     geometry: dict | None = None
     style: dict | None = None
     properties: dict | None = None
     status: str | None = None
-    confidence: str | None = None
-    epistemic_state: str | None = None
+    confidence: Literal["confirmed", "strong", "possible", "uncertain", "context"] | None = None
+    epistemic_state: Literal["observed", "inferred", "hypothesis", "planning"] | None = None
     occurred_at: datetime | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None

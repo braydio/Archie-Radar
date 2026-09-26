@@ -36,8 +36,8 @@ export function createMapFeatureSnapper(map, getSettings, setTarget, threshold =
     let features = []
     try { features = map.queryRenderedFeatures(bounds) } catch { setTarget(null); return undefined }
     let best = null
-    const accept = (candidate, coordinate) => {
-      if (candidate.distance <= threshold && (!best || candidate.distance < best.distance)) best = { ...candidate, coordinate }
+    const accept = (candidate, coordinate, kind) => {
+      if (candidate.distance <= threshold && (!best || candidate.distance < best.distance)) best = { ...candidate, coordinate, kind }
     }
     for (const feature of features) {
       const layerName = `${feature.layer?.id || ''} ${feature.sourceLayer || feature.layer?.['source-layer'] || ''}`.toLowerCase()
@@ -45,12 +45,17 @@ export function createMapFeatureSnapper(map, getSettings, setTarget, threshold =
       const isRoad = /road|transport|highway|street/.test(layerName)
       const isTrail = /trail|path|track/.test(layerName)
       const isWater = /water|stream|river|canal|drain/.test(layerName)
-      if (!(isUserGeometry ? settings.objects : (isRoad && settings.roads) || (isTrail && settings.trails) || (isWater && settings.waterways))) continue
+      const objectType = feature.properties?.object_type
+      const isCamera = objectType === 'trail_camera'
+      const isZone = objectType === 'zone' || feature.geometry?.type === 'Polygon'
+      if (!(isUserGeometry ? (isCamera ? settings.cameras : isZone ? settings.zoneBoundaries : settings.objects) :
+        (isRoad && settings.roads) || (isTrail && settings.trails) || (isWater && settings.waterways))) continue
+      const kind = isUserGeometry ? (isCamera ? 'camera' : isZone ? 'zone_boundary' : 'object') : isWater ? 'waterway' : isTrail ? 'trail' : 'road'
       const coords = coordinatePairs(feature.geometry)
       if (feature.geometry?.type === 'Point' || feature.geometry?.type === 'MultiPoint') {
         for (const coordinate of coords) {
           const screen = map.project(coordinate)
-          accept({ distance: Math.hypot(screen.x - screenPoint[0], screen.y - screenPoint[1]) }, coordinate)
+          accept({ distance: Math.hypot(screen.x - screenPoint[0], screen.y - screenPoint[1]) }, coordinate, kind)
         }
         continue
       }
@@ -58,10 +63,11 @@ export function createMapFeatureSnapper(map, getSettings, setTarget, threshold =
         const a = map.project(start), b = map.project(end)
         const nearest = segmentNearest(screenPoint, [a.x, a.y], [b.x, b.y])
         const coordinate = map.unproject(nearest.coordinate)
-        accept({ distance: nearest.distance }, [coordinate.lng, coordinate.lat])
+        accept({ distance: nearest.distance }, [coordinate.lng, coordinate.lat], kind)
       }
     }
-    setTarget(best ? { x: event.containerX, y: event.containerY } : null)
+    const snappedScreen = best ? map.project(best.coordinate) : null
+    setTarget(best ? { x: snappedScreen.x, y: snappedScreen.y, coordinate: best.coordinate, kind: best.kind } : null)
     return best?.coordinate
   }
 }

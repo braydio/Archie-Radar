@@ -10,14 +10,27 @@ import { useRoute } from 'vue-router'
 import { createMapFeatureSnapper } from '../surveyor/snapEngine.js'
 import SurveyTimeline from '../components/surveyor/SurveyTimeline.vue'
 import LayerDrawer from '../components/surveyor/LayerDrawer.vue'
+import DraftObjectSheet from '../components/surveyor/DraftObjectSheet.vue'
+import SearchResultSheet from '../components/surveyor/SearchResultSheet.vue'
+import CandidateClusterSheet from '../components/surveyor/CandidateClusterSheet.vue'
+import MobileInspectorSheet from '../components/surveyor/MobileInspectorSheet.vue'
+import SurveyorToolbar from '../components/surveyor/SurveyorToolbar.vue'
+import SearchSessionBar from '../components/surveyor/SearchSessionBar.vue'
+import CandidateInspector from '../components/surveyor/CandidateInspector.vue'
+import ObjectInspector from '../components/surveyor/ObjectInspector.vue'
+import { cameraConePolygon, cameraHandlePoints } from '../surveyor/cameraGeometry.js'
+import { searchFreshness } from '../surveyor/zoneState.js'
+import { registerSurveyorIcons } from '../surveyor/iconRegistry.js'
 
 const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
 const route = useRoute()
 const timelineWindow = ref({ preset: '30d', from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 16), to: new Date().toISOString().slice(0, 16) })
 const LAYER_STORAGE = 'archie-radar-surveyor-layers'
+const SNAP_STORAGE = 'archie-radar-surveyor-snap'
 const defaultLayers = { objects: true, links: true, cameras: true, cameraHistory: false, candidates: true, landcover: false }
 const layerSettings = ref((() => { try { return { ...defaultLayers, ...JSON.parse(localStorage.getItem(LAYER_STORAGE) || '{}') } } catch { return { ...defaultLayers } } })())
 const layerDrawerOpen = ref(false)
+const mobileMoreOpen = ref(false)
 const mapEl = ref(null)
 const objects = ref([])
 const candidates = ref([])
@@ -26,13 +39,20 @@ const links = ref([])
 const linkStartId = ref(null)
 const linkType = ref('association')
 const attachments = ref([])
+const draftObject = ref(null)
+const draftDrawId = ref(null)
+const searchResultOpen = ref(false)
 const attachmentCaption = ref('')
 const uploadingAttachment = ref(false)
 const activeSession = ref(null)
 const sessionMethod = ref('walking')
 const trackCoords = ref([])
+const trackTimes = ref([])
+const locationWarning = ref('')
 const selected = ref(null)
 const selectedCandidate = ref(null)
+const selectedHistoricalPlacement = ref(null)
+const candidateCluster = ref(null)
 const candidatesVisible = ref(true)
 const cameraHistoryVisible = ref(false)
 const activeTool = ref('select')
@@ -45,7 +65,7 @@ const zoneSubtype = ref('needs_search')
 const cameraHeading = ref(0)
 const cameraFov = ref(62)
 const cameraRange = ref(15)
-const snapSettings = ref({ roads: true, trails: true, waterways: true, objects: true })
+const snapSettings = ref((() => { try { return { roads: true, trails: true, waterways: true, objects: true, zoneBoundaries: true, cameras: true, ...JSON.parse(localStorage.getItem(SNAP_STORAGE) || '{}') } } catch { return { roads: true, trails: true, waterways: true, objects: true, zoneBoundaries: true, cameras: true } } })())
 const snapMenuOpen = ref(false)
 const snapTarget = ref(null)
 const notes = ref('')
@@ -55,13 +75,15 @@ let draw
 let resizeObserver
 let geoWatchId = null
 let checkpointBusy = false
+let cameraHandleDrag = null
 
 const types = PIN_TYPES
+watch(snapSettings, settings => { try { localStorage.setItem(SNAP_STORAGE, JSON.stringify(settings)) } catch {} }, { deep: true })
 watch(layerSettings, settings => {
   try { localStorage.setItem(LAYER_STORAGE, JSON.stringify(settings)) } catch {}
   candidatesVisible.value = settings.candidates
   cameraHistoryVisible.value = settings.cameraHistory
-  for (const layer of ['surveyor-zones-fill', 'surveyor-lines', 'surveyor-points', 'surveyor-labels']) {
+  for (const layer of ['surveyor-zones-fill', 'surveyor-zones-outline', 'surveyor-lines', 'surveyor-points', 'surveyor-icons', 'surveyor-labels']) {
     if (map?.getLayer(layer)) map.setLayoutProperty(layer, 'visibility', settings.objects ? 'visible' : 'none')
   }
   for (const layer of ['surveyor-links-line', 'surveyor-links-labels', 'surveyor-links-arrows']) {
@@ -70,9 +92,11 @@ watch(layerSettings, settings => {
   for (const layer of ['camera-cones-fill', 'camera-cones-outline', 'trail-camera-points']) {
     if (map?.getLayer(layer)) map.setLayoutProperty(layer, 'visibility', settings.cameras ? 'visible' : 'none')
   }
+  for (const layer of ['trail-camera-history-points']) if (map?.getLayer(layer)) map.setLayoutProperty(layer, 'visibility', settings.cameras && settings.cameraHistory ? 'visible' : 'none')
   if (map?.getLayer('annual-landcover')) map.setLayoutProperty('annual-landcover', 'visibility', settings.landcover ? 'visible' : 'none')
+  refreshCameraSource()
 }, { deep: true })
-watch(() => selected.value?.id, id => { attachments.value = []; if (id) loadAttachments(id) })
+watch(() => selected.value?.id, id => { attachments.value = []; refreshCameraSource(); if (id) loadAttachments(id) })
 function inTimeline(value) {
   if (timelineWindow.value.preset === 'all' || !value) return true
   const time = new Date(value).getTime()
@@ -82,7 +106,9 @@ const featureCollection = computed(() => ({
   type: 'FeatureCollection',
   features: objects.value.filter(object => object.id !== editingGeometryId.value && inTimeline(object.occurred_at || object.valid_from || object.created_at)).map(object => ({
     type: 'Feature', id: object.id, geometry: object.geometry,
-    properties: { id: object.id, name: object.name || object.subtype || object.object_type, subtype: object.subtype || '', object_type: object.object_type }
+    properties: { id: object.id, name: object.name || object.subtype || object.object_type, subtype: object.subtype || '', object_type: object.object_type,
+      epistemic_state: object.epistemic_state || 'observed', confidence: object.confidence || 'possible', status: object.status || '', search_freshness: searchFreshness(object),
+      color: types.find(item => item.value === object.subtype)?.color || '#bf704d', icon: object.object_type === 'trail_camera' ? 'trail-camera' : object.object_type === 'note' ? 'note' : (types.find(item => item.value === object.subtype)?.icon || 'sighting') }
   }))
 }))
 
@@ -116,16 +142,8 @@ async function loadCameras() {
   } catch { /* Camera overlays can fail independently from the base map. */ }
 }
 
-function destination(lon, lat, distanceMeters, bearing) {
-  const radius = 6371008.8, angular = distanceMeters / radius, brng = bearing * Math.PI / 180
-  const lat1 = lat * Math.PI / 180, lon1 = lon * Math.PI / 180
-  const lat2 = Math.asin(Math.sin(lat1) * Math.cos(angular) + Math.cos(lat1) * Math.sin(angular) * Math.cos(brng))
-  const lon2 = lon1 + Math.atan2(Math.sin(brng) * Math.sin(angular) * Math.cos(lat1), Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2))
-  return [lon2 * 180 / Math.PI, lat2 * 180 / Math.PI]
-}
-
 function cameraGeoJSON() {
-  const features = []
+  const features = [], historyPoints = []
   for (const camera of cameras.value) {
     const overlapping = camera.history.filter(placement => timelineWindow.value.preset === 'all' || (
       new Date(placement.installed_at) <= new Date(timelineWindow.value.to) &&
@@ -133,20 +151,82 @@ function cameraGeoJSON() {
     const placements = cameraHistoryVisible.value ? overlapping : overlapping.filter(placement =>
       !placement.removed_at || new Date(placement.removed_at) >= new Date(timelineWindow.value.to)).slice(0, 1)
     for (const placement of placements) {
-      const start = Number(placement.heading_degrees) - Number(placement.fov_degrees) / 2
-      const end = Number(placement.heading_degrees) + Number(placement.fov_degrees) / 2
-      const center = [Number(placement.longitude), Number(placement.latitude)]
-      const ring = [center]
-      for (let step = 0; step <= 24; step++) ring.push(destination(center[0], center[1], Number(placement.range_meters), start + (end - start) * step / 24))
-      ring.push(center)
-      features.push({ type: 'Feature', properties: { camera_id: camera.id, name: camera.name, current: !placement.removed_at,
-        installed_at: placement.installed_at, removed_at: placement.removed_at || '' }, geometry: { type: 'Polygon', coordinates: [ring] } })
+      const current = !placement.removed_at
+      const historyIndex = current ? 0 : overlapping.filter(item => item.removed_at && new Date(item.installed_at) > new Date(placement.installed_at)).length + 1
+      const historyAgeDays = Math.max(0, (Date.now() - new Date(placement.installed_at).getTime()) / 86400000)
+      const opacity = current ? 1 : Math.max(0.15, 0.38 - (historyIndex - 1) * 0.08)
+      const properties = { camera_id: camera.id, name: camera.name, current, history_index: historyIndex, history_age_days: historyAgeDays,
+        opacity, installed_at: placement.installed_at, removed_at: placement.removed_at || '', heading_degrees: placement.heading_degrees,
+        fov_degrees: placement.fov_degrees, range_meters: placement.range_meters }
+      features.push({ type: 'Feature', properties, geometry: cameraConePolygon(placement) })
+      if (!current) historyPoints.push({ type: 'Feature', properties, geometry: { type: 'Point', coordinates: [Number(placement.longitude), Number(placement.latitude)] } })
     }
   }
+  const camera = cameras.value.find(item => item.map_object_id === selected.value?.id)
+  const handles = camera?.placement ? cameraHandlePoints(camera.placement) : null
+  const handleFeatures = handles ? Object.entries(handles).map(([kind, coordinates]) => ({ type: 'Feature', properties: { handle: kind, camera_id: camera.id }, geometry: { type: 'Point', coordinates } })) : []
+  map?.getSource('camera-history-points')?.setData({ type: 'FeatureCollection', features: historyPoints })
+  map?.getSource('selected-camera-handles')?.setData({ type: 'FeatureCollection', features: handleFeatures })
   return { type: 'FeatureCollection', features }
 }
 
 function refreshCameraSource() { map?.getSource('camera-cones')?.setData(cameraGeoJSON()) }
+function bearingFrom(center, point) {
+  const rad = value => value * Math.PI / 180
+  const lat1 = rad(center[1]), lat2 = rad(point[1]), delta = rad(point[0] - center[0])
+  return (Math.atan2(Math.sin(delta) * Math.cos(lat2), Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(delta)) * 180 / Math.PI + 360) % 360
+}
+function previewCamera(cameraId, updates) {
+  const camera = cameras.value.find(item => item.id === cameraId)
+  if (!camera?.placement) return
+  cameras.value = cameras.value.map(item => item.id === cameraId ? { ...item, placement: { ...item.placement, ...updates } } : item)
+  const object = objects.value.find(item => item.id === camera.map_object_id)
+  if (object && ('latitude' in updates || 'longitude' in updates)) {
+    const lon = updates.longitude ?? object.geometry.coordinates[0], lat = updates.latitude ?? object.geometry.coordinates[1]
+    const next = { ...object, geometry: { type: 'Point', coordinates: [lon, lat] }, centroid_lon: lon, centroid_lat: lat, bbox: [lon, lat, lon, lat] }
+    objects.value = objects.value.map(item => item.id === next.id ? next : item)
+    if (selected.value?.id === next.id) selected.value = next
+    refreshSource()
+  }
+  refreshCameraSource()
+}
+function beginCameraHandleDrag(event) {
+  const feature = event.features?.[0]
+  if (!feature) return
+  const camera = cameras.value.find(item => item.id === Number(feature.properties.camera_id))
+  if (!camera?.placement) return
+  event.preventDefault()
+  cameraHandleDrag = { cameraId: camera.id, handle: feature.properties.handle, original: { ...camera.placement }, latest: {}, moved: false }
+  map.dragPan.disable(); map.on('mousemove', moveCameraHandle); map.on('touchmove', moveCameraHandle)
+  map.on('mouseup', endCameraHandleDrag); map.on('touchend', endCameraHandleDrag)
+  map.getCanvas().style.cursor = 'grabbing'
+}
+function moveCameraHandle(event) {
+  if (!cameraHandleDrag) return
+  const drag = cameraHandleDrag, point = [event.lngLat.lng, event.lngLat.lat], center = [drag.original.longitude, drag.original.latitude]
+  let update
+  if (drag.handle === 'center') update = { latitude: point[1], longitude: point[0] }
+  else if (drag.handle === 'heading') update = { heading_degrees: bearingFrom(center, point) }
+  else if (drag.handle === 'range') update = { range_meters: Math.max(1, Math.min(5000, distanceBetween(center, point))) }
+  else { const angle = bearingFrom(center, point), delta = ((angle - Number(drag.original.heading_degrees) + 540) % 360) - 180
+    update = { fov_degrees: Math.max(1, Math.min(179, Math.round(Math.abs(delta) * 2))) }
+  }
+  drag.latest = update; drag.moved = true; previewCamera(drag.cameraId, update)
+}
+async function endCameraHandleDrag() {
+  const drag = cameraHandleDrag; cameraHandleDrag = null
+  map.dragPan.enable(); map.off('mousemove', moveCameraHandle); map.off('touchmove', moveCameraHandle)
+  map.off('mouseup', endCameraHandleDrag); map.off('touchend', endCameraHandleDrag); map.getCanvas().style.cursor = ''
+  if (!drag?.moved) return
+  try {
+    const response = await fetch(`${API}/api/surveyor/cameras/${drag.cameraId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(drag.latest) })
+    if (!response.ok) throw new Error('Could not save camera adjustment')
+    const updated = await response.json(); cameras.value = cameras.value.map(item => item.id === updated.id ? updated : item)
+    const objectResponse = await fetch(`${API}/api/surveyor/objects/${updated.map_object_id}`)
+    if (objectResponse.ok) { const object = await objectResponse.json(); objects.value = objects.value.map(item => item.id === object.id ? object : item); selected.value = object }
+    refreshCameraSource(); refreshSource()
+  } catch (err) { error.value = err.message; await loadCameras(); await loadObjects() }
+}
 watch(timelineWindow, () => { refreshSource(); refreshCandidates(); refreshCameraSource() }, { deep: true })
 
 function trackCollection() {
@@ -181,11 +261,14 @@ function beginLocationWatch() {
   geoWatchId = navigator.geolocation.watchPosition(position => {
     const coordinate = [position.coords.longitude, position.coords.latitude]
     const previous = trackCoords.value.at(-1)
+    const now = position.timestamp || Date.now(), previousTime = trackTimes.value.at(-1)
+    if (position.coords.accuracy > 60) return
+    if (previous && previousTime && distanceBetween(previous, coordinate) / Math.max(0.001, (now - previousTime) / 1000) > 45) return
     if (!previous || distanceBetween(previous, coordinate) > 2) {
-      trackCoords.value.push(coordinate); refreshTrack()
+      trackCoords.value.push(coordinate); trackTimes.value.push(now); locationWarning.value = ''; refreshTrack()
       if (trackCoords.value.length % 5 === 0) saveSessionCheckpoint()
     }
-  }, () => { error.value = 'Location tracking is unavailable. The search session is still active.' }, { enableHighAccuracy: true, maximumAge: 5000 })
+  }, () => { locationWarning.value = 'Location tracking is unavailable. The search session is still active.' }, { enableHighAccuracy: true, maximumAge: 5000 })
 }
 
 async function loadActiveSession() {
@@ -198,6 +281,7 @@ async function loadActiveSession() {
     if (!session) return
     if (!session.ended_at) activeSession.value = session
     trackCoords.value = session.track_geojson?.type === 'LineString' ? session.track_geojson.coordinates : []
+    trackTimes.value = trackCoords.value.map(() => null)
     refreshTrack()
     if (trackCoords.value.length) map?.flyTo({ center: trackCoords.value.at(-1), zoom: Math.max(map.getZoom(), 14) })
     if (!session.ended_at) beginLocationWatch()
@@ -208,18 +292,23 @@ async function startSearch() {
   const response = await fetch(`${API}/api/surveyor/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ method: sessionMethod.value }) })
   if (!response.ok) { error.value = 'Could not start search session'; return }
-  activeSession.value = await response.json(); trackCoords.value = []; refreshTrack()
+  activeSession.value = await response.json(); trackCoords.value = []; trackTimes.value = []; locationWarning.value = ''; refreshTrack()
   beginLocationWatch()
 }
 
 async function endSearch() {
   if (!activeSession.value) return
+  searchResultOpen.value = true
+}
+
+async function finishSearch(result) {
+  if (!activeSession.value) return
   const response = await fetch(`${API}/api/surveyor/sessions/${activeSession.value.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ track_geojson: trackCoords.value.length >= 2 ? { type: 'LineString', coordinates: trackCoords.value } : null,
-      distance_meters: sessionDistance(), result_summary: window.prompt('Search result', 'No cat activity reported') || '' }) })
+      distance_meters: sessionDistance(), result_summary: result.result_summary, notes: [result.outcome, result.notes].filter(Boolean).join(' · ') }) })
   if (!response.ok) { error.value = 'Could not finish search session'; return }
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
-  geoWatchId = null; activeSession.value = null
+  geoWatchId = null; activeSession.value = null; searchResultOpen.value = false
 }
 
 async function loadCandidates() {
@@ -234,8 +323,9 @@ async function loadCandidates() {
 function candidateCollection() {
   return { type: 'FeatureCollection', features: candidates.value.filter(post => inTimeline(post.reported_at || post.posted_at || post.first_seen_at)).map(post => ({
     type: 'Feature', id: post.id, properties: { id: post.id, title: post.name || 'Candidate report', source: post.source,
-      source_id: post.source_id, source_url: post.source_url || '', reported_at: post.reported_at || '',
-      location_text: post.location_text || '' },
+      source_id: post.source_id, source_url: post.source_url || '', reported_at: post.reported_at || '', posted_at: post.posted_at || '',
+      first_seen_at: post.first_seen_at || '', location_text: post.location_text || '', match_score: post.match_score ?? 0,
+      distance_from_home_miles: post.distance_from_home_miles ?? null, location_precision: post.location_precision || '', image_url: post.image_url || '' },
     geometry: { type: 'Point', coordinates: [Number(post.map_longitude), Number(post.map_latitude)] }
   })) }
 }
@@ -291,37 +381,23 @@ async function createLink(targetId) {
 }
 
 async function createPin(coordinates) {
-  const name = window.prompt('Name this field observation')
-  if (name === null) return
-  const response = await fetch(`${API}/api/surveyor/objects`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ object_type: 'pin', subtype: subtype.value, name: name.trim() || null,
-      geometry: { type: 'Point', coordinates }, notes: '', epistemic_state: 'observed', confidence: 'possible' })
-  })
-  if (!response.ok) throw new Error('Could not save map marker')
-  const object = await response.json()
-  objects.value.unshift(object); refreshSource(); selected.value = object; activeTool.value = 'select'
-}
-
-async function createNote(coordinates) {
-  const name = window.prompt('Note title')
-  if (name === null) return
-  const noteText = window.prompt('Field note')
-  if (noteText === null) return
-  const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ object_type: 'note', subtype: 'field_note', name: name.trim() || 'Field note', notes: noteText,
-      geometry: { type: 'Point', coordinates }, epistemic_state: 'observed' }) })
-  if (!response.ok) throw new Error('Could not save field note')
-  const object = await response.json(); objects.value.unshift(object); refreshSource(); selected.value = object
-  title.value = object.name; subtype.value = object.subtype; notes.value = object.notes; activeTool.value = 'select'; draw?.setMode('select')
+  draftObject.value = { kind: 'pin', geometry: { type: 'Point', coordinates }, subtype: subtype.value }
 }
 
 async function createCamera(coordinates) {
-  const name = window.prompt('Name this trail camera')
-  if (name === null) return
+  draftObject.value = { kind: 'camera', geometry: { type: 'Point', coordinates } }
+}
+
+function createNote(coordinates) {
+  draftObject.value = { kind: 'note', geometry: { type: 'Point', coordinates }, subtype: 'field_note' }
+}
+
+async function saveDraft(payload) {
+  if (payload.kind === 'camera') {
   const response = await fetch(`${API}/api/surveyor/cameras`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name.trim() || 'Trail camera', longitude: coordinates[0], latitude: coordinates[1],
-      heading_degrees: cameraHeading.value, fov_degrees: cameraFov.value, range_meters: cameraRange.value }) })
+    body: JSON.stringify({ name: payload.name || 'Trail camera', longitude: payload.geometry.coordinates[0], latitude: payload.geometry.coordinates[1],
+      heading_degrees: payload.heading_degrees, fov_degrees: payload.fov_degrees, range_meters: payload.range_meters,
+      camera_model: payload.camera_model, power_type: payload.power_type, notes: payload.notes }) })
   if (!response.ok) throw new Error('Could not save trail camera')
   const camera = await response.json(); cameras.value.unshift(camera)
   const objectResponse = await fetch(`${API}/api/surveyor/objects/${camera.map_object_id}`)
@@ -329,7 +405,26 @@ async function createCamera(coordinates) {
   const object = await objectResponse.json(); objects.value.unshift(object); refreshSource(); refreshCameraSource()
   selected.value = object; selectedCandidate.value = null; title.value = object.name; subtype.value = 'camera'; notes.value = object.notes
   cameraHeading.value = camera.placement.heading_degrees; cameraFov.value = camera.placement.fov_degrees; cameraRange.value = camera.placement.range_meters
-  activeTool.value = 'select'; draw?.setMode('select')
+  } else {
+    const isZone = payload.kind === 'zone', isLine = payload.kind === 'line'
+    const properties = isZone && payload.subtype === 'searched' ? { searched_at: new Date().toISOString(), search_session_id: activeSession.value?.id || null, search_method: activeSession.value?.method || null } : {}
+    const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ object_type: isZone ? 'zone' : isLine ? 'corridor' : payload.kind === 'note' ? 'note' : 'pin',
+        subtype: payload.subtype || (payload.kind === 'note' ? 'field_note' : null), name: payload.name || (payload.kind === 'note' ? 'Field note' : null),
+        geometry: payload.geometry, notes: payload.notes || '', occurred_at: payload.occurred_at,
+        epistemic_state: payload.epistemic_state, confidence: payload.confidence, properties,
+        status: isZone ? payload.subtype : null }) })
+    if (!response.ok) throw new Error((await response.json()).detail || 'Could not save map object')
+    const object = await response.json(); objects.value.unshift(object); refreshSource(); selected.value = object
+    title.value = object.name || ''; subtype.value = object.subtype || ''; notes.value = object.notes || ''
+  }
+  if (draftDrawId.value != null) draw?.removeFeatures([draftDrawId.value])
+  draftObject.value = null; draftDrawId.value = null; activeTool.value = 'select'; draw?.setMode('select'); refreshSource(); refreshCameraSource()
+}
+
+function cancelDraft() {
+  if (draftDrawId.value != null) draw?.removeFeatures([draftDrawId.value])
+  draftObject.value = null; draftDrawId.value = null; activeTool.value = 'select'; draw?.setMode('select')
 }
 
 async function moveSelectedCamera(coordinates) {
@@ -395,21 +490,12 @@ async function persistDrawn(id) {
   const feature = draw?.getSnapshotFeature(id)
   if (!feature?.geometry) return
   const isZone = feature.geometry.type === 'Polygon'
-  const name = window.prompt(isZone ? 'Name this zone' : 'Name this line')
-  if (name === null) { draw.removeFeatures([id]); return }
-  const response = await fetch(`${API}/api/surveyor/objects`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ object_type: isZone ? 'zone' : 'corridor', subtype: isZone ? zoneSubtype.value : 'cat_highway',
-      name: name.trim() || null, geometry: feature.geometry, epistemic_state: 'planning',
-      confidence: 'possible', status: isZone ? zoneSubtype.value : 'active' })
-  })
-  draw.removeFeatures([id])
-  if (!response.ok) throw new Error('Could not save drawing')
-  const object = await response.json()
-  objects.value.unshift(object); refreshSource(); activeTool.value = 'select'; draw.setMode('select')
+  draftDrawId.value = id
+  draftObject.value = { kind: isZone ? 'zone' : 'line', geometry: feature.geometry, subtype: isZone ? zoneSubtype.value : 'known_cat_highway' }
 }
 
 function chooseObject(event) {
+  selectedHistoricalPlacement.value = null
   selectedCandidate.value = null
   const id = event.features?.[0]?.properties?.id
   selected.value = objects.value.find(object => object.id === Number(id)) || null
@@ -419,6 +505,15 @@ function chooseObject(event) {
     cameraHeading.value = camera.placement.heading_degrees; cameraFov.value = camera.placement.fov_degrees; cameraRange.value = camera.placement.range_meters
   }
   if (selected.value) loadAttachments(selected.value.id)
+  refreshCameraSource()
+}
+
+function chooseHistoricalPlacement(event) {
+  const feature = event.features?.[0]
+  if (!feature) return
+  selected.value = null; selectedCandidate.value = null
+  selectedHistoricalPlacement.value = { ...feature.properties, coordinates: feature.geometry.coordinates }
+  refreshCameraSource()
 }
 
 async function loadAttachments(objectId) {
@@ -445,9 +540,37 @@ function chooseCandidate(event) {
   const id = Number(event.features?.[0]?.properties?.id)
   selectedCandidate.value = candidates.value.find(post => post.id === id) || null
   selected.value = null
+  selectedHistoricalPlacement.value = null
+  refreshCameraSource()
 }
 
-async function saveSelected() {
+function showCandidateCluster(feature) {
+  selected.value = null; selectedCandidate.value = null; selectedHistoricalPlacement.value = null
+  const source = map.getSource('candidate-reports')
+  source.getClusterLeaves(feature.properties.cluster_id, 50, 0, (err, leaves) => {
+    if (err) { error.value = 'Could not load candidate reports in this cluster'; return }
+    candidateCluster.value = { clusterId: feature.properties.cluster_id, coordinates: feature.geometry.coordinates,
+      count: Number(feature.properties.point_count), posts: leaves.map(leaf => candidates.value.find(post => post.id === Number(leaf.properties.id))).filter(Boolean) }
+  })
+}
+function openClusterCandidate(id) {
+  const post = candidates.value.find(item => item.id === Number(id))
+  if (!post) return
+  candidateCluster.value = null; selected.value = null; selectedCandidate.value = post
+}
+async function createEvidenceForCandidate(id) {
+  const post = candidates.value.find(item => item.id === Number(id))
+  if (!post) return
+  selectedCandidate.value = post; candidateCluster.value = null
+  await createEvidenceFromCandidate()
+}
+function zoomCandidateCluster() {
+  if (!candidateCluster.value) return
+  const source = map.getSource('candidate-reports'), cluster = candidateCluster.value
+  source.getClusterExpansionZoom(cluster.clusterId, (err, zoom) => { if (!err) { map.easeTo({ center: cluster.coordinates, zoom }); candidateCluster.value = null } })
+}
+
+async function saveSelected(saveAsNewPlacement = false) {
   if (!selected.value) return
   saving.value = true
   try {
@@ -456,7 +579,7 @@ async function saveSelected() {
       if (!camera) throw new Error('Camera record unavailable')
       const cameraResponse = await fetch(`${API}/api/surveyor/cameras/${camera.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: title.value || camera.name, notes: notes.value, heading_degrees: cameraHeading.value,
-          fov_degrees: cameraFov.value, range_meters: cameraRange.value }) })
+          fov_degrees: cameraFov.value, range_meters: cameraRange.value, save_as_new_placement: saveAsNewPlacement }) })
       if (!cameraResponse.ok) throw new Error('Could not update camera placement')
       const updatedCamera = await cameraResponse.json()
       cameras.value = cameras.value.map(item => item.id === updatedCamera.id ? updatedCamera : item)
@@ -512,14 +635,23 @@ function onMapClick(event) {
     return
   }
   if (!['pin', 'note', 'camera'].includes(activeTool.value)) return
-  const overlays = map.queryRenderedFeatures(event.point, { layers: ['surveyor-points', 'trail-camera-points', 'candidate-reports-point'] })
+  const overlays = map.queryRenderedFeatures(event.point, { layers: ['surveyor-points', 'trail-camera-points', 'camera-history-points', 'selected-camera-handles', 'candidate-reports-point'] })
   if (overlays.length) return
   const coordinates = [event.lngLat.lng, event.lngLat.lat]
   const create = activeTool.value === 'note' ? createNote : activeTool.value === 'camera' ? createCamera : createPin
-  create(coordinates).catch(err => { error.value = err.message })
+  create(coordinates)
+}
+
+function activateTool(tool) {
+  if (tool === 'link') linkStartId.value = null
+  activeTool.value = tool
+  if (tool === 'zone') draw?.setMode('polygon')
+  else if (tool === 'line') draw?.setMode('linestring')
+  else draw?.setMode('select')
 }
 
 onMounted(() => {
+  document.addEventListener('visibilitychange', onVisibilityChange)
   map = new maplibregl.Map({
     container: mapEl.value, style: 'https://tiles.openfreemap.org/styles/positron',
     center: [-79.117282, 35.845701], zoom: 12, attributionControl: true
@@ -537,6 +669,8 @@ onMounted(() => {
     map.addSource('surveyor-objects', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('candidate-reports', { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, cluster: true, clusterRadius: 48, clusterMaxZoom: 13 })
     map.addSource('camera-cones', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map.addSource('camera-history-points', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map.addSource('selected-camera-handles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('surveyor-links', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('active-search-track', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('annual-landcover-source', { type: 'raster', tileSize: 256, attribution: 'Annual NLCD · USGS / MRLC', tiles: [
@@ -547,11 +681,18 @@ onMounted(() => {
       'line-color': '#b75d34', 'line-width': 4, 'line-opacity': 0.9
     } })
     map.addLayer({ id: 'camera-cones-fill', type: 'fill', source: 'camera-cones', paint: {
-      'fill-color': '#477b7a', 'fill-opacity': ['case', ['==', ['get', 'current'], true], 0.18, 0.075]
+      'fill-color': '#477b7a', 'fill-opacity': ['*', ['get', 'opacity'], 0.18]
     } })
     map.addLayer({ id: 'camera-cones-outline', type: 'line', source: 'camera-cones', paint: {
       'line-color': '#477b7a', 'line-width': ['case', ['==', ['get', 'current'], true], 1.5, 1],
-      'line-dasharray': ['case', ['==', ['get', 'current'], true], ['literal', [1, 0]], ['literal', [2, 2]]]
+      'line-opacity': ['get', 'opacity'], 'line-dasharray': ['case', ['==', ['get', 'current'], true], ['literal', [1, 0]], ['literal', [2, 2]]]
+    } })
+    map.addLayer({ id: 'trail-camera-history-points', type: 'circle', source: 'camera-history-points', paint: {
+      'circle-radius': 5, 'circle-color': '#477b7a', 'circle-opacity': ['get', 'opacity'], 'circle-stroke-color': '#f6f4e8', 'circle-stroke-width': 1.5
+    } })
+    map.addLayer({ id: 'selected-camera-handles', type: 'circle', source: 'selected-camera-handles', paint: {
+      'circle-radius': 14, 'circle-color': ['match', ['get', 'handle'], 'center', '#f6f4e8', '#d66a16'],
+      'circle-stroke-color': '#264d40', 'circle-stroke-width': 2
     } })
     map.addLayer({ id: 'candidate-reports-point', type: 'circle', source: 'candidate-reports', filter: ['!', ['has', 'point_count']], paint: {
       'circle-radius': 7, 'circle-color': '#416f72', 'circle-stroke-color': '#f6f4e8', 'circle-stroke-width': 2, 'circle-opacity': 0.92
@@ -564,10 +705,16 @@ onMounted(() => {
     }, paint: { 'text-color': '#ffffff' } })
     map.addLayer({ id: 'surveyor-zones-fill', type: 'fill', source: 'surveyor-objects', filter: ['==', ['geometry-type'], 'Polygon'], paint: {
       'fill-color': ['match', ['get', 'subtype'], 'needs_search', '#dfad58', 'searched', '#667d69', 'known_cat_highway', '#58836f', 'wildlife_hotspot', '#9b7f61', '#75866e'],
-      'fill-opacity': 0.17
+      'fill-opacity': ['case', ['==', ['get', 'search_freshness'], 'stale'], 0.04, ['==', ['get', 'search_freshness'], 'aging'], 0.1, ['==', ['get', 'epistemic_state'], 'planning'], 0.08, ['==', ['get', 'confidence'], 'uncertain'], 0.09, 0.17]
+    } })
+    map.addLayer({ id: 'surveyor-zones-outline', type: 'line', source: 'surveyor-objects', filter: ['==', ['geometry-type'], 'Polygon'], paint: {
+      'line-color': ['match', ['get', 'subtype'], 'needs_search', '#c4943f', 'searched', '#667d69', 'known_cat_highway', '#58836f', '#75866e'],
+      'line-width': 1.8, 'line-opacity': ['case', ['==', ['get', 'search_freshness'], 'stale'], 0.38, ['==', ['get', 'search_freshness'], 'aging'], 0.68, 0.95],
+      'line-dasharray': ['match', ['get', 'epistemic_state'], 'hypothesis', ['literal', [1, 2]], 'inferred', ['literal', [4, 2]], 'planning', ['literal', [2, 2]], ['literal', [1, 0]]]
     } })
     map.addLayer({ id: 'surveyor-lines', type: 'line', source: 'surveyor-objects', filter: ['==', ['geometry-type'], 'LineString'], paint: {
-      'line-color': '#4c705a', 'line-width': 3, 'line-dasharray': ['case', ['==', ['get', 'object_type'], 'corridor'], ['literal', [2, 2]], ['literal', [1, 0]]]
+      'line-color': '#4c705a', 'line-width': 3, 'line-opacity': ['case', ['==', ['get', 'confidence'], 'uncertain'], 0.48, 0.92],
+      'line-dasharray': ['match', ['get', 'epistemic_state'], 'hypothesis', ['literal', [1, 2]], 'inferred', ['literal', [4, 2]], 'planning', ['literal', [2, 2]], ['literal', [1, 0]]]
     } })
     map.addLayer({ id: 'surveyor-links-line', type: 'line', source: 'surveyor-links', paint: {
       'line-color': ['match', ['get', 'link_type'], 'observed_movement', '#344f40', 'hypothesized_movement', '#98724a', 'possible_corridor', '#517c6a', 'evidence_against', '#a04d43', '#677b70'],
@@ -582,8 +729,8 @@ onMounted(() => {
       'text-size': 15, 'text-keep-upright': false
     }, paint: { 'text-color': '#344f40', 'text-halo-color': '#f6f4e8', 'text-halo-width': 1.5 } })
     map.addLayer({ id: 'surveyor-points', type: 'circle', source: 'surveyor-objects', filter: ['all', ['==', ['geometry-type'], 'Point'], ['!=', ['get', 'object_type'], 'trail_camera']], paint: {
-      'circle-radius': 8, 'circle-color': ['match', ['get', 'object_type'], 'note', '#c59043', '#d66a16'], 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2,
-      'circle-opacity': 0.96
+      'circle-radius': 8, 'circle-color': ['get', 'color'], 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2,
+      'circle-opacity': ['case', ['==', ['get', 'confidence'], 'uncertain'], 0.55, 0.96]
     } })
     map.addLayer({ id: 'trail-camera-points', type: 'circle', source: 'surveyor-objects', filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'object_type'], 'trail_camera']], paint: {
       'circle-radius': 9, 'circle-color': '#477b7a', 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2
@@ -593,19 +740,32 @@ onMounted(() => {
     }, paint: { 'text-color': '#24372e', 'text-halo-color': '#faf9f2', 'text-halo-width': 1.5 } })
     map.on('click', 'surveyor-points', chooseObject)
     map.on('click', 'trail-camera-points', chooseObject)
+    map.on('mousedown', 'selected-camera-handles', beginCameraHandleDrag)
+    map.on('touchstart', 'selected-camera-handles', beginCameraHandleDrag)
+    map.on('click', 'camera-history-points', chooseHistoricalPlacement)
+    map.on('mouseenter', 'selected-camera-handles', () => { map.getCanvas().style.cursor = 'grab' })
+    map.on('mouseleave', 'selected-camera-handles', () => { if (!cameraHandleDrag) map.getCanvas().style.cursor = '' })
     map.on('click', 'candidate-reports-point', chooseCandidate)
     map.on('click', 'candidate-reports-cluster', event => {
       const feature = event.features?.[0]
       if (!feature) return
-      map.getSource('candidate-reports').getClusterExpansionZoom(feature.properties.cluster_id, (err, zoom) => {
-        if (!err) map.easeTo({ center: feature.geometry.coordinates, zoom })
-      })
+      showCandidateCluster(feature)
     })
     map.on('mouseenter', 'surveyor-points', () => { map.getCanvas().style.cursor = 'pointer' })
     map.on('mouseleave', 'surveyor-points', () => { map.getCanvas().style.cursor = '' })
     map.on('mouseenter', 'trail-camera-points', () => { map.getCanvas().style.cursor = 'pointer' })
     map.on('mouseleave', 'trail-camera-points', () => { map.getCanvas().style.cursor = '' })
     map.on('click', onMapClick)
+    registerSurveyorIcons(map).then(({ registered }) => {
+      if (!registered.length || !map.getLayer('surveyor-points')) return
+      map.addLayer({ id: 'surveyor-icons', type: 'symbol', source: 'surveyor-objects', filter: ['==', ['geometry-type'], 'Point'], layout: {
+        'icon-image': ['get', 'icon'], 'icon-size': 0.72, 'icon-allow-overlap': true, 'icon-ignore-placement': true
+      } })
+      const available = ['literal', registered]
+      map.setFilter('surveyor-points', ['all', ['==', ['geometry-type'], 'Point'], ['!=', ['get', 'object_type'], 'trail_camera'], ['!', ['in', ['get', 'icon'], available]]])
+      map.setFilter('trail-camera-points', ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'object_type'], 'trail_camera'], ['!', ['in', ['get', 'icon'], available]]])
+      map.setLayoutProperty('surveyor-icons', 'visibility', layerSettings.value.objects ? 'visible' : 'none')
+    })
     layerSettings.value = { ...layerSettings.value }
     loadObjects()
   })
@@ -613,7 +773,10 @@ onMounted(() => {
   resizeObserver.observe(mapEl.value)
 })
 
+function onVisibilityChange() { if (document.visibilityState === 'hidden' && activeSession.value) saveSessionCheckpoint() }
+
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   resizeObserver?.disconnect(); draw?.stop()
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
   if (activeSession.value) saveSessionCheckpoint()
@@ -625,16 +788,27 @@ onBeforeUnmount(() => {
   <main class="surveyor-page">
     <header class="surveyor-topbar">
       <div><p class="eyebrow">FIELD MAP · {{ objects.length }} OBJECTS</p><h1>Surveyor</h1></div>
-      <div class="surveyor-actions"><span v-if="loading">Loading field data…</span><select v-if="!activeSession" v-model="sessionMethod" class="session-method"><option value="walking">Walking</option><option value="bike">Bike</option><option value="car">Car</option><option value="stationary_observation">Observation</option><option value="camera_maintenance">Camera care</option><option value="flyering">Flyering</option></select><button v-if="!activeSession" class="session-button" @click="startSearch">Start search</button><button v-else class="session-button active" @click="endSearch">End search · {{ Math.round(sessionDistance()) }} m</button><button :class="{ active: layerDrawerOpen }" @click="layerDrawerOpen = !layerDrawerOpen">Layers</button><button :class="{ active: activeTool === 'select' }" @click="activeTool = 'select'; draw?.setMode('select')">Select</button><button :class="{ active: activeTool === 'pin' }" @click="activeTool = 'pin'; draw?.setMode('select')">＋ Pin</button><button :class="{ active: activeTool === 'camera' }" @click="activeTool = 'camera'; draw?.setMode('select')">Camera</button><button :class="{ active: activeTool === 'zone' }" @click="activeTool = 'zone'; draw?.setMode('polygon')">Zone</button><button :class="{ active: activeTool === 'line' }" @click="activeTool = 'line'; draw?.setMode('linestring')">Line</button><button :class="{ active: activeTool === 'link' }" @click="linkStartId = null; activeTool = 'link'; draw?.setMode('select')">Link</button><button :class="{ active: activeTool === 'note' }" @click="activeTool = 'note'; draw?.setMode('select')">Note</button></div>
+      <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="startSearch" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" />
     </header>
-    <p v-if="error" class="surveyor-error">{{ error }}</p>
+    <p v-if="error" class="surveyor-error">{{ error }}</p><p v-if="locationWarning" class="location-warning">{{ locationWarning }}</p>
     <div class="surveyor-workspace">
-      <aside class="surveyor-tools"><p>TOOLS</p><button :class="{ active: activeTool === 'select' }" @click="activeTool = 'select'; draw?.setMode('select')">↖<span>Select</span></button><button :class="{ active: activeTool === 'pin' }" @click="activeTool = 'pin'; draw?.setMode('select')">⌖<span>Pin</span></button><button :class="{ active: activeTool === 'camera' }" @click="activeTool = 'camera'; draw?.setMode('select')">◉<span>Camera</span></button><button :class="{ active: activeTool === 'zone' }" @click="activeTool = 'zone'; draw?.setMode('polygon')">▱<span>Zone</span></button><button :class="{ active: activeTool === 'line' }" @click="activeTool = 'line'; draw?.setMode('linestring')">⌁<span>Line</span></button><button :class="{ active: activeTool === 'link' }" @click="linkStartId = null; activeTool = 'link'; draw?.setMode('select')">⟷<span>Link</span></button><button :class="{ active: activeTool === 'note' }" @click="activeTool = 'note'; draw?.setMode('select')">✎<span>Note</span></button></aside>
-      <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"></div><div v-if="['pin','note','camera','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? 'Choose a marker type, then tap the map' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'pin'" v-model="subtype" class="pin-type-picker"><option v-for="item in types" :key="item.value" :value="item.value">{{ item.label }}</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option value="searched">Searched</option><option value="needs_search">Needs search</option><option value="needs_recheck">Needs re-check</option><option value="known_cat_highway">Known cat highway</option><option value="wildlife_hotspot">Wildlife hotspot</option><option value="likely_shelter">Likely shelter</option><option value="dog_territory">Dog territory</option><option value="private_no_access">Private / no access</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins and zones</label></div></div></section>
+      <SurveyorToolbar :active-tool="activeTool" @tool="activateTool" @more="mobileMoreOpen=!mobileMoreOpen" />
+      <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? 'Choose a marker type, then tap the map' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option value="searched">Searched</option><option value="needs_search">Needs search</option><option value="needs_recheck">Needs re-check</option><option value="known_cat_highway">Known cat highway</option><option value="wildlife_hotspot">Wildlife hotspot</option><option value="likely_shelter">Likely shelter</option><option value="dog_territory">Dog territory</option><option value="private_no_access">Private / no access</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
       <LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" @update:model-value="layerSettings = $event" @close="layerDrawerOpen = false" />
-      <aside v-if="selectedCandidate" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">CANDIDATE REPORT</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2></div><button aria-label="Close inspector" @click="selectedCandidate = null">×</button></div><p class="inspector-meta">{{ selectedCandidate.source }} · {{ selectedCandidate.reported_at ? new Date(selectedCandidate.reported_at).toLocaleDateString() : 'Report date unknown' }}</p><p>{{ selectedCandidate.location_text }}</p><div class="inspector-buttons"><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button></div></aside>
-      <aside v-else-if="selected" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">{{ selected.object_type }} · #{{ selected.id }}</p><h2>{{ selected.name || 'Field object' }}</h2></div><button aria-label="Close inspector" @click="selected = null">×</button></div><label>Name<input v-model="title" maxlength="180" /></label><label v-if="selected.object_type !== 'trail_camera' && !['zone','corridor'].includes(selected.object_type)">Type<select v-model="subtype"><option v-for="item in types" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><template v-if="selected.object_type === 'trail_camera'"><label>Heading · degrees<input v-model.number="cameraHeading" type="number" min="0" max="360" /></label><label>Field of view · degrees<input v-model.number="cameraFov" type="number" min="1" max="179" /></label><label>Useful range · meters<input v-model.number="cameraRange" type="number" min="1" max="5000" /></label><div class="camera-history-list"><strong>Placement history</strong><p v-for="placement in (cameras.find(item => item.map_object_id === selected.id)?.history || [])" :key="placement.id">{{ placement.removed_at ? new Date(placement.installed_at).toLocaleDateString() + ' – ' + new Date(placement.removed_at).toLocaleDateString() : 'Current placement' }} · {{ Math.round(placement.heading_degrees) }}°</p></div></template><label>Notes<textarea v-model="notes" rows="5"></textarea></label><section class="attachment-list"><h3>Evidence attachments</h3><article v-for="attachment in attachments" :key="attachment.id"><img v-if="attachment.attachment_type === 'image'" :src="`${API}${attachment.media_url}`" :alt="attachment.caption || 'Evidence photo'" /><a v-else :href="`${API}${attachment.media_url}`" target="_blank" rel="noreferrer">{{ attachment.attachment_type === 'audio' ? 'Play audio evidence' : 'Open file' }}</a><p>{{ attachment.caption || attachment.source }}</p></article><label class="attachment-upload">{{ uploadingAttachment ? 'Uploading…' : '＋ Add photo, audio, or file' }}<input type="file" accept="image/jpeg,image/png,image/webp,audio/mpeg,audio/wav,application/pdf,text/plain" :disabled="uploadingAttachment" @change="uploadAttachment" /></label><input v-model="attachmentCaption" class="attachment-caption" placeholder="Attachment caption (optional)" /></section><div v-if="['Polygon','LineString'].includes(selected.geometry.type) && activeTool !== 'edit'" class="inspector-buttons"><button class="secondary-button" @click="beginGeometryEdit">Edit geometry</button></div><div v-if="selected.geometry.type === 'Point' && selected.object_type !== 'trail_camera'" class="inspector-buttons"><button class="secondary-button" @click="activeTool = 'move-object'">Move on map</button></div><div v-if="activeTool === 'edit'" class="inspector-buttons"><button class="primary" @click="finishGeometryEdit(true)">Save geometry</button><button class="secondary-button" @click="finishGeometryEdit(false)">Cancel</button></div><p class="inspector-meta">Added {{ new Date(selected.created_at).toLocaleString() }}</p><div class="inspector-buttons"><button v-if="selected.object_type === 'trail_camera'" class="secondary-button" @click="activeTool = 'move-camera'">Move on map</button><button v-if="activeTool !== 'edit'" class="primary" :disabled="saving" @click="saveSelected">{{ saving ? 'Saving…' : 'Save changes' }}</button><button v-if="selected.object_type === 'trail_camera'" class="danger-button" @click="deleteSelected">Deactivate</button><button v-else class="danger-button" @click="deleteSelected">Delete</button></div><p v-if="['move-camera','move-object'].includes(activeTool)" class="map-hint inline-map-hint">Tap the new object location</p></aside>
+      <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
+      <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" />
+      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" />
     </div>
+
+    <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>
+    <MobileInspectorSheet :open="Boolean(selected || selectedCandidate || selectedHistoricalPlacement)" @close="selected=null; selectedCandidate=null; selectedHistoricalPlacement=null">
+      <template v-if="selectedCandidate"><p class="eyebrow">CANDIDATE REPORT · {{ selectedCandidate.source }}</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2><p>{{ selectedCandidate.location_text }}</p><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button></template>
+      <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p></template>
+      <template v-else-if="selected"><p class="eyebrow">{{ selected.object_type }} · #{{ selected.id }}</p><h2>{{ selected.name || 'Field object' }}</h2><label>Name<input v-model="title" /></label><label>Notes<textarea v-model="notes" rows="3"></textarea></label><p v-if="selected.subtype === 'searched'">{{ searchFreshness(selected) }} coverage · {{ selected.properties?.searched_at ? new Date(selected.properties.searched_at).toLocaleDateString() : 'Date unknown' }}</p><button class="primary" @click="saveSelected">Save changes</button><button v-if="selected.object_type==='trail_camera'" class="secondary-button" @click="activeTool='move-camera'">Move camera</button></template>
+    </MobileInspectorSheet>
+    <CandidateClusterSheet v-if="candidateCluster" :cluster="candidateCluster" @close="candidateCluster=null" @open="openClusterCandidate" @evidence="createEvidenceForCandidate" @zoom="zoomCandidateCluster" />
+    <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
+    <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet @save="finishSearch" @cancel="searchResultOpen=false" /></div>
     <footer class="surveyor-footer"><SurveyTimeline v-model="timelineWindow" /><span v-if="activeSession" class="active-session-status">SEARCH ACTIVE · {{ Math.round(sessionDistance()) }} m</span></footer>
   </main>
 </template>

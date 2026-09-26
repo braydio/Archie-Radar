@@ -495,20 +495,26 @@ def update_surveyor_camera(camera_id: int, payload: SurveyorCameraUpdate, db: Se
     placement_keys = {"latitude", "longitude", "heading_degrees", "fov_degrees", "range_meters"}
     placement_updates = {key: value for key, value in values.items() if key in placement_keys and value is not None
         and (placement is None or value != getattr(placement, key))}
-    if placement_updates or save_as_new:
+    position_changed = any(key in placement_updates for key in {"latitude", "longitude"})
+    aim_updates = {key: value for key, value in placement_updates.items()
+        if key in {"heading_degrees", "fov_degrees", "range_meters"}}
+    if position_changed or save_as_new:
         if placement is None:
             raise HTTPException(status_code=409, detail="Camera has no active placement")
         next_values = {key: getattr(placement, key) for key in placement_keys}
         next_values.update(placement_updates)
         placement.removed_at = utcnow()
         db.add(SurveyorCameraPlacement(camera_id=camera.id, **next_values, installed_at=utcnow(), notes=placement.notes))
-        _save_surveyor_geometry(map_object, {"type": "Point", "coordinates": [next_values["longitude"], next_values["latitude"]]})
+        if position_changed:
+            _save_surveyor_geometry(map_object, {"type": "Point", "coordinates": [next_values["longitude"], next_values["latitude"]]})
+    elif aim_updates:
+        for key, value in aim_updates.items():
+            setattr(placement, key, value)
     db.flush()
-    if placement_updates or save_as_new:
-        moved = any(key in placement_updates for key in {"latitude", "longitude"})
-        action = "camera_moved" if moved else "camera_aimed"
+    if position_changed or save_as_new or aim_updates:
+        action = "camera_moved" if position_changed else "camera_placement_saved" if save_as_new else "camera_aimed"
         _record_surveyor_event(db, action, "trail_camera", camera.id,
-            f"{'Moved' if moved else 'Re-aimed'} {camera.name}", before=before,
+            f"{'Moved' if position_changed else 'Saved placement for' if save_as_new else 'Re-aimed'} {camera.name}", before=before,
             after=_camera_output(db, camera).model_dump(mode="json"), reversible=True)
     db.commit(); db.refresh(camera)
     return _camera_output(db, camera)
@@ -691,7 +697,7 @@ def create_surveyor_link(payload: SurveyorLinkIn, db: Session = Depends(get_db))
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="This object link already exists") from exc
-    _record_surveyor_event(db, "object_linked", "object_link", row.id, f"Linked {source.name or source.object_type} to {target.name or target.object_type}",
+    _record_surveyor_event(db, "object_link_created", "object_link", row.id, f"Linked {source.name or source.object_type} to {target.name or target.object_type}",
         after={"source_object_id": source.id, "target_object_id": target.id, "link_type": row.link_type})
     db.commit(); db.refresh(row)
     return _link_output(db, row)
