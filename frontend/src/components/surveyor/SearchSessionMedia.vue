@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import PhotoCapture from './PhotoCapture.vue'
 import AudioRecorder from './AudioRecorder.vue'
+import { uploadMedia } from '../../surveyor/mediaCapture.js'
 const props = defineProps({ api: { type: String, required: true }, sessionId: { type: Number, required: true } })
 const emit = defineEmits(['close'])
 const attachments = ref([])
@@ -16,10 +17,7 @@ async function upload(file) {
   if (!file) return
   uploading.value = true; error.value = ''
   try {
-    const form = new FormData(); form.append('file', file); form.append('caption', caption.value); form.append('observed_at', new Date().toISOString())
-    const response = await fetch(`${props.api}/api/surveyor/sessions/${props.sessionId}/attachments`, { method: 'POST', body: form })
-    const result = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(result.detail || 'Could not upload session media')
+    const result = await uploadMedia(props.api, { searchSessionId: props.sessionId }, file, { caption: caption.value })
     attachments.value.unshift(result); caption.value = ''
   } catch (cause) { error.value = cause.message }
   finally { uploading.value = false }

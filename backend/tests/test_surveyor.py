@@ -113,6 +113,22 @@ def test_archived_object_is_omitted_from_normal_list(client: TestClient) -> None
     assert all(item["id"] != obj["id"] for item in objects)
 
 
+def test_researched_zone_refresh_records_zone_researched_event(client: TestClient) -> None:
+    response = client.post("/api/surveyor/objects", json={
+        "object_type": "zone", "subtype": "searched", "status": "searched", "name": "Creek edge",
+        "geometry": {"type": "Polygon", "coordinates": [[[-79.1, 35.8], [-79.09, 35.8], [-79.09, 35.81], [-79.1, 35.8]]]},
+        "properties": {"searched_at": "2026-09-20T12:00:00+00:00"},
+    })
+    assert response.status_code == 201, response.text
+    obj = response.json()
+    updated = client.patch(f"/api/surveyor/objects/{obj['id']}", json={
+        "properties": {"searched_at": "2026-09-26T12:00:00+00:00", "search_method": "walking"},
+    })
+    assert updated.status_code == 200, updated.text
+    events = client.get("/api/surveyor/events", params={"limit": 20}).json()
+    assert any(event["event_type"] == "zone_researched" and event["entity_id"] == str(obj["id"]) for event in events)
+
+
 def test_access_record_creates_geographic_object_and_can_mark_do_not_contact(client: TestClient) -> None:
     created = client.post("/api/surveyor/access", json={
         "longitude": -79.1, "latitude": 35.8, "name": "Creekside",

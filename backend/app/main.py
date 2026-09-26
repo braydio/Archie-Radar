@@ -989,6 +989,12 @@ def update_surveyor_object(object_id: int, payload: SurveyorObjectPatch, db: Ses
             setattr(row, key, value)
     _record_surveyor_event(db, "object_updated", "map_object", row.id, f"Updated {row.object_type}", before=before,
         after=_surveyor_out(row).model_dump(mode="json"), reversible=True)
+    if row.object_type == "zone" and row.subtype == "searched" and "properties" in values:
+        old_searched_at = before.get("properties", {}).get("searched_at")
+        new_searched_at = json.loads(row.properties_json).get("searched_at")
+        if new_searched_at and new_searched_at != old_searched_at:
+            _record_surveyor_event(db, "zone_researched", "map_object", row.id, "Searched area again",
+                before={"searched_at": old_searched_at}, after={"searched_at": new_searched_at})
     if row.object_type == "evidence" and "properties" in values:
         new_resolution = json.loads(row.properties_json).get("resolution", "unresolved")
         if new_resolution != old_resolution:

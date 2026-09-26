@@ -1,6 +1,7 @@
 <script setup>
 import { reactive, watch } from 'vue'
-const props = defineProps({ object: { type: Object, required: true }, saving: Boolean })
+import { clearSurveyorDraft, storeSurveyorDraft } from '../../surveyor/draftStorage.js'
+const props = defineProps({ object: { type: Object, required: true }, saving: Boolean, initialForm: { type: Object, default: null } })
 const emit = defineEmits(['save'])
 const resolutions = ['unresolved', 'supports_archie', 'likely_not_archie', 'ruled_out', 'context_only']
 const form = reactive({ evidence_type: 'reported_observation', source_type: 'firsthand', source_name: '', resolution: 'unresolved', observer: '', species_guess: '' })
@@ -11,7 +12,9 @@ watch(() => props.object.id, () => Object.assign(form, {
   resolution: props.object.properties?.resolution || 'unresolved',
   observer: props.object.properties?.observer || '', species_guess: props.object.properties?.species_guess || '',
 }), { immediate: true })
-function save() { emit('save', { ...props.object.properties, ...form }) }
+if (props.initialForm) Object.assign(form, props.initialForm)
+watch(form, () => storeSurveyorDraft('evidence', { object_id: props.object.id, form: { ...form } }), { deep: true })
+function save() { clearSurveyorDraft('evidence'); emit('save', { ...props.object.properties, ...form }) }
 </script>
 <template>
   <section class="evidence-editor">

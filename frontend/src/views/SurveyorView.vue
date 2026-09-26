@@ -23,9 +23,16 @@ import PhotoCapture from '../components/surveyor/PhotoCapture.vue'
 import AccessEditor from '../components/surveyor/AccessEditor.vue'
 import SearchSessionMedia from '../components/surveyor/SearchSessionMedia.vue'
 import SearchSessionDetail from '../components/surveyor/SearchSessionDetail.vue'
+import QuickAddMenu from '../components/surveyor/QuickAddMenu.vue'
+import ObjectStackSheet from '../components/surveyor/ObjectStackSheet.vue'
+import DraftRecoveryPrompt from '../components/surveyor/DraftRecoveryPrompt.vue'
 import { cameraConePolygon, cameraHandlePoints } from '../surveyor/cameraGeometry.js'
 import { searchFreshness } from '../surveyor/zoneState.js'
 import { registerSurveyorIcons } from '../surveyor/iconRegistry.js'
+import { uploadMedia } from '../surveyor/mediaCapture.js'
+import { metersToFeet, formatDistance } from '../surveyor/units.js'
+import { createUndoStack } from '../surveyor/undoStack.js'
+import { clearSurveyorDraft, readSurveyorDraft } from '../surveyor/draftStorage.js'
 
 const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
 const route = useRoute()
@@ -64,6 +71,7 @@ const locationWarning = ref('')
 const selected = ref(null)
 const selectedCandidate = ref(null)
 const selectedHistoricalPlacement = ref(null)
+const objectStack = ref([])
 const candidateCluster = ref(null)
 const candidatesVisible = ref(true)
 const cameraHistoryVisible = ref(false)
@@ -83,6 +91,18 @@ const snapTarget = ref(null)
 const notes = ref('')
 const saving = ref(false)
 const coveragePreview = ref(null)
+const history = createUndoStack()
+const quickAdd = ref(null)
+const suppressMapClick = ref(false)
+const draftRecovery = ref(readSurveyorDraft())
+const restoredObjectForm = ref(null)
+const restoredAccessForm = ref(null)
+const restoredSearchForm = ref(null)
+const restoredEvidenceForm = ref(null)
+const restoreSearchPending = ref(false)
+let longPressTimer = null
+let longPressOrigin = null
+let longPressMoved = false
 let map
 let draw
 let resizeObserver
@@ -97,7 +117,7 @@ watch(layerSettings, settings => {
   try { localStorage.setItem(LAYER_STORAGE, JSON.stringify(settings)) } catch {}
   candidatesVisible.value = settings.candidates
   cameraHistoryVisible.value = settings.cameraHistory
-  for (const layer of ['surveyor-zones-fill', 'surveyor-zones-outline', 'surveyor-lines', 'surveyor-points', 'surveyor-icons', 'surveyor-labels', 'surveyor-task-badges', 'surveyor-task-counts']) {
+  for (const layer of ['surveyor-zones-fill', 'surveyor-zones-outline', 'surveyor-lines', 'surveyor-points', 'surveyor-icons', 'surveyor-labels', 'surveyor-access-badges', 'surveyor-access-context', 'surveyor-task-badges', 'surveyor-task-counts']) {
     if (map?.getLayer(layer)) map.setLayoutProperty(layer, 'visibility', settings.objects ? 'visible' : 'none')
   }
   for (const layer of ['surveyor-links-line', 'surveyor-links-labels', 'surveyor-links-arrows']) {
@@ -111,6 +131,7 @@ watch(layerSettings, settings => {
   refreshCameraSource()
 }, { deep: true })
 watch(() => selected.value?.id, id => { attachments.value = []; tasks.value = []; refreshCameraSource(); if (id) { loadAttachments(id); loadTasks(id) } })
+watch(activeSession, session => { if (session && restoreSearchPending.value) { searchResultOpen.value = true; restoreSearchPending.value = false } })
 function inTimeline(value) {
   if (timelineWindow.value.preset === 'all' || !value) return true
   const time = new Date(value).getTime()
@@ -122,7 +143,12 @@ const featureCollection = computed(() => ({
     type: 'Feature', id: object.id, geometry: object.geometry,
     properties: { id: object.id, name: object.name || object.subtype || object.object_type, subtype: object.subtype || '', object_type: object.object_type,
       epistemic_state: object.epistemic_state || 'observed', confidence: object.confidence || 'possible', status: object.status || '', search_freshness: searchFreshness(object),
-      color: types.find(item => item.value === object.subtype)?.color || '#bf704d', icon: object.object_type === 'trail_camera' ? 'trail-camera' : object.object_type === 'note' ? 'note' : object.object_type === 'access' ? 'access' : (types.find(item => item.value === object.subtype)?.icon || 'sighting'),
+      color: object.object_type === 'access' ? ({ permission_granted: '#43805d', partial_permission: '#c5943b', permission_denied: '#a64e3d', do_not_contact: '#742d2b', no_answer: '#9aa59d' }[accessRecords.value.find(record => record.map_object_id === object.id)?.access_status] || '#7b897f') : types.find(item => item.value === object.subtype)?.color || '#bf704d',
+      access_status: accessRecords.value.find(record => record.map_object_id === object.id)?.access_status || object.subtype || 'unknown',
+      dog_count: accessRecords.value.find(record => record.map_object_id === object.id)?.dog_count,
+      outdoor_cat_count: accessRecords.value.find(record => record.map_object_id === object.id)?.outdoor_cat_count,
+      camera_permission: accessRecords.value.find(record => record.map_object_id === object.id)?.camera_permission || 'unknown',
+      icon: object.object_type === 'trail_camera' ? 'trail-camera' : object.object_type === 'note' ? 'note' : object.object_type === 'access' ? 'access' : (types.find(item => item.value === object.subtype)?.icon || 'sighting'),
       task_count: allTasks.value.filter(task => task.map_object_id === object.id && task.status === 'open').length,
       urgent_count: allTasks.value.filter(task => task.map_object_id === object.id && task.status === 'open' && task.priority === 'urgent').length,
       overdue_count: allTasks.value.filter(task => task.map_object_id === object.id && task.status === 'open' && task.due_at && new Date(task.due_at) < new Date()).length }
@@ -252,6 +278,12 @@ async function endCameraHandleDrag() {
     const updated = await response.json(); cameras.value = cameras.value.map(item => item.id === updated.id ? updated : item)
     const objectResponse = await fetch(`${API}/api/surveyor/objects/${updated.map_object_id}`)
     if (objectResponse.ok) { const object = await objectResponse.json(); objects.value = objects.value.map(item => item.id === object.id ? object : item); selected.value = object }
+    const isMove = drag.handle === 'center'
+    const before = { latitude: drag.original.latitude, longitude: drag.original.longitude }
+    const after = { latitude: updated.placement.latitude, longitude: updated.placement.longitude }
+    const oldAim = { heading_degrees: drag.original.heading_degrees, fov_degrees: drag.original.fov_degrees, range_meters: drag.original.range_meters }
+    const newAim = { heading_degrees: updated.placement.heading_degrees, fov_degrees: updated.placement.fov_degrees, range_meters: updated.placement.range_meters }
+    history.record({ kind: isMove ? 'camera_move' : 'camera_aim', undo: () => applyCameraPatch(updated.id, isMove ? before : oldAim), redo: () => applyCameraPatch(updated.id, isMove ? after : newAim) })
     refreshCameraSource(); refreshSource()
   } catch (err) { error.value = err.message; await loadCameras(); await loadObjects() }
 }
@@ -406,8 +438,19 @@ async function finishSearch(result) {
       objects.value.unshift(coverageBody); refreshSource()
     } catch (err) { error.value = `Search saved, but coverage was not created: ${err.message}` }
   }
+  if (result.create_followup) await createTask({ title: 'Follow up on search session', task_type: 'search', priority: 'normal', search_session_id: sessionId })
+  if (result.add_evidence && trackCoords.value.length) {
+    const evidenceResponse = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      object_type: 'evidence', subtype: 'reported_observation', name: 'Search session evidence', geometry: { type: 'Point', coordinates: trackCoords.value.at(-1) },
+      occurred_at: new Date().toISOString(), confidence: 'possible', epistemic_state: 'observed', properties: { evidence_type: 'reported_observation', source_type: 'firsthand', resolution: 'unresolved', search_session_id: sessionId }
+    }) })
+    const evidenceBody = await evidenceResponse.json().catch(() => ({}))
+    if (!evidenceResponse.ok) error.value = evidenceBody.detail || 'Search saved, but the evidence marker could not be created'
+    else { objects.value.unshift(evidenceBody); refreshSource(); selected.value = evidenceBody }
+  }
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
   geoWatchId = null; activeSession.value = null; searchResultOpen.value = false; setCoveragePreview(null); releaseScreenWakeLock()
+  restoredSearchForm.value = null
 }
 
 async function loadCandidates() {
@@ -474,10 +517,20 @@ async function createLink(targetId) {
   if (linkStartId.value == null) { linkStartId.value = targetId; return }
   if (linkStartId.value === targetId) { linkStartId.value = null; return }
   const style = { observed_movement: 'solid', hypothesized_movement: 'dashed', possible_corridor: 'double_arrow', association: 'dotted', evidence_for: 'solid', evidence_against: 'dashed', custom: 'dotted' }[linkType.value]
-  const response = await fetch(`${API}/api/surveyor/links`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source_object_id: linkStartId.value, target_object_id: targetId, link_type: linkType.value, line_style: style }) })
+  const payload = { source_object_id: linkStartId.value, target_object_id: targetId, link_type: linkType.value, line_style: style }
+  const response = await fetch(`${API}/api/surveyor/links`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
   if (!response.ok) throw new Error((await response.json()).detail || 'Could not link map objects')
-  links.value.unshift(await response.json()); linkStartId.value = null; refreshLinks(); activeTool.value = 'select'
+  const created = await response.json(); links.value.unshift(created); linkStartId.value = null; refreshLinks(); activeTool.value = 'select'
+  let currentId = created.id
+  history.record({ kind: 'link_create', undo: async () => {
+    const result = await fetch(`${API}/api/surveyor/links/${currentId}`, { method: 'DELETE' })
+    if (!result.ok) throw new Error('Could not undo link creation')
+    links.value = links.value.filter(item => item.id !== currentId); refreshLinks()
+  }, redo: async () => {
+    const result = await fetch(`${API}/api/surveyor/links`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    const body = await result.json().catch(() => ({})); if (!result.ok) throw new Error(body.detail || 'Could not redo link creation')
+    currentId = body.id; links.value.unshift(body); refreshLinks()
+  } })
 }
 
 async function createPin(coordinates) {
@@ -487,6 +540,7 @@ async function createPin(coordinates) {
 async function accessSaved(record) {
   accessDraftCoordinates.value = null
   accessDraftRecord.value = null
+  restoredAccessForm.value = null
   accessRecords.value = accessRecords.value.filter(item => item.id !== record.id && item.map_object_id !== record.map_object_id)
   accessRecords.value.unshift(record)
   const response = await fetch(`${API}/api/surveyor/objects/${record.map_object_id}`)
@@ -496,7 +550,7 @@ async function accessSaved(record) {
 }
 
 async function loadAccessRecords() {
-  try { const response = await fetch(`${API}/api/surveyor/access`); if (response.ok) accessRecords.value = await response.json() }
+  try { const response = await fetch(`${API}/api/surveyor/access`); if (response.ok) { accessRecords.value = await response.json(); refreshSource() } }
   catch { accessRecords.value = [] }
 }
 
@@ -528,33 +582,52 @@ async function saveDraft(payload) {
   selected.value = object; selectedCandidate.value = null; title.value = object.name; subtype.value = 'camera'; notes.value = object.notes
   cameraHeading.value = camera.placement.heading_degrees; cameraFov.value = camera.placement.fov_degrees; cameraRange.value = camera.placement.range_meters
   } else {
-    const isZone = payload.kind === 'zone', isLine = payload.kind === 'line'
+    const isZone = payload.kind === 'zone', isLine = payload.kind === 'line', isEvidence = payload.kind === 'evidence'
     const linkedSessionId = activeSession.value?.id || sessionDetailId.value
     const properties = linkedSessionId ? { search_session_id: linkedSessionId } : {}
     if (isZone && payload.subtype === 'searched') Object.assign(properties, { searched_at: new Date().toISOString(), search_session_id: linkedSessionId || null, search_method: activeSession.value?.method || null })
-    const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ object_type: isZone ? 'zone' : isLine ? 'corridor' : payload.kind === 'note' ? 'note' : 'pin',
+    const createPayload = { object_type: isZone ? 'zone' : isLine ? 'corridor' : payload.kind === 'note' ? 'note' : isEvidence ? 'evidence' : 'pin',
         subtype: payload.subtype || (payload.kind === 'note' ? 'field_note' : null), name: payload.name || (payload.kind === 'note' ? 'Field note' : null),
         geometry: payload.geometry, notes: payload.notes || '', occurred_at: payload.occurred_at,
-        epistemic_state: payload.epistemic_state, confidence: payload.confidence, properties,
-        status: isZone ? payload.subtype : null }) })
+        epistemic_state: payload.epistemic_state, confidence: payload.confidence, properties: isEvidence ? { ...properties, evidence_type: payload.evidence_type || 'reported_observation', source_type: payload.source_type || 'firsthand', resolution: 'unresolved' } : properties,
+        status: isZone ? payload.subtype : null }
+    const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(createPayload) })
     if (!response.ok) throw new Error((await response.json()).detail || 'Could not save map object')
     const object = await response.json(); objects.value.unshift(object); refreshSource(); selected.value = object
+    recordCreatedObject(createPayload, object)
     title.value = object.name || ''; subtype.value = object.subtype || ''; notes.value = object.notes || ''
   }
   if (draftDrawId.value != null) draw?.removeFeatures([draftDrawId.value])
-  draftObject.value = null; draftDrawId.value = null; activeTool.value = 'select'; draw?.setMode('select'); refreshSource(); refreshCameraSource()
+  draftObject.value = null; restoredObjectForm.value = null; draftDrawId.value = null; activeTool.value = 'select'; draw?.setMode('select'); refreshSource(); refreshCameraSource()
+}
+
+function recordCreatedObject(payload, object) {
+  let currentId = object.id
+  history.record({ kind: 'object_create', undo: async () => {
+    const response = await fetch(`${API}/api/surveyor/objects/${currentId}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error('Could not undo map object creation')
+    objects.value = objects.value.filter(item => item.id !== currentId); if (selected.value?.id === currentId) selected.value = null; refreshSource()
+  }, redo: async () => {
+    const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || 'Could not redo map object creation')
+    currentId = body.id; objects.value.unshift(body); selected.value = body; refreshSource()
+  } })
 }
 
 function cancelDraft() {
   if (draftDrawId.value != null) draw?.removeFeatures([draftDrawId.value])
-  draftObject.value = null; draftDrawId.value = null; activeTool.value = 'select'; draw?.setMode('select')
+  draftObject.value = null; restoredObjectForm.value = null; draftDrawId.value = null; activeTool.value = 'select'; draw?.setMode('select')
 }
+
+function cancelAccessDraft() { clearSurveyorDraft('access'); accessDraftCoordinates.value = null; accessDraftRecord.value = null; restoredAccessForm.value = null }
+function cancelSearchResult() { clearSurveyorDraft('search_result'); searchResultOpen.value = false; restoredSearchForm.value = null; setCoveragePreview(null) }
 
 async function moveSelectedCamera(coordinates) {
   if (!selected.value || selected.value.object_type !== 'trail_camera') return
   const camera = cameras.value.find(item => item.map_object_id === selected.value.id)
   if (!camera) return
+  const before = { latitude: camera.placement.latitude, longitude: camera.placement.longitude }
+  const after = { latitude: coordinates[1], longitude: coordinates[0] }
   const response = await fetch(`${API}/api/surveyor/cameras/${camera.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ latitude: coordinates[1], longitude: coordinates[0] }) })
   if (!response.ok) throw new Error('Could not move camera')
@@ -562,16 +635,45 @@ async function moveSelectedCamera(coordinates) {
   const objectResponse = await fetch(`${API}/api/surveyor/objects/${updated.map_object_id}`)
   const canonical = await objectResponse.json(); objects.value = objects.value.map(item => item.id === canonical.id ? canonical : item)
   selected.value = canonical; activeTool.value = 'select'; refreshSource(); refreshCameraSource()
+  history.record({ kind: 'camera_move', undo: () => applyCameraPatch(camera.id, before), redo: () => applyCameraPatch(camera.id, after) })
 }
 
 async function moveSelectedObject(coordinates) {
   if (!selected.value) return
+  const id = selected.value.id
+  const before = structuredClone(selected.value.geometry)
+  const after = { type: 'Point', coordinates }
   const response = await fetch(`${API}/api/surveyor/objects/${selected.value.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ geometry: { type: 'Point', coordinates } }) })
+    body: JSON.stringify({ geometry: after }) })
   if (!response.ok) throw new Error('Could not move map object')
   const canonical = await response.json()
   objects.value = objects.value.map(item => item.id === canonical.id ? canonical : item)
   selected.value = canonical; activeTool.value = 'select'; refreshSource()
+  history.record({ kind: 'object_move', undo: () => applyObjectGeometry(id, before), redo: () => applyObjectGeometry(id, after) })
+}
+
+async function applyObjectGeometry(id, geometry) {
+  const response = await fetch(`${API}/api/surveyor/objects/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ geometry }) })
+  const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || 'Could not restore object geometry')
+  objects.value = objects.value.map(item => item.id === id ? body : item); if (selected.value?.id === id) selected.value = body
+  refreshSource()
+}
+
+async function applyObjectFields(id, fields) {
+  const response = await fetch(`${API}/api/surveyor/objects/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields) })
+  const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || 'Could not restore map object')
+  objects.value = objects.value.map(item => item.id === id ? body : item)
+  if (selected.value?.id === id) { selected.value = body; title.value = body.name || ''; subtype.value = body.subtype || ''; notes.value = body.notes || '' }
+  refreshSource()
+}
+
+async function applyCameraPatch(cameraId, patch) {
+  const response = await fetch(`${API}/api/surveyor/cameras/${cameraId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) })
+  const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || 'Could not restore camera')
+  cameras.value = cameras.value.map(item => item.id === cameraId ? body : item)
+  const objectResponse = await fetch(`${API}/api/surveyor/objects/${body.map_object_id}`)
+  if (objectResponse.ok) { const object = await objectResponse.json(); objects.value = objects.value.map(item => item.id === object.id ? object : item); if (selected.value?.id === object.id) selected.value = object }
+  refreshSource(); refreshCameraSource()
 }
 
 function beginGeometryEdit() {
@@ -587,11 +689,14 @@ async function finishGeometryEdit(save) {
   if (id == null) return
   const feature = draw.getSnapshotFeature(id)
   if (save && feature?.geometry) {
+    const beforeGeometry = structuredClone(selected.value?.geometry || objects.value.find(item => item.id === id)?.geometry)
+    const afterGeometry = structuredClone(feature.geometry)
     const response = await fetch(`${API}/api/surveyor/objects/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ geometry: feature.geometry }) })
     if (!response.ok) { error.value = 'Could not save edited geometry'; return }
     const canonical = await response.json()
     objects.value = objects.value.map(item => item.id === canonical.id ? canonical : item); selected.value = canonical
+    history.record({ kind: 'geometry_edit', undo: () => applyObjectGeometry(id, beforeGeometry), redo: () => applyObjectGeometry(id, afterGeometry) })
   }
   draw.removeFeatures([id]); editingGeometryId.value = null; activeTool.value = 'select'; draw.setMode('select'); refreshSource()
 }
@@ -599,15 +704,13 @@ async function finishGeometryEdit(save) {
 async function createEvidenceFromCandidate() {
   const post = selectedCandidate.value
   if (!post) return
-  const response = await fetch(`${API}/api/surveyor/objects`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ object_type: 'evidence', subtype: 'reported_observation', name: post.name || 'Candidate report',
+  const payload = { object_type: 'evidence', subtype: 'reported_observation', name: post.name || 'Candidate report',
       geometry: { type: 'Point', coordinates: [Number(post.map_longitude), Number(post.map_latitude)] },
       occurred_at: post.reported_at || null, epistemic_state: 'observed', confidence: 'possible',
-      properties: { candidate_id: post.id, source: post.source, source_id: post.source_id, source_url: post.source_url, snapshot_title: post.name, reported_at: post.reported_at } })
-  })
+      properties: { evidence_type: 'reported_observation', source_type: 'public_report', resolution: 'unresolved', candidate_id: post.id, source: post.source, source_id: post.source_id, source_url: post.source_url, snapshot_title: post.name, reported_at: post.reported_at } }
+  const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
   if (!response.ok) { error.value = 'Could not create evidence marker'; return }
-  const object = await response.json(); objects.value.unshift(object); refreshSource(); selected.value = object; selectedCandidate.value = null
+  const object = await response.json(); objects.value.unshift(object); refreshSource(); selected.value = object; selectedCandidate.value = null; recordCreatedObject(payload, object)
 }
 
 async function persistDrawn(id) {
@@ -621,7 +724,14 @@ async function persistDrawn(id) {
 function chooseObject(event) {
   selectedHistoricalPlacement.value = null
   selectedCandidate.value = null
-  const id = event.features?.[0]?.properties?.id
+  const rendered = map.queryRenderedFeatures(event.point, { layers: ['selected-camera-handles', 'trail-camera-points', 'surveyor-points', 'surveyor-zones-fill', 'surveyor-lines', 'surveyor-task-badges'] })
+  const ids = [...new Set(rendered.map(feature => Number(feature.properties.id)).filter(Number.isFinite))]
+  if (ids.length > 1) { quickAdd.value = null; objectStack.value = ids.map(id => objects.value.find(object => object.id === id)).filter(Boolean); return }
+  const id = ids[0] ?? Number(event.features?.[0]?.properties?.id)
+  selectMapObject(id)
+}
+
+function selectMapObject(id) {
   selected.value = objects.value.find(object => object.id === Number(id)) || null
   if (selected.value) { title.value = selected.value.name || ''; subtype.value = selected.value.subtype || ''; notes.value = selected.value.notes || '' }
   const camera = cameras.value.find(item => item.map_object_id === selected.value?.id)
@@ -633,6 +743,7 @@ function chooseObject(event) {
 }
 
 function chooseHistoricalPlacement(event) {
+  if (map.queryRenderedFeatures(event.point, { layers: ['trail-camera-points', 'surveyor-points', 'surveyor-zones-fill', 'surveyor-lines'] }).length) { chooseObject(event); return }
   const feature = event.features?.[0]
   if (!feature) return
   selected.value = null; selectedCandidate.value = null
@@ -683,10 +794,14 @@ async function saveEvidence(properties) {
   if (!selected.value) return
   saving.value = true
   try {
-    const response = await fetch(`${API}/api/surveyor/objects/${selected.value.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ properties }) })
+    const previousResolution = selected.value.properties?.resolution || 'unresolved'
+    const nextResolution = properties.resolution || 'unresolved'
+    const normalized = { ...properties, resolved_at: nextResolution === 'unresolved' ? null : nextResolution !== previousResolution ? new Date().toISOString() : (properties.resolved_at || selected.value.properties?.resolved_at || new Date().toISOString()) }
+    const response = await fetch(`${API}/api/surveyor/objects/${selected.value.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ properties: normalized }) })
     const result = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(result.detail || 'Could not save evidence details')
     objects.value = objects.value.map(item => item.id === result.id ? result : item); selected.value = result; refreshSource()
+    restoredEvidenceForm.value = null
   } catch (err) { error.value = err.message }
   finally { saving.value = false }
 }
@@ -699,16 +814,36 @@ async function saveChecklist(properties) {
   objects.value = objects.value.map(item => item.id === result.id ? result : item); selected.value = result; refreshSource()
 }
 
+async function applyZoneState(id, subtypeValue, statusValue, properties) {
+  const response = await fetch(`${API}/api/surveyor/objects/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subtype: subtypeValue, status: statusValue, properties }) })
+  const result = await response.json().catch(() => ({})); if (!response.ok) throw new Error(result.detail || 'Could not update search coverage')
+  objects.value = objects.value.map(item => item.id === id ? result : item); if (selected.value?.id === id) selected.value = result; refreshSource()
+}
+
+async function markSearchedAgain() {
+  if (!selected.value || selected.value.object_type !== 'zone') return
+  const object = selected.value, before = structuredClone(object.properties || {})
+  const after = { ...before, searched_at: new Date().toISOString(), search_session_id: activeSession.value?.id || before.search_session_id || null, search_method: activeSession.value?.method || before.search_method || null }
+  try {
+    await applyZoneState(object.id, 'searched', 'searched', after)
+    history.record({ kind: 'zone_researched', undo: () => applyZoneState(object.id, 'searched', 'searched', before), redo: () => applyZoneState(object.id, 'searched', 'searched', after) })
+  } catch (cause) { error.value = cause.message }
+}
+
+async function markNeedsRecheck() {
+  if (!selected.value || selected.value.object_type !== 'zone') return
+  try { await applyZoneState(selected.value.id, 'needs_recheck', 'needs_recheck', selected.value.properties || {}) }
+  catch (cause) { error.value = cause.message }
+}
+
 async function uploadAttachment(event) {
   const input = event?.target?.files ? event.target : null
   const file = input ? input.files?.[0] : event
   if (!file || !selected.value) return
   uploadingAttachment.value = true
   try {
-    const form = new FormData(); form.append('file', file); form.append('caption', attachmentCaption.value); form.append('observed_at', new Date().toISOString())
-    const response = await fetch(`${API}/api/surveyor/objects/${selected.value.id}/attachments`, { method: 'POST', body: form })
-    if (!response.ok) throw new Error((await response.json()).detail || 'Could not upload attachment')
-    attachments.value.unshift(await response.json()); attachmentCaption.value = ''; if (input) input.value = ''
+    attachments.value.unshift(await uploadMedia(API, { mapObjectId: selected.value.id }, file, { caption: attachmentCaption.value }))
+    attachmentCaption.value = ''; if (input) input.value = ''
   } catch (err) { error.value = err.message }
   finally { uploadingAttachment.value = false }
 }
@@ -723,6 +858,8 @@ async function deleteAttachment(attachment) {
 }
 
 function chooseCandidate(event) {
+  const userObjects = map.queryRenderedFeatures(event.point, { layers: ['trail-camera-points', 'surveyor-points', 'surveyor-zones-fill', 'surveyor-lines', 'surveyor-task-badges'] })
+  if (userObjects.length) { chooseObject(event); return }
   const id = Number(event.features?.[0]?.properties?.id)
   selectedCandidate.value = candidates.value.find(post => post.id === id) || null
   selected.value = null
@@ -763,6 +900,7 @@ async function saveSelected(saveAsNewPlacement = false) {
     if (selected.value.object_type === 'trail_camera') {
       const camera = cameras.value.find(item => item.map_object_id === selected.value.id)
       if (!camera) throw new Error('Camera record unavailable')
+      const beforeAim = { heading_degrees: camera.placement.heading_degrees, fov_degrees: camera.placement.fov_degrees, range_meters: camera.placement.range_meters }
       const cameraResponse = await fetch(`${API}/api/surveyor/cameras/${camera.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: title.value || camera.name, notes: notes.value, heading_degrees: cameraHeading.value,
           fov_degrees: cameraFov.value, range_meters: cameraRange.value, save_as_new_placement: saveAsNewPlacement }) })
@@ -773,16 +911,22 @@ async function saveSelected(saveAsNewPlacement = false) {
       const canonical = await objectResponse.json()
       objects.value = objects.value.map(item => item.id === canonical.id ? canonical : item)
       selected.value = canonical; refreshSource(); refreshCameraSource()
+      const afterAim = { heading_degrees: cameraHeading.value, fov_degrees: cameraFov.value, range_meters: cameraRange.value }
+      if (!saveAsNewPlacement && Object.keys(beforeAim).some(key => beforeAim[key] !== afterAim[key])) history.record({ kind: 'camera_aim', undo: () => applyCameraPatch(camera.id, beforeAim), redo: () => applyCameraPatch(camera.id, afterAim) })
       return
     }
+    const objectId = selected.value.id
+    const beforeFields = { name: selected.value.name, subtype: selected.value.subtype, notes: selected.value.notes }
+    const afterFields = { name: title.value || null, subtype: subtype.value, notes: notes.value }
     const response = await fetch(`${API}/api/surveyor/objects/${selected.value.id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: title.value || null, subtype: subtype.value, notes: notes.value })
+      body: JSON.stringify(afterFields)
     })
     if (!response.ok) throw new Error('Could not update map object')
     const canonical = await response.json()
     objects.value = objects.value.map(item => item.id === canonical.id ? canonical : item)
     selected.value = canonical; refreshSource()
+    if (Object.keys(beforeFields).some(key => beforeFields[key] !== afterFields[key])) history.record({ kind: 'object_update', undo: () => applyObjectFields(objectId, beforeFields), redo: () => applyObjectFields(objectId, afterFields) })
   } catch (err) { error.value = err.message }
   finally { saving.value = false }
 }
@@ -805,6 +949,8 @@ async function deleteSelected() {
 }
 
 function onMapClick(event) {
+  if (suppressMapClick.value) { suppressMapClick.value = false; return }
+  if (quickAdd.value) { quickAdd.value = null; return }
   if (activeTool.value === 'move-camera') {
     moveSelectedCamera([event.lngLat.lng, event.lngLat.lat]).catch(err => { error.value = err.message })
     return
@@ -829,6 +975,50 @@ function onMapClick(event) {
   create(coordinates)
 }
 
+function openQuickAdd(coordinates, clientX, clientY) {
+  const width = 260, height = 420
+  quickAdd.value = { coordinates, position: { x: Math.max(8, Math.min(clientX, window.innerWidth - width - 8)), y: Math.max(8, Math.min(clientY, window.innerHeight - height - 8)) } }
+}
+
+function chooseQuickAdd(kind, coordinates) {
+  quickAdd.value = null; suppressMapClick.value = false
+  if (kind === 'access') { accessDraftCoordinates.value = coordinates; return }
+  if (kind === 'camera') { createCamera(coordinates); return }
+  if (kind === 'note') { createNote(coordinates); return }
+  const evidence = kind === 'evidence'
+  const pinType = kind === 'other' ? 'sighting' : kind
+  draftObject.value = { kind: evidence ? 'evidence' : 'pin', geometry: { type: 'Point', coordinates },
+    subtype: evidence ? 'reported_observation' : pinType,
+    defaultName: ({ sighting: 'Sighting', possible_sighting: 'Possible sighting', camera_hit: 'Camera hit', coyote: 'Coyote observation', fox: 'Fox observation', dog_lives_here: 'Dog', outdoor_cat: 'Outdoor cat', food_station: 'Food station' })[pinType] || 'Field observation',
+    properties: activeSession.value ? { search_session_id: activeSession.value.id } : {} }
+}
+function closeQuickAdd() { quickAdd.value = null; suppressMapClick.value = false }
+
+function onMapContextMenu(event) {
+  event.originalEvent?.preventDefault?.()
+  openQuickAdd([event.lngLat.lng, event.lngLat.lat], event.originalEvent?.clientX ?? event.point.x, event.originalEvent?.clientY ?? event.point.y)
+}
+
+function cancelLongPress() { clearTimeout(longPressTimer); longPressTimer = null; longPressOrigin = null }
+function onPointerDown(event) {
+  if (event.pointerType !== 'touch') return
+  longPressMoved = false
+  longPressOrigin = { x: event.clientX, y: event.clientY }
+  const bounds = map.getCanvas().getBoundingClientRect()
+  longPressTimer = setTimeout(() => {
+    if (!longPressOrigin || longPressMoved) return
+    const point = { x: longPressOrigin.x - bounds.left, y: longPressOrigin.y - bounds.top }
+    const coordinate = map.unproject([point.x, point.y])
+    suppressMapClick.value = true
+    openQuickAdd([coordinate.lng, coordinate.lat], longPressOrigin.x, longPressOrigin.y)
+    cancelLongPress()
+  }, 500)
+}
+function onPointerMove(event) {
+  if (!longPressOrigin) return
+  if (Math.hypot(event.clientX - longPressOrigin.x, event.clientY - longPressOrigin.y) > 10) { longPressMoved = true; cancelLongPress() }
+}
+
 function activateTool(tool) {
   if (tool === 'link') linkStartId.value = null
   activeTool.value = tool
@@ -837,12 +1027,63 @@ function activateTool(tool) {
   else draw?.setMode('select')
 }
 
+function chooseStackedObject(id) {
+  objectStack.value = []
+  selectMapObject(id)
+}
+
+function quickObservation() {
+  const center = map?.getCenter()
+  const coordinates = trackCoords.value.at(-1) || (center ? [center.lng, center.lat] : [-79.117282, 35.845701])
+  openQuickAdd(coordinates, 18, Math.max(18, window.innerHeight - 440))
+}
+function quickNote() {
+  const center = map?.getCenter()
+  createNote(trackCoords.value.at(-1) || (center ? [center.lng, center.lat] : [-79.117282, 35.845701]))
+}
+
+async function restoreFieldDraft() {
+  const draft = draftRecovery.value
+  if (!draft) return
+  const payload = draft.payload || {}
+  draftRecovery.value = null
+  if (draft.kind === 'object') {
+    draftObject.value = { kind: payload.kind, geometry: payload.geometry, subtype: payload.subtype, defaultName: payload.defaultName }
+    restoredObjectForm.value = payload.form || null
+  } else if (draft.kind === 'access') {
+    accessDraftCoordinates.value = payload.coordinates
+    accessDraftRecord.value = payload.record || null
+    restoredAccessForm.value = payload.form || null
+  } else if (draft.kind === 'search_result') {
+    restoredSearchForm.value = payload.form || null
+    if (activeSession.value) searchResultOpen.value = true
+    else restoreSearchPending.value = true
+  } else if (draft.kind === 'evidence' && payload.object_id) {
+    let object = objects.value.find(item => item.id === payload.object_id)
+    if (!object) {
+      const response = await fetch(`${API}/api/surveyor/objects/${payload.object_id}`)
+      if (response.ok) { object = await response.json(); objects.value.unshift(object); refreshSource() }
+    }
+    if (object) { selectMapObject(object.id); restoredEvidenceForm.value = payload.form || null }
+    else error.value = 'The evidence object for this draft is no longer available.'
+  }
+}
+
+function discardFieldDraft() { clearSurveyorDraft(); draftRecovery.value = null }
+
 onMounted(() => {
   document.addEventListener('visibilitychange', onVisibilityChange)
+  document.addEventListener('keydown', onHistoryKeydown)
   map = new maplibregl.Map({
     container: mapEl.value, style: 'https://tiles.openfreemap.org/styles/positron',
     center: [-79.117282, 35.845701], zoom: 12, attributionControl: true
   })
+  map.on('contextmenu', onMapContextMenu)
+  const canvasContainer = map.getCanvasContainer()
+  canvasContainer.addEventListener('pointerdown', onPointerDown)
+  canvasContainer.addEventListener('pointermove', onPointerMove)
+  canvasContainer.addEventListener('pointerup', cancelLongPress)
+  canvasContainer.addEventListener('pointercancel', cancelLongPress)
   map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right')
   map.on('load', () => {
     applyCatMapStyle(map)
@@ -923,6 +1164,15 @@ onMounted(() => {
       'circle-radius': 8, 'circle-color': ['get', 'color'], 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2,
       'circle-opacity': ['case', ['==', ['get', 'confidence'], 'uncertain'], 0.55, 0.96]
     } })
+    map.addLayer({ id: 'surveyor-access-badges', type: 'symbol', source: 'surveyor-objects', minzoom: 12.5,
+      filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'object_type'], 'access']],
+      layout: { 'text-field': ['match', ['get', 'access_status'], 'permission_granted', '✓', 'partial_permission', '½', 'no_answer', '○', 'permission_denied', '×', 'do_not_contact', '⊘', '?'],
+        'text-size': 13, 'text-offset': [1, -0.8], 'text-allow-overlap': true, 'text-ignore-placement': true },
+      paint: { 'text-color': ['match', ['get', 'access_status'], 'permission_granted', '#267148', 'partial_permission', '#ae781d', 'permission_denied', '#a34232', 'do_not_contact', '#762722', '#57675e'], 'text-halo-color': '#fffaf0', 'text-halo-width': 2 } })
+    map.addLayer({ id: 'surveyor-access-context', type: 'symbol', source: 'surveyor-objects', minzoom: 15,
+      filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'object_type'], 'access']],
+      layout: { 'text-field': ['concat', ['case', ['>', ['get', 'dog_count'], 0], ['concat', 'D', ['to-string', ['get', 'dog_count']]], ''], ['case', ['>', ['get', 'outdoor_cat_count'], 0], ['concat', ' · C', ['to-string', ['get', 'outdoor_cat_count']]], ''], ['case', ['==', ['get', 'camera_permission'], 'yes'], ' · CAM', '']],
+        'text-size': 9, 'text-offset': [1, 1.05], 'text-allow-overlap': false }, paint: { 'text-color': '#34483c', 'text-halo-color': '#fffaf0', 'text-halo-width': 1.5 } })
     map.addLayer({ id: 'trail-camera-points', type: 'circle', source: 'surveyor-objects', filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'object_type'], 'trail_camera']], paint: {
       'circle-radius': 9, 'circle-color': '#477b7a', 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2
     } })
@@ -938,6 +1188,8 @@ onMounted(() => {
       filter: ['>', ['get', 'task_count'], 0], layout: { 'text-field': ['to-string', ['get', 'task_count']], 'text-size': 9, 'text-allow-overlap': true, 'text-translate': [13, -13] },
       paint: { 'text-color': '#293c30' } })
     map.on('click', 'surveyor-points', chooseObject)
+    map.on('click', 'surveyor-zones-fill', chooseObject)
+    map.on('click', 'surveyor-lines', chooseObject)
     map.on('click', 'surveyor-task-badges', chooseObject)
     map.on('click', 'trail-camera-points', chooseObject)
     map.on('mousedown', 'selected-camera-handles', beginCameraHandleDrag)
@@ -947,6 +1199,7 @@ onMounted(() => {
     map.on('mouseleave', 'selected-camera-handles', () => { if (!cameraHandleDrag) map.getCanvas().style.cursor = '' })
     map.on('click', 'candidate-reports-point', chooseCandidate)
     map.on('click', 'candidate-reports-cluster', event => {
+      if (map.queryRenderedFeatures(event.point, { layers: ['trail-camera-points', 'surveyor-points', 'surveyor-zones-fill', 'surveyor-lines', 'surveyor-task-badges'] }).length) { chooseObject(event); return }
       const feature = event.features?.[0]
       if (!feature) return
       showCandidateCluster(feature)
@@ -978,8 +1231,24 @@ function onVisibilityChange() {
   if (document.visibilityState === 'visible' && activeSession.value) requestScreenWakeLock()
 }
 
+async function undoLast() { try { await history.undo() } catch (cause) { error.value = cause.message } }
+async function redoLast() { try { await history.redo() } catch (cause) { error.value = cause.message } }
+function onHistoryKeydown(event) {
+  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z') return
+  const target = event.target
+  if (target?.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)) return
+  event.preventDefault()
+  if (event.shiftKey) redoLast(); else undoLast()
+}
+
 onBeforeUnmount(() => {
+  cancelLongPress()
+  map?.getCanvasContainer()?.removeEventListener('pointerdown', onPointerDown)
+  map?.getCanvasContainer()?.removeEventListener('pointermove', onPointerMove)
+  map?.getCanvasContainer()?.removeEventListener('pointerup', cancelLongPress)
+  map?.getCanvasContainer()?.removeEventListener('pointercancel', cancelLongPress)
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  document.removeEventListener('keydown', onHistoryKeydown)
   releaseScreenWakeLock()
   resizeObserver?.disconnect(); draw?.stop()
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
@@ -992,30 +1261,33 @@ onBeforeUnmount(() => {
   <main class="surveyor-page">
     <header class="surveyor-topbar">
       <div><p class="eyebrow">FIELD MAP · {{ objects.length }} OBJECTS</p><h1>Surveyor</h1></div>
-      <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="startSearch" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" @media="sessionMediaOpen=true" />
+    <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="startSearch" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" @media="sessionMediaOpen=true" @observation="quickObservation" @note="quickNote" />
     </header>
     <p v-if="error" class="surveyor-error">{{ error }}</p><p v-if="locationWarning" class="location-warning">{{ locationWarning }}</p>
     <div class="surveyor-workspace">
-      <SurveyorToolbar :active-tool="activeTool" @tool="activateTool" @more="mobileMoreOpen=!mobileMoreOpen" />
+      <SurveyorToolbar :active-tool="activeTool" :can-undo="history.canUndo.value" :can-redo="history.canRedo.value" @tool="activateTool" @more="mobileMoreOpen=!mobileMoreOpen" @undo="undoLast" @redo="redoLast" />
       <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','access','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? 'Choose a marker type, then tap the map' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : activeTool === 'access' ? 'Tap a property to record access details' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option value="searched">Searched</option><option value="needs_search">Needs search</option><option value="needs_recheck">Needs re-check</option><option value="known_cat_highway">Known cat highway</option><option value="wildlife_hotspot">Wildlife hotspot</option><option value="likely_shelter">Likely shelter</option><option value="dog_territory">Dog territory</option><option value="private_no_access">Private / no access</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
       <LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" @update:model-value="layerSettings = $event" @close="layerDrawerOpen = false" />
-      <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
+      <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(metersToFeet(selectedHistoricalPlacement.range_meters)) }} ft</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
       <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" />
-      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" />
+      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" />
     </div>
 
-    <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button @click="activateTool('access'); mobileMoreOpen=false">Property / access</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>
+    <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button @click="activateTool('access'); mobileMoreOpen=false">Property / access</button><button @click="undoLast" :disabled="!history.canUndo.value">Undo</button><button @click="redoLast" :disabled="!history.canRedo.value">Redo</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>
     <MobileInspectorSheet :open="Boolean(selected || selectedCandidate || selectedHistoricalPlacement)" @close="selected=null; selectedCandidate=null; selectedHistoricalPlacement=null">
       <template v-if="selectedCandidate"><p class="eyebrow">CANDIDATE REPORT · {{ selectedCandidate.source }}</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2><p>{{ selectedCandidate.location_text }}</p><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button></template>
-      <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p></template>
-      <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" />
+      <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(metersToFeet(selectedHistoricalPlacement.range_meters)) }} ft</p></template>
+      <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" />
     </MobileInspectorSheet>
+    <div v-if="objectStack.length" class="field-sheet-backdrop object-stack-backdrop" @click.self="objectStack=[]"><ObjectStackSheet :objects="objectStack" @select="chooseStackedObject" @close="objectStack=[]" /></div>
+    <QuickAddMenu v-if="quickAdd" :coordinates="quickAdd.coordinates" :position="quickAdd.position" @select="chooseQuickAdd" @close="closeQuickAdd" />
     <CandidateClusterSheet v-if="candidateCluster" :cluster="candidateCluster" @close="candidateCluster=null" @open="openClusterCandidate" @evidence="createEvidenceForCandidate" @zoom="zoomCandidateCluster" />
-    <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
-    <div v-if="accessDraftCoordinates" class="field-sheet-backdrop"><AccessEditor :coordinates="accessDraftCoordinates" :record="accessDraftRecord" :api="API" @save="accessSaved($event).catch(err => error=err.message)" @cancel="accessDraftCoordinates=null; accessDraftRecord=null" /></div>
+    <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :default-name="draftObject.defaultName || ''" :initial-form="restoredObjectForm" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
+    <div v-if="accessDraftCoordinates" class="field-sheet-backdrop"><AccessEditor :coordinates="accessDraftCoordinates" :record="accessDraftRecord" :initial-form="restoredAccessForm" :api="API" @save="accessSaved($event).catch(err => error=err.message)" @cancel="cancelAccessDraft" /></div>
     <div v-if="sessionMediaOpen && activeSession" class="field-sheet-backdrop"><SearchSessionMedia :api="API" :session-id="activeSession.id" @close="sessionMediaOpen=false" /></div>
     <div v-if="sessionDetailId" class="field-sheet-backdrop"><SearchSessionDetail :api="API" :session-id="sessionDetailId" @close="sessionDetailId=null" @show-route="showSessionRoute" @show-coverage="showSessionCoverage" @add-note="addSessionNote" @add-evidence="addSessionEvidence" @create-coverage="createSessionCoverage" @create-followup="createSessionFollowup" /></div>
-    <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet :route="trackCoords.length >= 2 ? { type: 'LineString', coordinates: trackCoords } : null" :method="activeSession?.method || sessionMethod" @coverage-preview="setCoveragePreview" @save="finishSearch" @cancel="searchResultOpen=false; setCoveragePreview(null)" /></div>
-    <footer class="surveyor-footer"><SurveyTimeline v-model="timelineWindow" /><span v-if="activeSession" class="active-session-status">SEARCH ACTIVE · {{ Math.round(sessionDistance()) }} m</span></footer>
+    <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet :route="trackCoords.length >= 2 ? { type: 'LineString', coordinates: trackCoords } : null" :method="activeSession?.method || sessionMethod" :session="activeSession" :distance="sessionDistance()" :initial-form="restoredSearchForm" @coverage-preview="setCoveragePreview" @save="finishSearch" @cancel="cancelSearchResult" /></div>
+    <div v-if="draftRecovery" class="draft-recovery-backdrop"><DraftRecoveryPrompt :draft="draftRecovery" @restore="restoreFieldDraft" @discard="discardFieldDraft" /></div>
+    <footer class="surveyor-footer"><SurveyTimeline v-model="timelineWindow" /><span v-if="activeSession" class="active-session-status">SEARCH ACTIVE · {{ formatDistance(sessionDistance()) }}</span></footer>
   </main>
 </template>
