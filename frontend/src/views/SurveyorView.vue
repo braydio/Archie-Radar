@@ -44,6 +44,7 @@ const linkStartId = ref(null)
 const linkType = ref('association')
 const attachments = ref([])
 const tasks = ref([])
+const allTasks = ref([])
 const draftObject = ref(null)
 const accessDraftCoordinates = ref(null)
 const draftDrawId = ref(null)
@@ -92,7 +93,7 @@ watch(layerSettings, settings => {
   try { localStorage.setItem(LAYER_STORAGE, JSON.stringify(settings)) } catch {}
   candidatesVisible.value = settings.candidates
   cameraHistoryVisible.value = settings.cameraHistory
-  for (const layer of ['surveyor-zones-fill', 'surveyor-zones-outline', 'surveyor-lines', 'surveyor-points', 'surveyor-icons', 'surveyor-labels']) {
+  for (const layer of ['surveyor-zones-fill', 'surveyor-zones-outline', 'surveyor-lines', 'surveyor-points', 'surveyor-icons', 'surveyor-labels', 'surveyor-task-badges', 'surveyor-task-counts']) {
     if (map?.getLayer(layer)) map.setLayoutProperty(layer, 'visibility', settings.objects ? 'visible' : 'none')
   }
   for (const layer of ['surveyor-links-line', 'surveyor-links-labels', 'surveyor-links-arrows']) {
@@ -117,9 +118,21 @@ const featureCollection = computed(() => ({
     type: 'Feature', id: object.id, geometry: object.geometry,
     properties: { id: object.id, name: object.name || object.subtype || object.object_type, subtype: object.subtype || '', object_type: object.object_type,
       epistemic_state: object.epistemic_state || 'observed', confidence: object.confidence || 'possible', status: object.status || '', search_freshness: searchFreshness(object),
-      color: types.find(item => item.value === object.subtype)?.color || '#bf704d', icon: object.object_type === 'trail_camera' ? 'trail-camera' : object.object_type === 'note' ? 'note' : (types.find(item => item.value === object.subtype)?.icon || 'sighting') }
+      color: types.find(item => item.value === object.subtype)?.color || '#bf704d', icon: object.object_type === 'trail_camera' ? 'trail-camera' : object.object_type === 'note' ? 'note' : object.object_type === 'access' ? 'access' : (types.find(item => item.value === object.subtype)?.icon || 'sighting'),
+      task_count: allTasks.value.filter(task => task.map_object_id === object.id && task.status === 'open').length,
+      urgent_count: allTasks.value.filter(task => task.map_object_id === object.id && task.status === 'open' && task.priority === 'urgent').length,
+      overdue_count: allTasks.value.filter(task => task.map_object_id === object.id && task.status === 'open' && task.due_at && new Date(task.due_at) < new Date()).length }
   }))
 }))
+const taskBadgeCollection = computed(() => ({ type: 'FeatureCollection', features: objects.value.flatMap(object => {
+  const linked = allTasks.value.filter(task => task.map_object_id === object.id && task.status === 'open')
+  if (!linked.length) return []
+  const coordinate = object.geometry.type === 'Point' ? object.geometry.coordinates : [object.centroid_lon, object.centroid_lat]
+  const overdue = linked.filter(task => task.due_at && new Date(task.due_at) < new Date()).length
+  return [{ type: 'Feature', properties: { id: object.id, task_count: linked.length,
+    urgent_count: linked.filter(task => task.priority === 'urgent').length, overdue_count: overdue },
+    geometry: { type: 'Point', coordinates: coordinate } }]
+}) }))
 
 async function loadObjects() {
   try {
@@ -141,6 +154,7 @@ async function loadObjects() {
   loadCameras()
   loadLinks()
   loadActiveSession()
+  loadTaskLayer()
 }
 
 async function loadCameras() {
@@ -375,6 +389,7 @@ function refreshCandidates() {
 function refreshSource() {
   const source = map?.getSource('surveyor-objects')
   if (source) source.setData(featureCollection.value)
+  map?.getSource('surveyor-task-badges')?.setData(taskBadgeCollection.value)
   refreshLinks()
 }
 
@@ -573,12 +588,18 @@ async function loadTasks(objectId) {
   } catch { tasks.value = [] }
 }
 
+async function loadTaskLayer() {
+  try { const response = await fetch(`${API}/api/surveyor/tasks`); if (response.ok) { allTasks.value = await response.json(); refreshSource() } }
+  catch { allTasks.value = [] }
+}
+
 async function createTask(payload) {
   try {
     const response = await fetch(`${API}/api/surveyor/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
     const result = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(result.detail || 'Could not create follow-up')
     tasks.value.unshift(result)
+    loadTaskLayer()
   } catch (err) { error.value = err.message }
 }
 
@@ -588,6 +609,7 @@ async function updateTask(task, status) {
     const result = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(result.detail || 'Could not update follow-up')
     tasks.value = tasks.value.map(item => item.id === task.id ? result : item)
+    loadTaskLayer()
   } catch (err) { error.value = err.message }
 }
 
@@ -601,6 +623,14 @@ async function saveEvidence(properties) {
     objects.value = objects.value.map(item => item.id === result.id ? result : item); selected.value = result; refreshSource()
   } catch (err) { error.value = err.message }
   finally { saving.value = false }
+}
+
+async function saveChecklist(properties) {
+  if (!selected.value) return
+  const response = await fetch(`${API}/api/surveyor/objects/${selected.value.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ properties }) })
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok) { error.value = result.detail || 'Could not save note checklist'; return }
+  objects.value = objects.value.map(item => item.id === result.id ? result : item); selected.value = result; refreshSource()
 }
 
 async function uploadAttachment(event) {
@@ -758,6 +788,7 @@ onMounted(() => {
     draw.start()
     draw.on('finish', id => persistDrawn(id).catch(err => { error.value = err.message }))
     map.addSource('surveyor-objects', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map.addSource('surveyor-task-badges', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('candidate-reports', { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, cluster: true, clusterRadius: 48, clusterMaxZoom: 13 })
     map.addSource('camera-cones', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('camera-history-points', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
@@ -832,7 +863,16 @@ onMounted(() => {
     map.addLayer({ id: 'surveyor-labels', type: 'symbol', source: 'surveyor-objects', filter: ['==', ['geometry-type'], 'Point'], layout: {
       'text-field': ['get', 'name'], 'text-offset': [0, 1.25], 'text-size': 12, 'text-anchor': 'top'
     }, paint: { 'text-color': '#24372e', 'text-halo-color': '#faf9f2', 'text-halo-width': 1.5 } })
+    map.addLayer({ id: 'surveyor-task-badges', type: 'circle', source: 'surveyor-task-badges', minzoom: 13,
+      filter: ['>', ['get', 'task_count'], 0], paint: { 'circle-radius': 9, 'circle-color': '#f6f1dc',
+        'circle-translate': [13, -13],
+        'circle-stroke-color': ['case', ['>', ['get', 'overdue_count'], 0], '#a73c31', ['>', ['get', 'urgent_count'], 0], '#bf704d', '#728174'],
+        'circle-stroke-width': 2 } })
+    map.addLayer({ id: 'surveyor-task-counts', type: 'symbol', source: 'surveyor-task-badges', minzoom: 13,
+      filter: ['>', ['get', 'task_count'], 0], layout: { 'text-field': ['to-string', ['get', 'task_count']], 'text-size': 9, 'text-allow-overlap': true, 'text-translate': [13, -13] },
+      paint: { 'text-color': '#293c30' } })
     map.on('click', 'surveyor-points', chooseObject)
+    map.on('click', 'surveyor-task-badges', chooseObject)
     map.on('click', 'trail-camera-points', chooseObject)
     map.on('mousedown', 'selected-camera-handles', beginCameraHandleDrag)
     map.on('touchstart', 'selected-camera-handles', beginCameraHandleDrag)
@@ -895,14 +935,14 @@ onBeforeUnmount(() => {
       <LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" @update:model-value="layerSettings = $event" @close="layerDrawerOpen = false" />
       <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
       <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" />
-      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" />
+      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" />
     </div>
 
     <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button @click="activateTool('access'); mobileMoreOpen=false">Property / access</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>
     <MobileInspectorSheet :open="Boolean(selected || selectedCandidate || selectedHistoricalPlacement)" @close="selected=null; selectedCandidate=null; selectedHistoricalPlacement=null">
       <template v-if="selectedCandidate"><p class="eyebrow">CANDIDATE REPORT · {{ selectedCandidate.source }}</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2><p>{{ selectedCandidate.location_text }}</p><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button></template>
       <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p></template>
-      <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" />
+      <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" />
     </MobileInspectorSheet>
     <CandidateClusterSheet v-if="candidateCluster" :cluster="candidateCluster" @close="candidateCluster=null" @open="openClusterCandidate" @evidence="createEvidenceForCandidate" @zoom="zoomCandidateCluster" />
     <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>

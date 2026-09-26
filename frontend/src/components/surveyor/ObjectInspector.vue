@@ -4,11 +4,12 @@ import AudioRecorder from './AudioRecorder.vue'
 import PhotoCapture from './PhotoCapture.vue'
 import TaskEditor from './TaskEditor.vue'
 import EvidenceEditor from './EvidenceEditor.vue'
+import ChecklistEditor from './ChecklistEditor.vue'
 import { searchFreshness } from '../../surveyor/zoneState.js'
 import { ref } from 'vue'
 
 const props = defineProps({ selected: { type: Object, required: true }, types: { type: Array, required: true }, attachments: { type: Array, default: () => [] }, cameraHistory: { type: Array, default: () => [] }, tasks: { type: Array, default: () => [] }, uploading: Boolean, saving: Boolean, api: { type: String, required: true }, activeTool: { type: String, default: 'select' } })
-const emit = defineEmits(['close', 'save', 'saveHistorical', 'move', 'deactivate', 'delete', 'editGeometry', 'saveGeometry', 'cancelGeometry', 'upload', 'deleteAttachment', 'mediaError', 'createTask', 'updateTask', 'saveEvidence'])
+const emit = defineEmits(['close', 'save', 'saveHistorical', 'move', 'deactivate', 'delete', 'editGeometry', 'saveGeometry', 'cancelGeometry', 'upload', 'deleteAttachment', 'mediaError', 'createTask', 'updateTask', 'saveEvidence', 'saveChecklist'])
 const title = defineModel('title', { type: String })
 const subtype = defineModel('subtype', { type: String })
 const notes = defineModel('notes', { type: String })
@@ -27,6 +28,7 @@ const taskEditorOpen = ref(false)
     <p v-if="selected.subtype === 'searched'" class="coverage-status">Coverage: {{ searchFreshness(selected) }} · {{ selected.properties?.searched_at ? new Date(selected.properties.searched_at).toLocaleDateString() : 'No search date recorded' }}</p>
     <label>Notes<textarea v-model="notes" rows="5"></textarea></label>
     <EvidenceEditor v-if="selected.object_type === 'evidence'" :object="selected" :saving="saving" @save="emit('saveEvidence', $event)" />
+    <ChecklistEditor v-if="selected.object_type === 'note'" :object="selected" @save="emit('saveChecklist', $event)" @followup="emit('createTask', { title: $event.text, task_type: 'other', priority: 'normal', map_object_id: selected.id })" />
     <section class="inspector-followups"><div class="inspector-section-heading"><h3>Follow-ups</h3><button type="button" class="secondary-button" @click="taskEditorOpen=true">＋ Follow-up</button></div><article v-for="task in tasks" :key="task.id" class="inspector-task"><label><input type="checkbox" :checked="task.status === 'completed'" :disabled="task.status === 'dismissed'" @change="emit('updateTask', task, $event.target.checked ? 'completed' : 'open')" /><span>{{ task.title }}</span></label><small>{{ task.priority }} · {{ task.due_at ? new Date(task.due_at).toLocaleString() : 'No due date' }}</small></article><p v-if="!tasks.length" class="inspector-meta">No follow-ups recorded.</p></section>
     <section class="attachment-list"><h3>Evidence attachments</h3>
       <article v-for="attachment in attachments" :key="attachment.id" class="evidence-attachment">
