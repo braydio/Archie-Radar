@@ -8,8 +8,8 @@ import ChecklistEditor from './ChecklistEditor.vue'
 import { searchFreshness } from '../../surveyor/zoneState.js'
 import { ref } from 'vue'
 
-const props = defineProps({ selected: { type: Object, required: true }, types: { type: Array, required: true }, attachments: { type: Array, default: () => [] }, cameraHistory: { type: Array, default: () => [] }, tasks: { type: Array, default: () => [] }, uploading: Boolean, saving: Boolean, api: { type: String, required: true }, activeTool: { type: String, default: 'select' } })
-const emit = defineEmits(['close', 'save', 'saveHistorical', 'move', 'deactivate', 'delete', 'editGeometry', 'saveGeometry', 'cancelGeometry', 'upload', 'deleteAttachment', 'mediaError', 'createTask', 'updateTask', 'saveEvidence', 'saveChecklist'])
+const props = defineProps({ selected: { type: Object, required: true }, types: { type: Array, required: true }, attachments: { type: Array, default: () => [] }, cameraHistory: { type: Array, default: () => [] }, tasks: { type: Array, default: () => [] }, accessRecord: { type: Object, default: null }, uploading: Boolean, saving: Boolean, api: { type: String, required: true }, activeTool: { type: String, default: 'select' } })
+const emit = defineEmits(['close', 'save', 'saveHistorical', 'move', 'deactivate', 'delete', 'editGeometry', 'saveGeometry', 'cancelGeometry', 'upload', 'deleteAttachment', 'mediaError', 'createTask', 'updateTask', 'saveEvidence', 'saveChecklist', 'editAccess'])
 const title = defineModel('title', { type: String })
 const subtype = defineModel('subtype', { type: String })
 const notes = defineModel('notes', { type: String })
@@ -26,6 +26,7 @@ const taskEditorOpen = ref(false)
     <label v-if="selected.object_type !== 'trail_camera' && !['zone','corridor'].includes(selected.object_type)">Type<select v-model="subtype"><option v-for="item in types" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
     <TrailCameraEditor v-if="selected.object_type === 'trail_camera'" v-model:heading="cameraHeading" v-model:fov="cameraFov" v-model:range="cameraRange" :history="cameraHistory" />
     <p v-if="selected.subtype === 'searched'" class="coverage-status">Coverage: {{ searchFreshness(selected) }} · {{ selected.properties?.searched_at ? new Date(selected.properties.searched_at).toLocaleDateString() : 'No search date recorded' }}</p>
+    <section v-if="selected.object_type === 'access'" class="access-summary"><div class="inspector-section-heading"><h3>Property access</h3><button type="button" class="secondary-button" @click="emit('editAccess')">Edit</button></div><p :class="{ 'do-not-contact': accessRecord?.access_status === 'do_not_contact' }">{{ (accessRecord?.access_status || selected.subtype || 'unknown').replaceAll('_', ' ') }}</p><p v-if="accessRecord">{{ accessRecord.dog_count ?? 'Unknown' }} dogs · {{ accessRecord.outdoor_cat_count ?? 'Unknown' }} outdoor cats</p><p v-if="accessRecord">Search {{ accessRecord.search_permission }} · Camera {{ accessRecord.camera_permission }} · Trap {{ accessRecord.trap_permission }}</p><p v-if="accessRecord?.contact_notes">{{ accessRecord.contact_notes }}</p></section>
     <label>Notes<textarea v-model="notes" rows="5"></textarea></label>
     <EvidenceEditor v-if="selected.object_type === 'evidence'" :object="selected" :saving="saving" @save="emit('saveEvidence', $event)" />
     <ChecklistEditor v-if="selected.object_type === 'note'" :object="selected" @save="emit('saveChecklist', $event)" @followup="emit('createTask', { title: $event.text, task_type: 'other', priority: 'normal', map_object_id: selected.id })" />
