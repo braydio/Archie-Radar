@@ -21,6 +21,7 @@ import ObjectInspector from '../components/surveyor/ObjectInspector.vue'
 import AudioRecorder from '../components/surveyor/AudioRecorder.vue'
 import PhotoCapture from '../components/surveyor/PhotoCapture.vue'
 import AccessEditor from '../components/surveyor/AccessEditor.vue'
+import SearchSessionMedia from '../components/surveyor/SearchSessionMedia.vue'
 import { cameraConePolygon, cameraHandlePoints } from '../surveyor/cameraGeometry.js'
 import { searchFreshness } from '../surveyor/zoneState.js'
 import { registerSurveyorIcons } from '../surveyor/iconRegistry.js'
@@ -47,6 +48,7 @@ const draftObject = ref(null)
 const accessDraftCoordinates = ref(null)
 const draftDrawId = ref(null)
 const searchResultOpen = ref(false)
+const sessionMediaOpen = ref(false)
 const attachmentCaption = ref('')
 const uploadingAttachment = ref(false)
 const activeSession = ref(null)
@@ -884,7 +886,7 @@ onBeforeUnmount(() => {
   <main class="surveyor-page">
     <header class="surveyor-topbar">
       <div><p class="eyebrow">FIELD MAP · {{ objects.length }} OBJECTS</p><h1>Surveyor</h1></div>
-      <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="startSearch" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" />
+      <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="startSearch" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" @media="sessionMediaOpen=true" />
     </header>
     <p v-if="error" class="surveyor-error">{{ error }}</p><p v-if="locationWarning" class="location-warning">{{ locationWarning }}</p>
     <div class="surveyor-workspace">
@@ -905,6 +907,7 @@ onBeforeUnmount(() => {
     <CandidateClusterSheet v-if="candidateCluster" :cluster="candidateCluster" @close="candidateCluster=null" @open="openClusterCandidate" @evidence="createEvidenceForCandidate" @zoom="zoomCandidateCluster" />
     <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
     <div v-if="accessDraftCoordinates" class="field-sheet-backdrop"><AccessEditor :coordinates="accessDraftCoordinates" :api="API" @save="accessSaved($event).catch(err => error=err.message)" @cancel="accessDraftCoordinates=null" /></div>
+    <div v-if="sessionMediaOpen && activeSession" class="field-sheet-backdrop"><SearchSessionMedia :api="API" :session-id="activeSession.id" @close="sessionMediaOpen=false" /></div>
     <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet :route="trackCoords.length >= 2 ? { type: 'LineString', coordinates: trackCoords } : null" :method="activeSession?.method || sessionMethod" @coverage-preview="setCoveragePreview" @save="finishSearch" @cancel="searchResultOpen=false; setCoveragePreview(null)" /></div>
     <footer class="surveyor-footer"><SurveyTimeline v-model="timelineWindow" /><span v-if="activeSession" class="active-session-status">SEARCH ACTIVE · {{ Math.round(sessionDistance()) }} m</span></footer>
   </main>

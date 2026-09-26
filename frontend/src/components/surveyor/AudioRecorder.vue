@@ -12,6 +12,7 @@ let recorder = null
 let chunks = []
 let interval = null
 let cancelRequested = false
+let disposed = false
 const elapsedLabel = computed(() => `${Math.floor(elapsed.value / 60)}:${String(elapsed.value % 60).padStart(2, '0')}`)
 const secureContext = typeof window !== 'undefined' && window.isSecureContext === true
 const captureAvailable = secureContext && Boolean(navigator.mediaDevices?.getUserMedia) && typeof MediaRecorder !== 'undefined'
@@ -24,6 +25,7 @@ async function start() {
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') { error.value = 'Audio recording is not supported in this browser.'; emit('error', error.value); return }
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    if (disposed) { stopTracks(); return }
     const mimeType = supportedAudioMimeType()
     recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
     chunks = []
@@ -53,7 +55,7 @@ function save() {
   const extension = blob.value.type.includes('mp4') ? 'm4a' : blob.value.type.includes('ogg') ? 'ogg' : 'webm'
   emit('select', new File([blob.value], `field-recording-${new Date().toISOString().replaceAll(':', '-')}.${extension}`, { type: blob.value.type }))
 }
-onBeforeUnmount(() => { cancel(); clearPreview() })
+onBeforeUnmount(() => { disposed = true; cancel(); clearPreview() })
 </script>
 <template>
   <section class="audio-recorder" aria-label="Audio evidence recorder">
