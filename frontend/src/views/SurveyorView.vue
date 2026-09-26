@@ -22,6 +22,7 @@ import AudioRecorder from '../components/surveyor/AudioRecorder.vue'
 import PhotoCapture from '../components/surveyor/PhotoCapture.vue'
 import AccessEditor from '../components/surveyor/AccessEditor.vue'
 import SearchSessionMedia from '../components/surveyor/SearchSessionMedia.vue'
+import SearchSessionDetail from '../components/surveyor/SearchSessionDetail.vue'
 import { cameraConePolygon, cameraHandlePoints } from '../surveyor/cameraGeometry.js'
 import { searchFreshness } from '../surveyor/zoneState.js'
 import { registerSurveyorIcons } from '../surveyor/iconRegistry.js'
@@ -52,6 +53,7 @@ const accessDraftRecord = ref(null)
 const draftDrawId = ref(null)
 const searchResultOpen = ref(false)
 const sessionMediaOpen = ref(false)
+const sessionDetailId = ref(null)
 const attachmentCaption = ref('')
 const uploadingAttachment = ref(false)
 const activeSession = ref(null)
@@ -309,6 +311,7 @@ async function loadActiveSession() {
     const requestedId = Number(route.query.session)
     const session = sessions.find(item => item.id === requestedId) || sessions.find(item => !item.ended_at)
     if (!session) return
+    if (requestedId) sessionDetailId.value = requestedId
     if (!session.ended_at) { activeSession.value = session; requestScreenWakeLock() }
     trackCoords.value = session.track_geojson?.type === 'LineString' ? session.track_geojson.coordinates : []
     trackTimes.value = trackCoords.value.map(() => null)
@@ -325,6 +328,51 @@ async function startSearch() {
   activeSession.value = await response.json(); trackCoords.value = []; trackTimes.value = []; locationWarning.value = ''; refreshTrack()
   requestScreenWakeLock()
   beginLocationWatch()
+}
+
+function showSessionRoute(session) {
+  const coordinates = session.track_geojson?.coordinates || []
+  trackCoords.value = coordinates; refreshTrack()
+  if (coordinates.length) map?.flyTo({ center: coordinates[Math.floor(coordinates.length / 2)], zoom: Math.max(map.getZoom(), 14) })
+}
+
+function showSessionCoverage(ids) {
+  const coverage = objects.value.find(item => ids.includes(item.id))
+  if (!coverage) return
+  selected.value = coverage; title.value = coverage.name || ''; subtype.value = coverage.subtype || ''; notes.value = coverage.notes || ''
+  map?.flyTo({ center: [coverage.centroid_lon, coverage.centroid_lat], zoom: Math.max(map.getZoom(), 14) })
+  sessionDetailId.value = null
+}
+
+function addSessionNote() {
+  if (!trackCoords.value.length) return
+  sessionDetailId.value = null; createNote(trackCoords.value.at(-1))
+}
+
+async function addSessionEvidence() {
+  const coordinate = trackCoords.value.at(-1)
+  if (!coordinate) { error.value = 'This session has no recorded location for evidence.'; return }
+  const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ object_type: 'evidence', subtype: 'reported_observation', name: 'Session evidence', geometry: { type: 'Point', coordinates: coordinate },
+      occurred_at: new Date().toISOString(), confidence: 'possible', epistemic_state: 'observed', properties: { search_session_id: sessionDetailId.value, resolution: 'unresolved' } }) })
+  if (!response.ok) { error.value = 'Could not add session evidence'; return }
+  const object = await response.json(); objects.value.unshift(object); refreshSource(); selected.value = object; sessionDetailId.value = null
+}
+
+async function createSessionCoverage() {
+  const sessionId = sessionDetailId.value
+  if (!sessionId) return
+  const response = await fetch(`${API}/api/surveyor/sessions/${sessionId}/coverage`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ buffer_meters: 15, name: 'Searched route' }) })
+  const result = await response.json().catch(() => ({}))
+  if (!response.ok) { error.value = result.detail || 'Could not create searched coverage'; return }
+  objects.value.unshift(result); refreshSource(); selected.value = result; sessionDetailId.value = null
+}
+
+async function createSessionFollowup() {
+  if (!sessionDetailId.value) return
+  await createTask({ title: 'Follow up on search session', task_type: 'search', priority: 'normal', search_session_id: sessionDetailId.value })
+  sessionDetailId.value = null
 }
 
 async function requestScreenWakeLock() {
@@ -481,8 +529,9 @@ async function saveDraft(payload) {
   cameraHeading.value = camera.placement.heading_degrees; cameraFov.value = camera.placement.fov_degrees; cameraRange.value = camera.placement.range_meters
   } else {
     const isZone = payload.kind === 'zone', isLine = payload.kind === 'line'
-    const properties = activeSession.value ? { search_session_id: activeSession.value.id } : {}
-    if (isZone && payload.subtype === 'searched') Object.assign(properties, { searched_at: new Date().toISOString(), search_session_id: activeSession.value?.id || null, search_method: activeSession.value?.method || null })
+    const linkedSessionId = activeSession.value?.id || sessionDetailId.value
+    const properties = linkedSessionId ? { search_session_id: linkedSessionId } : {}
+    if (isZone && payload.subtype === 'searched') Object.assign(properties, { searched_at: new Date().toISOString(), search_session_id: linkedSessionId || null, search_method: activeSession.value?.method || null })
     const response = await fetch(`${API}/api/surveyor/objects`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ object_type: isZone ? 'zone' : isLine ? 'corridor' : payload.kind === 'note' ? 'note' : 'pin',
         subtype: payload.subtype || (payload.kind === 'note' ? 'field_note' : null), name: payload.name || (payload.kind === 'note' ? 'Field note' : null),
@@ -965,6 +1014,7 @@ onBeforeUnmount(() => {
     <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
     <div v-if="accessDraftCoordinates" class="field-sheet-backdrop"><AccessEditor :coordinates="accessDraftCoordinates" :record="accessDraftRecord" :api="API" @save="accessSaved($event).catch(err => error=err.message)" @cancel="accessDraftCoordinates=null; accessDraftRecord=null" /></div>
     <div v-if="sessionMediaOpen && activeSession" class="field-sheet-backdrop"><SearchSessionMedia :api="API" :session-id="activeSession.id" @close="sessionMediaOpen=false" /></div>
+    <div v-if="sessionDetailId" class="field-sheet-backdrop"><SearchSessionDetail :api="API" :session-id="sessionDetailId" @close="sessionDetailId=null" @show-route="showSessionRoute" @show-coverage="showSessionCoverage" @add-note="addSessionNote" @add-evidence="addSessionEvidence" @create-coverage="createSessionCoverage" @create-followup="createSessionFollowup" /></div>
     <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet :route="trackCoords.length >= 2 ? { type: 'LineString', coordinates: trackCoords } : null" :method="activeSession?.method || sessionMethod" @coverage-preview="setCoveragePreview" @save="finishSearch" @cancel="searchResultOpen=false; setCoveragePreview(null)" /></div>
     <footer class="surveyor-footer"><SurveyTimeline v-model="timelineWindow" /><span v-if="activeSession" class="active-session-status">SEARCH ACTIVE · {{ Math.round(sessionDistance()) }} m</span></footer>
   </main>
