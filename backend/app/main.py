@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.orm import Session
+from shapely.geometry import shape as shape_geojson
 
 from .connectors.orange_county import OrangeCountyFoundCatsConnector
 from .connectors.pawboost import PawBoostConnector
@@ -329,17 +330,22 @@ def _geometry_stats(geometry: dict) -> tuple[float, float, float, float, float, 
         elif isinstance(value, (list, tuple)):
             for item in value:
                 visit(item)
+    visit(geometry.get("coordinates"))
     if geometry["type"] == "GeometryCollection":
         for item in geometry.get("geometries", []):
             _geometry_stats(item)
-            visit(item.get("coordinates", []))
-    else:
-        visit(geometry.get("coordinates"))
+            visit(item.get("coordinates"))
     if not coords:
         raise HTTPException(status_code=422, detail="GeoJSON geometry has no coordinates")
-    west = min(x for x, _ in coords); east = max(x for x, _ in coords)
-    south = min(y for _, y in coords); north = max(y for _, y in coords)
-    return sum(y for _, y in coords) / len(coords), sum(x for x, _ in coords) / len(coords), west, south, east, north
+    try:
+        geometry_shape = shape_geojson(geometry)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Malformed GeoJSON geometry") from exc
+    if geometry_shape.is_empty or not geometry_shape.is_valid:
+        raise HTTPException(status_code=422, detail="GeoJSON geometry is empty or invalid")
+    west, south, east, north = geometry_shape.bounds
+    centroid = geometry_shape.centroid
+    return centroid.y, centroid.x, west, south, east, north
 
 
 def _surveyor_out(row: SurveyorMapObject) -> SurveyorObjectOut:
