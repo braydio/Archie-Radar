@@ -26,13 +26,14 @@ import SearchSessionDetail from '../components/surveyor/SearchSessionDetail.vue'
 import QuickAddMenu from '../components/surveyor/QuickAddMenu.vue'
 import ObjectStackSheet from '../components/surveyor/ObjectStackSheet.vue'
 import DraftRecoveryPrompt from '../components/surveyor/DraftRecoveryPrompt.vue'
-import { cameraConePolygon, cameraHandlePoints } from '../surveyor/cameraGeometry.js'
+import { cameraConePolygon, cameraHandlePoints, destinationPoint } from '../surveyor/cameraGeometry.js'
 import { searchFreshness } from '../surveyor/zoneState.js'
 import { registerSurveyorIcons } from '../surveyor/iconRegistry.js'
 import { uploadMedia } from '../surveyor/mediaCapture.js'
 import { metersToFeet, formatDistance } from '../surveyor/units.js'
 import { createUndoStack } from '../surveyor/undoStack.js'
 import { clearSurveyorDraft, readSurveyorDraft } from '../surveyor/draftStorage.js'
+import { clearLocationFocus, getLocationFocus } from '../surveyor/locationFocus.js'
 
 const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
 const route = useRoute()
@@ -100,6 +101,7 @@ const restoredAccessForm = ref(null)
 const restoredSearchForm = ref(null)
 const restoredEvidenceForm = ref(null)
 const restoreSearchPending = ref(false)
+const locatedAddress = ref(getLocationFocus())
 let longPressTimer = null
 let longPressOrigin = null
 let longPressMoved = false
@@ -513,6 +515,43 @@ function linkCollection() {
 }
 
 function refreshLinks() { map?.getSource('surveyor-links')?.setData(linkCollection()) }
+
+function applyLocationFocus() {
+  locatedAddress.value = getLocationFocus()
+  const source = map?.getSource('location-focus')
+  if (!source) return
+  const focus = locatedAddress.value
+  const features = focus ? [
+    { type: 'Feature', properties: { role: 'home' }, geometry: { type: 'Point', coordinates: [focus.home.longitude, focus.home.latitude] } },
+    { type: 'Feature', properties: { role: 'target' }, geometry: { type: 'Point', coordinates: [focus.longitude, focus.latitude] } },
+    { type: 'Feature', properties: { role: 'route' }, geometry: { type: 'LineString', coordinates: [[focus.home.longitude, focus.home.latitude], [focus.longitude, focus.latitude]] } }
+  ] : []
+  source.setData({ type: 'FeatureCollection', features })
+  if (focus) {
+    const bounds = new maplibregl.LngLatBounds([focus.home.longitude, focus.home.latitude], [focus.longitude, focus.latitude])
+    map.fitBounds(bounds, { padding: 90, maxZoom: 15, duration: 450 })
+  }
+}
+
+function dismissLocationFocus() {
+  clearLocationFocus()
+  locatedAddress.value = null
+  map?.getSource('location-focus')?.setData({ type: 'FeatureCollection', features: [] })
+}
+
+function saveLocatedPin() {
+  if (!locatedAddress.value) return
+  draftObject.value = { kind: 'pin', geometry: { type: 'Point', coordinates: [locatedAddress.value.longitude, locatedAddress.value.latitude] },
+    subtype: 'search_start', defaultName: locatedAddress.value.displayName || 'Located address' }
+}
+
+function createNeedsSearchAtLocation() {
+  if (!locatedAddress.value) return
+  const ring = Array.from({ length: 49 }, (_, index) => destinationPoint(locatedAddress.value.longitude,
+    locatedAddress.value.latitude, 150, index * (360 / 48)))
+  ring[48] = ring[0]
+  draftObject.value = { kind: 'zone', geometry: { type: 'Polygon', coordinates: [ring] }, subtype: 'needs_search', defaultName: 'Address area to search' }
+}
 
 async function createLink(targetId) {
   if (linkStartId.value == null) { linkStartId.value = targetId; return }
@@ -1075,6 +1114,7 @@ function discardFieldDraft() { clearSurveyorDraft(); draftRecovery.value = null 
 onMounted(() => {
   document.addEventListener('visibilitychange', onVisibilityChange)
   document.addEventListener('keydown', onHistoryKeydown)
+  window.addEventListener('archie:location-focus', applyLocationFocus)
   map = new maplibregl.Map({
     container: mapEl.value, style: 'https://tiles.openfreemap.org/styles/positron',
     center: [-79.117282, 35.845701], zoom: 12, attributionControl: true
@@ -1104,6 +1144,7 @@ onMounted(() => {
     map.addSource('surveyor-links', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('active-search-track', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('search-coverage-preview', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map.addSource('location-focus', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('annual-landcover-source', { type: 'raster', tileSize: 256, attribution: 'Annual NLCD · USGS / MRLC', tiles: [
       'https://dmsdata.cr.usgs.gov/geoserver/mrlc_Land-Cover-Native_conus_year_data/wms?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=Land-Cover-Native_conus_year_data&STYLES=&FORMAT=image/png&TRANSPARENT=TRUE&SRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&TIME=2025-01-01T00:00:00Z'
     ] })
@@ -1113,6 +1154,13 @@ onMounted(() => {
     } })
     map.addLayer({ id: 'search-coverage-preview-fill', type: 'fill', source: 'search-coverage-preview', paint: { 'fill-color': '#d39a42', 'fill-opacity': 0.2 } })
     map.addLayer({ id: 'search-coverage-preview-outline', type: 'line', source: 'search-coverage-preview', paint: { 'line-color': '#a97129', 'line-width': 2, 'line-dasharray': [2, 2] } })
+    map.addLayer({ id: 'location-focus-line', type: 'line', source: 'location-focus', filter: ['==', ['geometry-type'], 'LineString'], paint: { 'line-color': '#bd753e', 'line-width': 2, 'line-dasharray': [2, 2] } })
+    map.addLayer({ id: 'location-focus-points', type: 'circle', source: 'location-focus', filter: ['==', ['geometry-type'], 'Point'], paint: {
+      'circle-radius': ['match', ['get', 'role'], 'target', 8, 6], 'circle-color': ['match', ['get', 'role'], 'target', '#bd753e', '#314f41'], 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2
+    } })
+    map.addLayer({ id: 'location-focus-labels', type: 'symbol', source: 'location-focus', filter: ['==', ['geometry-type'], 'Point'], layout: {
+      'text-field': ['match', ['get', 'role'], 'target', 'LOCATED ADDRESS', 'HOME'], 'text-size': 10, 'text-offset': [0, 1.3], 'text-allow-overlap': true
+    }, paint: { 'text-color': '#273b30', 'text-halo-color': '#fffaf0', 'text-halo-width': 2 } })
     map.addLayer({ id: 'camera-cones-fill', type: 'fill', source: 'camera-cones', paint: {
       'fill-color': '#477b7a', 'fill-opacity': ['*', ['get', 'opacity'], 0.18]
     } })
@@ -1221,6 +1269,7 @@ onMounted(() => {
       map.setLayoutProperty('surveyor-icons', 'visibility', layerSettings.value.objects ? 'visible' : 'none')
     })
     layerSettings.value = { ...layerSettings.value }
+    applyLocationFocus()
     loadObjects()
   })
   resizeObserver = new ResizeObserver(() => map?.resize())
@@ -1250,6 +1299,7 @@ onBeforeUnmount(() => {
   map?.getCanvasContainer()?.removeEventListener('pointercancel', cancelLongPress)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   document.removeEventListener('keydown', onHistoryKeydown)
+  window.removeEventListener('archie:location-focus', applyLocationFocus)
   releaseScreenWakeLock()
   resizeObserver?.disconnect(); draw?.stop()
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
@@ -1265,6 +1315,7 @@ onBeforeUnmount(() => {
     <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="startSearch" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" @media="sessionMediaOpen=true" @observation="quickObservation" @note="quickNote" />
     </header>
     <p v-if="error" class="surveyor-error">{{ error }}</p><p v-if="locationWarning" class="location-warning">{{ locationWarning }}</p>
+    <div v-if="locatedAddress" class="located-address-banner"><div><p class="eyebrow">LOCATED ADDRESS</p><strong>{{ locatedAddress.displayName }}</strong><span>{{ locatedAddress.distance_miles }} mi {{ locatedAddress.bearing_label }} of home</span></div><button class="secondary-button" @click="saveLocatedPin">Save pin</button><button class="secondary-button" @click="createNeedsSearchAtLocation">Create needs-search area</button><button class="dismiss-location-focus" aria-label="Dismiss located address" @click="dismissLocationFocus">×</button></div>
     <div class="surveyor-workspace">
       <SurveyorToolbar :active-tool="activeTool" :can-undo="history.canUndo.value" :can-redo="history.canRedo.value" @tool="activateTool" @more="mobileMoreOpen=!mobileMoreOpen" @undo="undoLast" @redo="redoLast" />
       <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','access','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? 'Choose a marker type, then tap the map' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : activeTool === 'access' ? 'Tap a property to record access details' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option value="searched">Searched</option><option value="needs_search">Needs search</option><option value="needs_recheck">Needs re-check</option><option value="known_cat_highway">Known cat highway</option><option value="wildlife_hotspot">Wildlife hotspot</option><option value="likely_shelter">Likely shelter</option><option value="dog_territory">Dog territory</option><option value="private_no_access">Private / no access</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>

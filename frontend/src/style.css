@@ -689,11 +689,40 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
 .source-history-row { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; border-left: 2px solid var(--line); padding-left: 9px; }
 .source-history-row > time, .source-history-row > small { color: var(--muted); }
 .source-history-row > span, .source-history-row > small, .source-history-row > a { grid-column: 2; }
+.archie-nav .locate-address-trigger { min-height: 36px; border: 1px solid #728579; border-radius: 9px; padding: 6px 10px; background: #253c31; color: #f8f6ed; font-size: .74rem; font-weight: 800; white-space: nowrap; }
+.assistant-location-backdrop { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; padding: 20px; background: #111c18a8; }
+.assistant-location-dialog { width: min(760px, 100%); max-height: min(88dvh, 900px); overflow-y: auto; border: 1px solid #c6cec4; border-radius: 18px; padding: 20px; background: #faf9f2; box-shadow: 0 18px 70px #101a16a8; }
+.assistant-location-dialog > header { display: flex; justify-content: space-between; gap: 14px; }
+.assistant-location-dialog h2 { margin: 0; font-size: 1.45rem; }
+.assistant-location-dialog header p:not(.eyebrow) { margin: 5px 0 0; color: var(--muted); }
+.assistant-location-dialog header > button { width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 50%; background: white; font-size: 1.35rem; }
+.assistant-location-search { display: grid; gap: 6px; margin: 18px 0 12px; color: #536258; font-size: .78rem; font-weight: 850; }
+.assistant-location-search > div { display: flex; gap: 8px; }
+.assistant-location-search input { min-width: 0; flex: 1; min-height: 44px; border: 1px solid #aeb8ad; border-radius: 9px; padding: 8px 10px; background: white; }
+.assistant-location-search button { min-width: 100px; }
+.assistant-location-error { padding: 9px 11px; border-radius: 9px; background: #fff1ef; color: #762d26; }
+.assistant-location-results > label { display: grid; gap: 5px; margin: 12px 0; font-size: .75rem; font-weight: 800; }
+.assistant-location-results select { min-height: 42px; width: 100%; }
+.assistant-location-card { display: grid; grid-template-columns: minmax(220px, 1.1fr) minmax(240px, .9fr); overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: white; }
+.assistant-mini-map { min-height: 260px; width: 100%; }
+.assistant-location-copy { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 17px; }
+.assistant-location-copy h3 { margin: 0; font-size: 1rem; line-height: 1.35; }
+.assistant-location-copy > strong { color: #2c5740; }
+.assistant-location-copy > p:not(.eyebrow) { margin: 0 0 auto; color: var(--muted); font-size: .78rem; }
+.located-address-banner { position: fixed; z-index: 15; top: 128px; left: max(90px, calc((100vw - 600px) / 2)); display: flex; align-items: center; gap: 8px; max-width: min(660px, calc(100vw - 110px)); padding: 9px 10px 9px 13px; border: 1px solid #c3c8be; border-radius: 13px; background: rgba(250,249,242,.97); box-shadow: 0 4px 18px #17282030; }
+.located-address-banner > div { min-width: 0; display: grid; gap: 2px; margin-right: 5px; }
+.located-address-banner .eyebrow { margin: 0; font-size: .55rem; }
+.located-address-banner strong { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .78rem; }
+.located-address-banner span { color: var(--muted); font-size: .68rem; }
+.located-address-banner > button { min-height: 38px; padding: 6px 9px; white-space: nowrap; font-size: .68rem; }
+.located-address-banner .dismiss-location-focus { width: 34px; min-width: 34px; border: 0; border-radius: 50%; background: transparent; font-size: 1.2rem; }
+.candidate-locate-link { margin-top: 5px; border: 0; padding: 2px 0; background: transparent; color: #315943; font-size: .69rem; font-weight: 850; text-decoration: underline; text-underline-offset: 2px; }
 @media (max-width: 700px) {
   .archie-nav { height: 52px; padding: 0 8px; gap: 5px; }
   .archie-brand { font-size: .62rem; white-space: nowrap; }
   .archie-nav nav { gap: 0; }
   .archie-nav nav a { padding: 0 9px; font-size: .72rem; }
+  .archie-nav .locate-address-trigger { min-height: 36px; max-width: 128px; padding: 5px 7px; font-size: .61rem; white-space: normal; line-height: 1.1; }
   .surveyor-page { height: calc(100dvh - 52px); }
   .surveyor-topbar { flex-basis: 54px; padding: 5px 9px; }
   .surveyor-topbar h1 { font-size: 1.2rem; }
@@ -734,4 +763,14 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
   .field-sheet-backdrop { inset: 52px 0 0; align-items: end; padding: 0; }
   .field-sheet { width: 100%; max-height: 82dvh; border-radius: 19px 19px 0 0; padding: 16px 16px max(18px, env(safe-area-inset-bottom)); }
   .candidate-cluster-sheet { top: auto; right: 8px; bottom: 63px; left: 8px; transform: none; width: auto; max-height: 68dvh; }
+  .assistant-location-backdrop { place-items: end center; padding: 0; }
+  .assistant-location-dialog { width: 100%; max-height: 90dvh; border-radius: 18px 18px 0 0; padding: 17px 15px max(18px, env(safe-area-inset-bottom)); }
+  .assistant-location-card { grid-template-columns: 1fr; }
+  .assistant-mini-map { min-height: 210px; }
+  .assistant-location-copy { padding: 13px; }
+  .assistant-location-copy > p:not(.eyebrow) { margin-bottom: 0; }
+  .located-address-banner { top: 111px; left: 8px; right: 8px; display: grid; grid-template-columns: 1fr 1fr 32px; gap: 4px; max-width: none; padding: 7px; }
+  .located-address-banner > div { grid-column: 1 / -1; }
+  .located-address-banner > button { width: 100%; min-height: 40px; margin: 0; padding: 5px; font-size: .61rem; white-space: normal; }
+  .located-address-banner .dismiss-location-focus { grid-column: 3; grid-row: 1; justify-self: end; width: 32px; }
 }

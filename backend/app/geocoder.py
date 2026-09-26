@@ -67,6 +67,28 @@ class NominatimGeocoder:
             hit = data[0]
             return GeocodeResult(float(hit["lat"]), float(hit["lon"]), hit.get("display_name", ""))
 
+    async def lookup_many(self, query: str, limit: int = 5) -> list[dict]:
+        query = " ".join(query.split()).strip()
+        if not query:
+            return []
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            elapsed = loop.time() - self._last_request_monotonic
+            if elapsed < self.min_delay_seconds:
+                await asyncio.sleep(self.min_delay_seconds - elapsed)
+            headers = {"User-Agent": self.user_agent}
+            params = {"q": query, "format": "jsonv2", "limit": max(1, min(5, limit)), "countrycodes": "us", "addressdetails": 1}
+            async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=20) as client:
+                response = await client.get(f"{self.base_url}/search", params=params)
+                response.raise_for_status()
+                self._last_request_monotonic = loop.time()
+                payload = response.json()
+            return [{
+                "latitude": float(item["lat"]), "longitude": float(item["lon"]),
+                "display_name": item.get("display_name", ""), "addresstype": item.get("addresstype", ""),
+                "type": item.get("type", ""), "class": item.get("class", ""),
+            } for item in payload if item.get("lat") and item.get("lon")]
+
 
 def build_query(post: PetPostIn) -> str:
     location = " ".join((post.location_text or "").split()).strip()

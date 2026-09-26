@@ -50,11 +50,13 @@ def extract_identifiers(post: PetPost):
     return [item] if item else []
 
 
-def choose_primary_post(posts: list[PetPost]) -> PetPost:
+def choose_primary_post(posts: list[PetPost], db: Session | None = None) -> PetPost:
     def quality(post: PetPost):
         raw = _raw(post)
         richness = sum(bool(v) for v in (post.name, post.description, post.location_text, post.source_url, raw.get("status_text")))
-        return (bool(post.image_url), post.latitude is not None and post.longitude is not None,
+        vision = db.scalar(select(PostVision).where(PostVision.post_id == post.id)) if db is not None else None
+        usable_image = bool(post.image_url) and not (vision and vision.status == "no_photo")
+        return (usable_image, post.latitude is not None and post.longitude is not None,
                 richness, bool(raw.get("holding_entity")), post.reported_at.timestamp() if post.reported_at else 0,
                 len(post.description or ""), post.last_seen_at.timestamp())
     return max(posts, key=quality)
@@ -138,7 +140,7 @@ def ensure_candidate_cases(db: Session) -> int:
             continue
         states = {post.review_state for post in members}
         case.review_state = next((state for state in REVIEW_PRECEDENCE if state in states), "new")
-        primary = choose_primary_post(members)
+        primary = choose_primary_post(members, db)
         case.primary_post_id = primary.id
         raw = _raw(primary)
         case.display_name = primary.name
@@ -153,7 +155,7 @@ def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
     posts = [post for post in posts if post]
     if not posts:
         return {"case_id": case.id, "record_count": 0, "source_records": []}
-    primary = next((post for post in posts if post.id == case.primary_post_id), None) or choose_primary_post(posts)
+    primary = next((post for post in posts if post.id == case.primary_post_id), None) or choose_primary_post(posts, db)
     profile = profile or get_or_create_profile(db)
     visions = {row.post_id: row for row in db.scalars(select(PostVision).where(PostVision.post_id.in_([post.id for post in posts])))}
     output_by_id = {post.id: post_output(post, visions.get(post.id), profile) for post in posts}
@@ -168,7 +170,7 @@ def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
             "holding_entity": raw.get("holding_entity"), "custody_type": raw.get("custody_type"),
             "custody_label": raw.get("custody_label"), "source_platform": raw.get("source_platform")})
     identifiers = list(db.scalars(select(CandidateIdentifier).where(
-        CandidateIdentifier.case_id == case.id, CandidateIdentifier.is_identity_key.is_(True))))
+        CandidateIdentifier.case_id == case.id, CandidateIdentifier.is_identity_key.is_(True)).order_by(CandidateIdentifier.identifier_kind, CandidateIdentifier.id)))
     scores = [float(output_by_id[post.id].get("match_score") or 0) for post in posts]
     photo_scores = [output_by_id[post.id]["photo_similarity"] for post in posts if output_by_id[post.id].get("photo_similarity") is not None]
     distances = [output_by_id[post.id]["distance_from_home_miles"] for post in posts if output_by_id[post.id].get("distance_from_home_miles") is not None]

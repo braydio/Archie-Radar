@@ -82,6 +82,12 @@ class OrangeCountyFoundCatsConnector(Connector):
             image_url = None
 
         desc = f"{status_text}. Breed: {breed}."
+        context = Regional24PetConnectConnector.parse_24pet_context(status_text)
+        if not context.get("holding_entity"):
+            # This endpoint is specifically Orange County's found-cat report feed,
+            # whose records remain with their finders unless source text says otherwise.
+            context.update({"custody_type": "finder", "custody_label": "With finder"})
+
         return PetPostIn(
             source="orange_county_found",
             source_id=f"A{aid}",
@@ -98,6 +104,6 @@ class OrangeCountyFoundCatsConnector(Connector):
                 "days_since_found": days,
                 "status_text": status_text,
                 "breed": breed,
-                **Regional24PetConnectConnector.parse_24pet_context(status_text),
+                **context,
             },
         )

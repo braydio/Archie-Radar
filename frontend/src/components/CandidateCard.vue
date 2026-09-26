@@ -19,7 +19,7 @@ export default {
     post: { type: Object, required: true },
     rank: { type: Number, default: 1 }
   },
-  emits: ['review'],
+  emits: ['review', 'locate'],
   setup(props, { emit }) {
     const imageFailed = ref(false)
     watch(() => props.post.image_url, () => { imageFailed.value = false })
@@ -108,12 +108,13 @@ export default {
     })
 
     function review(reviewState) { emit('review', props.post, reviewState) }
+    function locate() { emit('locate', props.post) }
 
     return {
       imageFailed, priorityClass, photoPct, hasPhoto, sourceAccent, candidateHeading, candidateSubheading, identityIds,
       sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText,
       traitTokens, primaryTraitTokens, reasonSummary, colorClass,
-      sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review
+      sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review, locate
     }
   }
 }
@@ -165,6 +166,7 @@ export default {
         </div>
         <a v-if="mapHref" :href="mapHref" target="_blank" rel="noopener">Map ↗</a>
       </div>
+      <button v-if="post.location_text || post.map_latitude != null" type="button" class="candidate-locate-link" @click="locate">Locate relative to home</button>
 
       <div v-if="primaryTraitTokens.length" class="trait-row" aria-label="Most relevant traits parsed from listing text">
         <span v-for="token in primaryTraitTokens" :key="`${token.label}-${token.state}`" :class="['trait-chip', token.state]">{{ token.label }}</span>

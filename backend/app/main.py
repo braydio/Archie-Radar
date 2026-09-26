@@ -326,10 +326,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Archie Radar API", version="0.9.0", lifespan=lifespan)
+from .places import router as places_router
 from .surveyor.access import router as surveyor_access_router
 from .surveyor.tasks import router as surveyor_tasks_router
 app.include_router(surveyor_access_router)
 app.include_router(surveyor_tasks_router)
+app.include_router(places_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if "*" in settings.cors_origin_list else settings.cors_origin_list,

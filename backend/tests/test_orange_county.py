@@ -31,4 +31,7 @@ def test_orange_found_reports_parse():
     assert rows[0].sex == "male"
     assert rows[0].location_text == "Near Dennys"
     assert rows[0].raw["geocode_context"].startswith("Orange County")
+    assert rows[0].raw["source_platform"] == "24PetConnect"
+    assert rows[0].raw["custody_type"] == "finder"
+    assert rows[0].raw["custody_label"] == "With finder"
     assert rows[1].sex == "unknown"

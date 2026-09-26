@@ -387,6 +387,25 @@ export default {
       } catch (e) { error.value = e?.message || String(e) }
     }
 
+    function locateCandidate(post) {
+      const config = searchConfig.value
+      if (post.latitude != null && post.longitude != null && config) {
+        const lat1 = Number(config.home_latitude) * Math.PI / 180
+        const lat2 = Number(post.latitude) * Math.PI / 180
+        const dLon = (Number(post.longitude) - Number(config.home_longitude)) * Math.PI / 180
+        const y = Math.sin(dLon) * Math.cos(lat2)
+        const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon)
+        const bearing = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
+        const labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
+        window.dispatchEvent(new CustomEvent('archie:locate', { detail: { latitude: post.latitude, longitude: post.longitude,
+          displayName: post.location_text || 'Candidate location', precision: 'address', distance_miles: post.distance_from_home_miles,
+          bearing_degrees: Number(bearing.toFixed(1)), bearing_label: labels[Math.round(bearing / 22.5) % 16],
+          home: { latitude: config.home_latitude, longitude: config.home_longitude } } }))
+      } else {
+        window.dispatchEvent(new CustomEvent('archie:locate', { detail: { query: post.location_text || '' } }))
+      }
+    }
+
     async function uploadReference(event) {
       const file = event.target.files?.[0]
       if (!file) return
@@ -464,7 +483,7 @@ export default {
       notBefore, traitMode, queueTabs, sourceOptions, statusOptions, setupNeededCount, activeSourceCount, mappedCount,
       nonDefaultApplied, selectedDraftTraits, refreshBusy, refreshReceipt, isDefaultDraft, appliedFilters,
       ingest, review, uploadReference, deleteReference, setQueue, changeSort, toggleMap, toggleSources, toggleSetup,
-      applySelections, clearSelections, applyDefaults, openFilters, refreshSource
+      applySelections, clearSelections, applyDefaults, openFilters, refreshSource, locateCandidate
     }
   }
 }
@@ -591,6 +610,6 @@ export default {
 
     <div class="results-heading"><div><p class="eyebrow">REVIEW QUEUE</p><h2>{{ posts.length }} {{ state === 'new' ? 'new candidates' : 'candidates' }}</h2></div><div class="results-meta"><span v-if="mappedCount">{{ mappedCount }} on map</span><span v-if="loading">Updating…</span></div></div>
     <p v-if="!loading && !posts.length" class="empty">Nothing in this view. Widen a filter or run a fresh scan.</p>
-    <section class="candidate-list"><CandidateCard v-for="(post, index) in posts" :id="`post-${post.id}`" :key="post.id" :post="post" :rank="index + 1" @review="review" /></section>
+    <section class="candidate-list"><CandidateCard v-for="(post, index) in posts" :id="`post-${post.id}`" :key="post.id" :post="post" :rank="index + 1" @review="review" @locate="locateCandidate" /></section>
   </main>
 </template>
