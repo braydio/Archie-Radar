@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 from ..schemas import PetPostIn
 from .base import Connector
+from .regional_24petconnect import Regional24PetConnectConnector
 
 
 class OrangeCountyFoundCatsConnector(Connector):
@@ -97,5 +98,6 @@ class OrangeCountyFoundCatsConnector(Connector):
                 "days_since_found": days,
                 "status_text": status_text,
                 "breed": breed,
+                **Regional24PetConnectConnector.parse_24pet_context(status_text),
             },
         )

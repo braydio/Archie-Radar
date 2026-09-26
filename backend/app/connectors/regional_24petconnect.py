@@ -22,6 +22,38 @@ class Regional24PetConnectConnector(Connector):
 
     source_name = "regional_24petconnect"
 
+    @staticmethod
+    def parse_24pet_context(status_text: str) -> dict:
+        value = (status_text or "").strip()
+        lower = value.casefold()
+        holding = None
+        if "animal protection society of durham" in lower:
+            holding = "Animal Protection Society of Durham"
+        elif "burlington animal services" in lower:
+            holding = "Burlington Animal Services"
+        elif "chatham" in lower and ("animal resources" in lower or "animal services" in lower or "shelter" in lower):
+            holding = "Chatham County · Animal Resources Center"
+        elif "wake county animal center" in lower:
+            holding = "Wake County Animal Center"
+        elif "orange county animal services" in lower:
+            holding = "Orange County Animal Services"
+
+        if any(term in lower for term in ("finder's home", "finders home", "held by finder", "with finder")):
+            custody_type, custody_label = "finder", "With finder"
+        elif holding or "shelter" in lower or "animal center" in lower or "animal services" in lower:
+            custody_type, custody_label = "shelter", "At shelter"
+        elif any(term in lower for term in ("sighting", "found", "report")):
+            custody_type, custody_label = "field_report", "Found report"
+        else:
+            custody_type, custody_label = "unknown", "Location unknown"
+        return {
+            "source_platform": "24PetConnect",
+            "reporting_entity": holding,
+            "holding_entity": holding,
+            "custody_type": custody_type,
+            "custody_label": custody_label,
+        }
+
     def __init__(self, url: str):
         self.url = url.strip()
 
@@ -126,6 +158,7 @@ class Regional24PetConnectConnector(Connector):
                     detail_url = urljoin(source_url, link["href"])
 
             source = Regional24PetConnectConnector._source_for_status(status_text)
+            context = Regional24PetConnectConnector.parse_24pet_context(status_text)
             status = "found"
             if "finder's home" in status_text.lower() or "finders home" in status_text.lower():
                 status = "found_with_finder"
@@ -152,6 +185,7 @@ class Regional24PetConnectConnector(Connector):
                         "breed": breed,
                         "days_since_event": days,
                         "geocode_context": "North Carolina, USA",
+                        **context,
                     },
                 )
             )

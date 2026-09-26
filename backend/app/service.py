@@ -140,6 +140,10 @@ def upsert_posts(db: Session, posts: list[PetPostIn]) -> dict:
             post_ids.append(row.id)
 
     db.commit()
+    # Keep the additive case index current as new source records arrive. This is
+    # intentionally identifier-driven; image similarity never merges identities.
+    from .candidates.identity import ensure_candidate_cases
+    ensure_candidate_cases(db)
     return {"created": created, "updated": updated, "total": len(posts), "post_ids": post_ids}
 
 

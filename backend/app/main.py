@@ -31,10 +31,11 @@ from .connectors.aps_durham import APSDurhamFoundPetsConnector
 from .connectors.wake_county import WakeCountyLostFoundConnector
 from .connectors.pet911 import Pet911Connector
 from .connectors.petkey import PetkeyConnector
+from .candidates.identity import case_output, ensure_candidate_cases
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
-from .models import ArchieProfile, ArchieReferencePhoto, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorObjectLink, SurveyorTask, utcnow
+from .models import ArchieProfile, ArchieReferencePhoto, CandidateCase, CandidateCasePost, CandidateIdentifier, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorObjectLink, SurveyorTask, utcnow
 from .schemas import (
     FacebookBridgeIn,
     PetPostIn,
@@ -304,6 +305,7 @@ async def lifespan(_: FastAPI):
     # Importing geocoder above registers its cache table with SQLAlchemy metadata.
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
+        ensure_candidate_cases(db)
         _set_home_anchor(db)
         rescore_all(db)
     tasks = []
@@ -1195,6 +1197,136 @@ def list_posts(
     return output[:limit]
 
 
+@app.get("/api/candidate-cases")
+def list_candidate_cases(
+    review_state: str | None = None,
+    min_score: float = Query(0, ge=0, le=100),
+    source: str | None = None,
+    status: str | None = None,
+    sex: str | None = None,
+    has_photo: bool | None = None,
+    color: str | None = None,
+    pattern: str | None = None,
+    coat: str | None = None,
+    collar: str | None = None,
+    microchip: str | None = None,
+    altered: str | None = None,
+    white_chest: bool | None = None,
+    white_belly: bool | None = None,
+    white_paws: bool | None = None,
+    white_face: bool | None = None,
+    age_compatible: bool = False,
+    archie_compatible: bool = False,
+    reported_within_days: int | None = Query(None, ge=1, le=3650),
+    not_before: datetime | None = None,
+    include_duplicates: bool = True,
+    max_distance_miles: float | None = Query(None, ge=0, le=500),
+    sort: str = Query("smart", pattern="^(smart|newest|closest|score)$"),
+    limit: int = Query(100, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    """Return one row per animal case while matching filters against member records."""
+    ensure_candidate_cases(db)
+    profile = get_or_create_profile(db)
+    cases = list(db.scalars(select(CandidateCase).where(
+        CandidateCase.review_state == review_state if review_state else True
+    )))
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=reported_within_days) if reported_within_days else None
+    if not_before is not None:
+        requested_cutoff = not_before if not_before.tzinfo else not_before.replace(tzinfo=timezone.utc)
+        cutoff = max(cutoff, requested_cutoff) if cutoff else requested_cutoff
+
+    results = []
+    for case in cases:
+        memberships = list(db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)))
+        members = []
+        for membership in memberships:
+            row = db.get(PetPost, membership.post_id)
+            if not row:
+                continue
+            vision = db.scalar(select(PostVision).where(PostVision.post_id == row.id))
+            output = post_output(row, vision, profile)
+            if row.match_score < min_score:
+                continue
+            if source and row.source != source:
+                continue
+            if status and row.status != status:
+                continue
+            if sex and row.sex != sex:
+                continue
+            if cutoff and (row.reported_at or row.first_seen_at) < cutoff:
+                continue
+            if has_photo is True and (not output.get("image_url")):
+                continue
+            if has_photo is False and output.get("image_url"):
+                continue
+            if not include_duplicates and output.get("duplicate_of_post_id"):
+                continue
+            if max_distance_miles is not None and output.get("distance_from_home_miles") is not None and output["distance_from_home_miles"] > max_distance_miles:
+                continue
+            traits = output.get("parsed_traits") or {}
+            if color and color not in (traits.get("colors") or []):
+                continue
+            if pattern and pattern not in (traits.get("patterns") or []):
+                continue
+            if coat and traits.get("coat") != coat:
+                continue
+            if collar and traits.get("collar") != collar:
+                continue
+            if microchip and traits.get("microchip") != microchip:
+                continue
+            if altered and traits.get("altered_status") != altered:
+                continue
+            if white_chest is not None and traits.get("white_chest") is not white_chest:
+                continue
+            if white_belly is not None and traits.get("white_belly") is not white_belly:
+                continue
+            if white_paws is not None and traits.get("white_paws") is not white_paws:
+                continue
+            if white_face is not None and traits.get("white_face") is not white_face:
+                continue
+            if age_compatible and (traits.get("age_years") is None or abs(float(traits["age_years"]) - float(ARCHIE_TRAITS["age_years"])) > 2.5):
+                continue
+            if archie_compatible and not is_archie_compatible(traits, row.sex):
+                continue
+            members.append((row, vision, output))
+        if not members:
+            continue
+        result = case_output(db, case, profile)
+        eligible_scores = [float(member[0].match_score or 0) for member in members]
+        result["match_score"] = max(eligible_scores)
+        results.append((result, members))
+
+    if sort == "newest":
+        results.sort(key=lambda item: max(((row.reported_at or row.first_seen_at) for row, _, _ in item[1]), default=datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+    elif sort == "closest":
+        results.sort(key=lambda item: (item[0].get("distance_from_home_miles") is None,
+            item[0].get("distance_from_home_miles") if item[0].get("distance_from_home_miles") is not None else 9999))
+    else:
+        results.sort(key=lambda item: (item[0].get("match_score", 0), max((row.reported_at or row.first_seen_at for row, _, _ in item[1]), default=datetime.min.replace(tzinfo=timezone.utc))), reverse=True)
+    return [result for result, _ in results[:limit]]
+
+
+@app.patch("/api/candidate-cases/{case_id}/review")
+def review_candidate_case(case_id: int, payload: ReviewIn, db: Session = Depends(get_db)):
+    case = db.get(CandidateCase, case_id)
+    if not case:
+        raise HTTPException(404, "Candidate case not found")
+    previous = case.review_state
+    case.review_state = payload.review_state
+    members = list(db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)))
+    for membership in members:
+        post = db.get(PetPost, membership.post_id)
+        if post:
+            post.review_state = payload.review_state
+    _record_surveyor_event(db, "candidate_reviewed", "candidate_case", case.id,
+        f"Candidate case #{case.id} marked {payload.review_state}",
+        before={"case_id": case.id, "review_state": previous}, after={"case_id": case.id, "review_state": payload.review_state})
+    db.commit()
+    return case_output(db, case)
+
+
 @app.get("/api/filter-options")
 def filter_options(db: Session = Depends(get_db)):
     sources = [x for x in db.scalars(select(PetPost.source).distinct().order_by(PetPost.source)) if x]
@@ -1253,6 +1385,15 @@ def review_post(post_id: int, payload: ReviewIn, db: Session = Depends(get_db)):
         raise HTTPException(404, "Post not found")
     previous_state = row.review_state
     row.review_state = payload.review_state
+    membership = db.scalar(select(CandidateCasePost).where(CandidateCasePost.post_id == post_id))
+    if membership:
+        case = db.get(CandidateCase, membership.case_id)
+        if case:
+            case.review_state = payload.review_state
+            for member in db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)):
+                related = db.get(PetPost, member.post_id)
+                if related:
+                    related.review_state = payload.review_state
     _record_surveyor_event(db, "candidate_reviewed", "candidate_post", post_id,
         f"Candidate #{post_id} marked {payload.review_state}",
         before={"candidate_id": post_id, "review_state": previous_state, "source": row.source},

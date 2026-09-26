@@ -42,6 +42,44 @@ class PetPost(Base):
     raw_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
+class CandidateCase(Base):
+    __tablename__ = "candidate_cases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    review_state: Mapped[str] = mapped_column(String(30), default="new", index=True)
+    display_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    holding_entity: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    custody_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    primary_post_id: Mapped[int | None] = mapped_column(ForeignKey("pet_posts.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class CandidateCasePost(Base):
+    __tablename__ = "candidate_case_posts"
+    __table_args__ = (UniqueConstraint("post_id", name="uq_candidate_case_posts_post_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("candidate_cases.id", ondelete="CASCADE"), index=True)
+    post_id: Mapped[int] = mapped_column(ForeignKey("pet_posts.id", ondelete="CASCADE"), index=True)
+    match_method: Mapped[str] = mapped_column(String(40), default="source_record")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CandidateIdentifier(Base):
+    __tablename__ = "candidate_identifiers"
+    __table_args__ = (UniqueConstraint("namespace", "value", name="uq_candidate_identifiers_namespace_value"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("candidate_cases.id", ondelete="CASCADE"), index=True)
+    namespace: Mapped[str] = mapped_column(String(120), index=True)
+    value: Mapped[str] = mapped_column(String(240))
+    identifier_kind: Mapped[str] = mapped_column(String(40), default="other")
+    display_label: Mapped[str] = mapped_column(String(100), default="Identifier")
+    source_post_id: Mapped[int | None] = mapped_column(ForeignKey("pet_posts.id", ondelete="SET NULL"), nullable=True)
+    is_identity_key: Mapped[bool] = mapped_column(default=False, index=True)
+
+
 class ArchieProfile(Base):
     __tablename__ = "archie_profile"
 
