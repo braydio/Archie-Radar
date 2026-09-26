@@ -1,0 +1,1 @@
+No favicon is required for Archie Radar; a browser /favicon.ico 404 is harmless.
