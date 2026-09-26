@@ -154,3 +154,22 @@ def test_browser_audio_mime_is_accepted_and_attachment_can_be_deleted(client: Te
     assert attachment["attachment_type"] == "audio"
     deleted = client.delete(f"/api/surveyor/attachments/{attachment['id']}")
     assert deleted.status_code == 204
+
+
+def test_session_route_coverage_buffers_in_meters(client: TestClient) -> None:
+    started = client.post("/api/surveyor/sessions", json={"method": "walking"})
+    assert started.status_code == 201, started.text
+    session = started.json()
+    ended = client.patch(f"/api/surveyor/sessions/{session['id']}", json={
+        "track_geojson": {"type": "LineString", "coordinates": [[-79.1, 35.8], [-79.099, 35.8]]},
+        "distance_meters": 90,
+    })
+    assert ended.status_code == 200, ended.text
+    coverage = client.post(f"/api/surveyor/sessions/{session['id']}/coverage", json={"buffer_meters": 15})
+    assert coverage.status_code == 201, coverage.text
+    result = coverage.json()
+    assert result["geometry"]["type"] == "Polygon"
+    assert result["properties"]["search_session_id"] == session["id"]
+    assert result["properties"]["buffer_meters"] == 15
+    assert result["bbox"][2] - result["bbox"][0] < 0.01
+    assert result["bbox"][3] - result["bbox"][1] < 0.01

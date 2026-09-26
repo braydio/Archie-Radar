@@ -74,6 +74,7 @@ const snapMenuOpen = ref(false)
 const snapTarget = ref(null)
 const notes = ref('')
 const saving = ref(false)
+const coveragePreview = ref(null)
 let map
 let draw
 let resizeObserver
@@ -239,6 +240,10 @@ function trackCollection() {
 }
 
 function refreshTrack() { map?.getSource('active-search-track')?.setData(trackCollection()) }
+function setCoveragePreview(geometry) {
+  coveragePreview.value = geometry
+  map?.getSource('search-coverage-preview')?.setData({ type: 'FeatureCollection', features: geometry ? [{ type: 'Feature', properties: {}, geometry }] : [] })
+}
 
 function distanceBetween(a, b) {
   const rad = value => value * Math.PI / 180
@@ -307,12 +312,22 @@ async function endSearch() {
 
 async function finishSearch(result) {
   if (!activeSession.value) return
-  const response = await fetch(`${API}/api/surveyor/sessions/${activeSession.value.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+  const sessionId = activeSession.value.id
+  const response = await fetch(`${API}/api/surveyor/sessions/${sessionId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ track_geojson: trackCoords.value.length >= 2 ? { type: 'LineString', coordinates: trackCoords.value } : null,
       distance_meters: sessionDistance(), result_summary: result.result_summary, notes: [result.outcome, result.notes].filter(Boolean).join(' · ') }) })
   if (!response.ok) { error.value = 'Could not finish search session'; return }
+  if (result.create_coverage) {
+    try {
+      const coverageResponse = await fetch(`${API}/api/surveyor/sessions/${sessionId}/coverage`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ buffer_meters: result.buffer_meters, name: 'Searched route', notes: result.notes || '' }) })
+      const coverageBody = await coverageResponse.json().catch(() => ({}))
+      if (!coverageResponse.ok) throw new Error(coverageBody.detail || 'Could not create searched coverage')
+      objects.value.unshift(coverageBody); refreshSource()
+    } catch (err) { error.value = `Search saved, but coverage was not created: ${err.message}` }
+  }
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
-  geoWatchId = null; activeSession.value = null; searchResultOpen.value = false
+  geoWatchId = null; activeSession.value = null; searchResultOpen.value = false; setCoveragePreview(null)
 }
 
 async function loadCandidates() {
@@ -696,6 +711,7 @@ onMounted(() => {
     map.addSource('selected-camera-handles', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('surveyor-links', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('active-search-track', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+    map.addSource('search-coverage-preview', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
     map.addSource('annual-landcover-source', { type: 'raster', tileSize: 256, attribution: 'Annual NLCD · USGS / MRLC', tiles: [
       'https://dmsdata.cr.usgs.gov/geoserver/mrlc_Land-Cover-Native_conus_year_data/wms?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=Land-Cover-Native_conus_year_data&STYLES=&FORMAT=image/png&TRANSPARENT=TRUE&SRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&TIME=2025-01-01T00:00:00Z'
     ] })
@@ -703,6 +719,8 @@ onMounted(() => {
     map.addLayer({ id: 'active-search-track-line', type: 'line', source: 'active-search-track', paint: {
       'line-color': '#b75d34', 'line-width': 4, 'line-opacity': 0.9
     } })
+    map.addLayer({ id: 'search-coverage-preview-fill', type: 'fill', source: 'search-coverage-preview', paint: { 'fill-color': '#d39a42', 'fill-opacity': 0.2 } })
+    map.addLayer({ id: 'search-coverage-preview-outline', type: 'line', source: 'search-coverage-preview', paint: { 'line-color': '#a97129', 'line-width': 2, 'line-dasharray': [2, 2] } })
     map.addLayer({ id: 'camera-cones-fill', type: 'fill', source: 'camera-cones', paint: {
       'fill-color': '#477b7a', 'fill-opacity': ['*', ['get', 'opacity'], 0.18]
     } })
@@ -832,7 +850,7 @@ onBeforeUnmount(() => {
     <CandidateClusterSheet v-if="candidateCluster" :cluster="candidateCluster" @close="candidateCluster=null" @open="openClusterCandidate" @evidence="createEvidenceForCandidate" @zoom="zoomCandidateCluster" />
     <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
     <div v-if="accessDraftCoordinates" class="field-sheet-backdrop"><AccessEditor :coordinates="accessDraftCoordinates" :api="API" @save="accessSaved($event).catch(err => error=err.message)" @cancel="accessDraftCoordinates=null" /></div>
-    <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet @save="finishSearch" @cancel="searchResultOpen=false" /></div>
+    <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet :route="trackCoords.length >= 2 ? { type: 'LineString', coordinates: trackCoords } : null" :method="activeSession?.method || sessionMethod" @coverage-preview="setCoveragePreview" @save="finishSearch" @cancel="searchResultOpen=false; setCoveragePreview(null)" /></div>
     <footer class="surveyor-footer"><SurveyTimeline v-model="timelineWindow" /><span v-if="activeSession" class="active-session-status">SEARCH ACTIVE · {{ Math.round(sessionDistance()) }} m</span></footer>
   </main>
 </template>

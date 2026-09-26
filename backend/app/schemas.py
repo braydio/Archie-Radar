@@ -254,6 +254,12 @@ class SurveyorSessionOut(BaseModel):
     created_at: datetime
 
 
+class SurveyorCoverageIn(BaseModel):
+    buffer_meters: float = Field(ge=2, le=250)
+    name: str = Field(default="Searched route", max_length=180)
+    notes: str = Field(default="", max_length=20000)
+
+
 class SurveyorEventOut(BaseModel):
     id: int
     event_type: str

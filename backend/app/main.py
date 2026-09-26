@@ -19,6 +19,9 @@ from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from shapely.geometry import shape as shape_geojson
+from shapely.geometry import mapping as mapping_geojson
+from shapely.ops import transform as transform_geometry
+from pyproj import Transformer
 from PIL import Image
 
 from .connectors.orange_county import OrangeCountyFoundCatsConnector
@@ -52,6 +55,7 @@ from .schemas import (
     SurveyorSessionOut,
     SurveyorSessionUpdate,
     SurveyorSessionCheckpoint,
+    SurveyorCoverageIn,
     SurveyorEventOut,
     SurveyorAttachmentOut,
     SurveyorLinkIn,
@@ -610,6 +614,45 @@ def checkpoint_surveyor_session(session_id: int, payload: SurveyorSessionCheckpo
     row.distance_meters = payload.distance_meters
     db.commit(); db.refresh(row)
     return _session_output(row)
+
+
+@app.post("/api/surveyor/sessions/{session_id}/coverage", response_model=SurveyorObjectOut, status_code=201)
+def create_session_coverage(session_id: int, payload: SurveyorCoverageIn, db: Session = Depends(get_db)):
+    session = db.get(SurveyorSearchSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Search session not found")
+    if session.ended_at is None:
+        raise HTTPException(status_code=409, detail="Finish the search session before creating coverage")
+    try:
+        route_geojson = json.loads(session.track_geojson or "null")
+        route = shape_geojson(route_geojson)
+        if route.geom_type != "LineString" or route.is_empty or len(route.coords) < 2:
+            raise ValueError("A LineString with at least two route points is required")
+        lon, lat = route.centroid.x, route.centroid.y
+        zone_number = max(1, min(60, int((lon + 180) // 6) + 1))
+        epsg = (32600 if lat >= 0 else 32700) + zone_number
+        forward = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform
+        reverse = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True).transform
+        projected = transform_geometry(forward, route)
+        buffered = projected.buffer(payload.buffer_meters, cap_style="round", join_style="round")
+        polygon = transform_geometry(reverse, buffered)
+        geometry = mapping_geojson(polygon)
+        _geometry_stats(geometry)
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Session route cannot produce coverage: {exc}") from exc
+    searched_at = session.ended_at or utcnow()
+    row = SurveyorMapObject(object_type="zone", subtype="searched", name=payload.name,
+        geometry_geojson=json.dumps(geometry, separators=(",", ":")), style_json="{}",
+        properties_json=json.dumps({"searched_at": searched_at.isoformat(), "search_session_id": session.id,
+            "search_method": session.method, "buffer_meters": payload.buffer_meters, "generated_from_route": True}),
+        status="searched", confidence="strong", epistemic_state="observed", occurred_at=searched_at,
+        notes=payload.notes)
+    _save_surveyor_geometry(row, geometry)
+    db.add(row); db.flush()
+    _record_surveyor_event(db, "search_coverage_created", "map_object", row.id, "Created searched coverage from route",
+        after={"search_session_id": session.id, "buffer_meters": payload.buffer_meters, "search_method": session.method})
+    db.commit(); db.refresh(row)
+    return _surveyor_out(row)
 
 
 @app.get("/api/surveyor/events", response_model=list[SurveyorEventOut])
