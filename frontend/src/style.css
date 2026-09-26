@@ -473,6 +473,16 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
 .attachment-list article img { display: block; width: 100%; max-height: 210px; object-fit: contain; border-radius: 8px; background: #e5e7df; }
 .attachment-list article a { color: #315943; font-size: .75rem; font-weight: 800; }
 .attachment-list article p { margin: 4px 0 0; color: #6b766d; font-size: .65rem; }
+.attachment-list .evidence-attachment { display: grid; gap: 6px; padding: 8px; border-bottom: 1px solid #d5d9d0; }
+.evidence-attachment audio { width: 100%; }
+.evidence-attachment small { color: #758077; font-size: .68rem; }
+.media-capture-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 7px 0; }
+.media-capture-error { color: #98483c; font-size: .75rem; }
+.recording-state { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.recording-dot { width: 10px; height: 10px; border-radius: 50%; background: #bc4438; box-shadow: 0 0 0 4px #bc443822; }
+.audio-preview { display: grid; gap: 6px; }
+.audio-preview audio { width: 100%; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
 .attachment-upload { display: flex; align-items: center; justify-content: center; min-height: 40px; border: 1px dashed #9eaa9e; border-radius: 9px; background: white; color: #3f5848; font-size: .69rem; font-weight: 850; cursor: pointer; }
 .attachment-upload input { display: none; }
 .attachment-caption { width: 100%; border: 1px solid #b9c1b6; border-radius: 8px; padding: 8px; font-size: .68rem; }

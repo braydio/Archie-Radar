@@ -310,3 +310,85 @@ class SurveyorLinkOut(BaseModel):
     geometry: dict
     created_at: datetime
     updated_at: datetime
+
+
+AccessStatus = Literal["unknown", "no_answer", "permission_granted", "permission_denied", "partial_permission", "do_not_contact"]
+PermissionValue = Literal["unknown", "yes", "no"]
+
+
+class SurveyorAccessFields(BaseModel):
+    access_status: AccessStatus = "unknown"
+    dog_count: int | None = Field(default=None, ge=0)
+    outdoor_cat_count: int | None = Field(default=None, ge=0)
+    camera_permission: PermissionValue = "unknown"
+    trap_permission: PermissionValue = "unknown"
+    search_permission: PermissionValue = "unknown"
+    contact_name: str = Field(default="", max_length=180)
+    contact_method: str = Field(default="", max_length=80)
+    last_contact_at: datetime | None = None
+    next_followup_at: datetime | None = None
+    contact_notes: str = Field(default="", max_length=20000)
+
+
+class SurveyorAccessIn(SurveyorAccessFields):
+    longitude: float = Field(ge=-180, le=180)
+    latitude: float = Field(ge=-90, le=90)
+    name: str = Field(default="Property access", max_length=180)
+
+
+class SurveyorAccessPatch(BaseModel):
+    access_status: AccessStatus | None = None
+    dog_count: int | None = Field(default=None, ge=0)
+    outdoor_cat_count: int | None = Field(default=None, ge=0)
+    camera_permission: PermissionValue | None = None
+    trap_permission: PermissionValue | None = None
+    search_permission: PermissionValue | None = None
+    contact_name: str | None = Field(default=None, max_length=180)
+    contact_method: str | None = Field(default=None, max_length=80)
+    last_contact_at: datetime | None = None
+    next_followup_at: datetime | None = None
+    contact_notes: str | None = Field(default=None, max_length=20000)
+    name: str | None = Field(default=None, max_length=180)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+
+
+class SurveyorAccessOut(SurveyorAccessFields):
+    id: int
+    map_object_id: int
+    name: str
+    longitude: float
+    latitude: float
+    created_at: datetime
+    updated_at: datetime
+
+
+class SurveyorTaskIn(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+    task_type: Literal["search", "recheck", "contact", "camera", "trap", "evidence", "flyer", "candidate", "other"] = "other"
+    status: Literal["open", "completed", "dismissed"] = "open"
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
+    due_at: datetime | None = None
+    map_object_id: int | None = None
+    search_session_id: int | None = None
+    candidate_post_id: int | None = None
+    notes: str = Field(default="", max_length=20000)
+
+
+class SurveyorTaskPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    task_type: Literal["search", "recheck", "contact", "camera", "trap", "evidence", "flyer", "candidate", "other"] | None = None
+    status: Literal["open", "completed", "dismissed"] | None = None
+    priority: Literal["low", "normal", "high", "urgent"] | None = None
+    due_at: datetime | None = None
+    map_object_id: int | None = None
+    search_session_id: int | None = None
+    candidate_post_id: int | None = None
+    notes: str | None = Field(default=None, max_length=20000)
+
+
+class SurveyorTaskOut(SurveyorTaskIn):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None

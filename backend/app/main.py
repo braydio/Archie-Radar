@@ -320,6 +320,10 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Archie Radar API", version="0.9.0", lifespan=lifespan)
+from .surveyor.access import router as surveyor_access_router
+from .surveyor.tasks import router as surveyor_tasks_router
+app.include_router(surveyor_access_router)
+app.include_router(surveyor_tasks_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if "*" in settings.cors_origin_list else settings.cors_origin_list,
@@ -638,10 +642,11 @@ async def upload_surveyor_attachment(object_id: int, file: UploadFile = File(...
         raise HTTPException(status_code=404, detail="Surveyor object not found")
     file_types = {
         "image/jpeg": ("image", ".jpg"), "image/png": ("image", ".png"), "image/webp": ("image", ".webp"),
-        "audio/mpeg": ("audio", ".mp3"), "audio/wav": ("audio", ".wav"),
+        "audio/mpeg": ("audio", ".mp3"), "audio/wav": ("audio", ".wav"), "audio/x-wav": ("audio", ".wav"),
+        "audio/webm": ("audio", ".webm"), "audio/ogg": ("audio", ".ogg"), "audio/mp4": ("audio", ".m4a"),
         "application/pdf": ("file", ".pdf"), "text/plain": ("file", ".txt"),
     }
-    spec = file_types.get(file.content_type or "")
+    spec = file_types.get((file.content_type or "").split(";", 1)[0].strip().lower())
     if spec is None:
         raise HTTPException(status_code=415, detail="Supported uploads are JPG, PNG, WebP, MP3, WAV, PDF, and plain text")
     data = await file.read(settings.max_image_bytes + 1)
@@ -671,6 +676,74 @@ async def upload_surveyor_attachment(object_id: int, file: UploadFile = File(...
         after={"attachment_id": row.id, "attachment_type": attachment_type, "caption": caption})
     db.commit(); db.refresh(row)
     return _attachment_output(row)
+
+
+@app.get("/api/surveyor/sessions/{session_id}/attachments", response_model=list[SurveyorAttachmentOut])
+def list_session_attachments(session_id: int, db: Session = Depends(get_db)):
+    if db.get(SurveyorSearchSession, session_id) is None:
+        raise HTTPException(status_code=404, detail="Search session not found")
+    rows = db.scalars(select(SurveyorAttachment).where(SurveyorAttachment.search_session_id == session_id).order_by(SurveyorAttachment.created_at.desc()))
+    return [_attachment_output(row) for row in rows]
+
+
+@app.post("/api/surveyor/sessions/{session_id}/attachments", response_model=SurveyorAttachmentOut, status_code=201)
+async def upload_session_attachment(session_id: int, file: UploadFile = File(...), caption: str = Form(""),
+                                    observed_at: datetime | None = Form(None), db: Session = Depends(get_db)):
+    session = db.get(SurveyorSearchSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Search session not found")
+    file_types = {
+        "image/jpeg": ("image", ".jpg"), "image/png": ("image", ".png"), "image/webp": ("image", ".webp"),
+        "audio/mpeg": ("audio", ".mp3"), "audio/wav": ("audio", ".wav"), "audio/x-wav": ("audio", ".wav"),
+        "audio/webm": ("audio", ".webm"), "audio/ogg": ("audio", ".ogg"), "audio/mp4": ("audio", ".m4a"),
+        "application/pdf": ("file", ".pdf"), "text/plain": ("file", ".txt"),
+    }
+    spec = file_types.get((file.content_type or "").split(";", 1)[0].strip().lower())
+    if spec is None:
+        raise HTTPException(status_code=415, detail="Supported uploads are JPG, PNG, WebP, MP3, WAV, WebM, OGG, M4A, PDF, and plain text")
+    data = await file.read(settings.max_image_bytes + 1)
+    if not data or len(data) > settings.max_image_bytes:
+        raise HTTPException(status_code=413, detail="Attachment is empty or exceeds the upload limit")
+    attachment_type, extension = spec
+    if attachment_type == "image":
+        try:
+            image = Image.open(io.BytesIO(data)); image.verify()
+            image = Image.open(io.BytesIO(data)); output = io.BytesIO()
+            image.save(output, format={".jpg": "JPEG", ".png": "PNG", ".webp": "WEBP"}[extension]); data = output.getvalue()
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="The selected file is not a valid image") from exc
+    subdirectory = "images" if attachment_type == "image" else "audio" if attachment_type == "audio" else "files"
+    filename = f"{uuid.uuid4().hex}{extension}"
+    target_dir = media_dir / "surveyor" / subdirectory
+    target_dir.mkdir(parents=True, exist_ok=True); (target_dir / filename).write_bytes(data)
+    row = SurveyorAttachment(search_session_id=session_id, attachment_type=attachment_type,
+        storage_path=f"surveyor/{subdirectory}/{filename}", caption=caption, observed_at=observed_at,
+        metadata_json=json.dumps({"content_type": file.content_type, "source_filename": Path(file.filename or "upload").name, "size_bytes": len(data)}))
+    db.add(row); db.flush()
+    _record_surveyor_event(db, "evidence_added", "search_session", session_id, "Added session evidence attachment",
+        after={"attachment_id": row.id, "attachment_type": attachment_type, "caption": caption})
+    db.commit(); db.refresh(row)
+    return _attachment_output(row)
+
+
+@app.delete("/api/surveyor/attachments/{attachment_id}", status_code=204)
+def delete_surveyor_attachment(attachment_id: int, db: Session = Depends(get_db)):
+    row = db.get(SurveyorAttachment, attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    if row.storage_path:
+        media_root = (media_dir / "surveyor").resolve()
+        stored_path = (media_dir / row.storage_path).resolve()
+        if stored_path != media_root and media_root not in stored_path.parents:
+            raise HTTPException(status_code=400, detail="Attachment path is outside the Surveyor media directory")
+        if stored_path.exists() and stored_path.is_file():
+            stored_path.unlink()
+    owner_type = "map_object" if row.map_object_id is not None else "search_session"
+    owner_id = row.map_object_id if row.map_object_id is not None else row.search_session_id
+    _record_surveyor_event(db, "attachment_deleted", owner_type, owner_id, "Deleted evidence attachment",
+        before={"attachment_id": row.id, "attachment_type": row.attachment_type, "caption": row.caption})
+    db.delete(row); db.commit()
+    return None
 
 
 @app.get("/api/surveyor/links", response_model=list[SurveyorLinkOut])

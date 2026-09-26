@@ -18,6 +18,8 @@ import SurveyorToolbar from '../components/surveyor/SurveyorToolbar.vue'
 import SearchSessionBar from '../components/surveyor/SearchSessionBar.vue'
 import CandidateInspector from '../components/surveyor/CandidateInspector.vue'
 import ObjectInspector from '../components/surveyor/ObjectInspector.vue'
+import AudioRecorder from '../components/surveyor/AudioRecorder.vue'
+import PhotoCapture from '../components/surveyor/PhotoCapture.vue'
 import { cameraConePolygon, cameraHandlePoints } from '../surveyor/cameraGeometry.js'
 import { searchFreshness } from '../surveyor/zoneState.js'
 import { registerSurveyorIcons } from '../surveyor/iconRegistry.js'
@@ -524,16 +526,26 @@ async function loadAttachments(objectId) {
 }
 
 async function uploadAttachment(event) {
-  const file = event.target.files?.[0]
+  const input = event?.target?.files ? event.target : null
+  const file = input ? input.files?.[0] : event
   if (!file || !selected.value) return
   uploadingAttachment.value = true
   try {
-    const form = new FormData(); form.append('file', file); form.append('caption', attachmentCaption.value)
+    const form = new FormData(); form.append('file', file); form.append('caption', attachmentCaption.value); form.append('observed_at', new Date().toISOString())
     const response = await fetch(`${API}/api/surveyor/objects/${selected.value.id}/attachments`, { method: 'POST', body: form })
     if (!response.ok) throw new Error((await response.json()).detail || 'Could not upload attachment')
-    attachments.value.unshift(await response.json()); attachmentCaption.value = ''; event.target.value = ''
+    attachments.value.unshift(await response.json()); attachmentCaption.value = ''; if (input) input.value = ''
   } catch (err) { error.value = err.message }
   finally { uploadingAttachment.value = false }
+}
+
+async function deleteAttachment(attachment) {
+  if (!confirm('Delete this evidence attachment?')) return
+  try {
+    const response = await fetch(`${API}/api/surveyor/attachments/${attachment.id}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error((await response.json()).detail || 'Could not delete attachment')
+    attachments.value = attachments.value.filter(item => item.id !== attachment.id)
+  } catch (err) { error.value = err.message }
 }
 
 function chooseCandidate(event) {
@@ -797,14 +809,14 @@ onBeforeUnmount(() => {
       <LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" @update:model-value="layerSettings = $event" @close="layerDrawerOpen = false" />
       <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
       <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" />
-      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" />
+      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" />
     </div>
 
     <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>
     <MobileInspectorSheet :open="Boolean(selected || selectedCandidate || selectedHistoricalPlacement)" @close="selected=null; selectedCandidate=null; selectedHistoricalPlacement=null">
       <template v-if="selectedCandidate"><p class="eyebrow">CANDIDATE REPORT · {{ selectedCandidate.source }}</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2><p>{{ selectedCandidate.location_text }}</p><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button></template>
       <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(selectedHistoricalPlacement.range_meters) }} m</p></template>
-      <template v-else-if="selected"><p class="eyebrow">{{ selected.object_type }} · #{{ selected.id }}</p><h2>{{ selected.name || 'Field object' }}</h2><label>Name<input v-model="title" /></label><label>Notes<textarea v-model="notes" rows="3"></textarea></label><p v-if="selected.subtype === 'searched'">{{ searchFreshness(selected) }} coverage · {{ selected.properties?.searched_at ? new Date(selected.properties.searched_at).toLocaleDateString() : 'Date unknown' }}</p><button class="primary" @click="saveSelected">Save changes</button><button v-if="selected.object_type==='trail_camera'" class="secondary-button" @click="activeTool='move-camera'">Move camera</button></template>
+      <template v-else-if="selected"><p class="eyebrow">{{ selected.object_type }} · #{{ selected.id }}</p><h2>{{ selected.name || 'Field object' }}</h2><label>Name<input v-model="title" /></label><label>Notes<textarea v-model="notes" rows="3"></textarea></label><p v-if="selected.subtype === 'searched'">{{ searchFreshness(selected) }} coverage · {{ selected.properties?.searched_at ? new Date(selected.properties.searched_at).toLocaleDateString() : 'Date unknown' }}</p><button class="primary" @click="saveSelected">Save changes</button><button v-if="selected.object_type==='trail_camera'" class="secondary-button" @click="activeTool='move-camera'">Move camera</button><section class="attachment-list"><h3>Evidence media</h3><article v-for="attachment in attachments" :key="attachment.id" class="evidence-attachment"><img v-if="attachment.attachment_type==='image'" :src="`${API}${attachment.media_url}`" :alt="attachment.caption || 'Evidence photo'"/><audio v-else-if="attachment.attachment_type==='audio'" :src="`${API}${attachment.media_url}`" controls preload="none"></audio><p>{{ attachment.caption || attachment.source }}</p><small>{{ attachment.observed_at ? new Date(attachment.observed_at).toLocaleString() : new Date(attachment.created_at).toLocaleString() }}</small><button class="danger-button" @click="deleteAttachment(attachment)">Delete</button></article><input v-model="attachmentCaption" placeholder="Caption (optional)"/><PhotoCapture @select="uploadAttachment"/><AudioRecorder @select="uploadAttachment" @error="error=$event"/><label class="attachment-upload">Add file<input type="file" accept="application/pdf,text/plain,audio/*,image/*" @change="uploadAttachment"/></label></section></template>
     </MobileInspectorSheet>
     <CandidateClusterSheet v-if="candidateCluster" :cluster="candidateCluster" @close="candidateCluster=null" @open="openClusterCandidate" @evidence="createEvidenceForCandidate" @zoom="zoomCandidateCluster" />
     <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>

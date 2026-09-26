@@ -111,3 +111,46 @@ def test_archived_object_is_omitted_from_normal_list(client: TestClient) -> None
     assert response.status_code == 204
     objects = client.get("/api/surveyor/objects").json()
     assert all(item["id"] != obj["id"] for item in objects)
+
+
+def test_access_record_creates_geographic_object_and_can_mark_do_not_contact(client: TestClient) -> None:
+    created = client.post("/api/surveyor/access", json={
+        "longitude": -79.1, "latitude": 35.8, "name": "Creekside",
+        "access_status": "permission_granted", "dog_count": 2,
+        "camera_permission": "yes", "contact_notes": "Use the rear gate.",
+    })
+    assert created.status_code == 201, created.text
+    row = created.json()
+    assert row["dog_count"] == 2
+    assert row["longitude"] == pytest.approx(-79.1)
+    updated = client.patch(f"/api/surveyor/access/{row['id']}", json={"access_status": "do_not_contact"})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["access_status"] == "do_not_contact"
+    assert client.get("/api/surveyor/events?event_type=access_updated").json()
+
+
+def test_task_completion_records_event_and_timestamp(client: TestClient) -> None:
+    obj = create_pin(client, [-79.1, 35.8])
+    created = client.post("/api/surveyor/tasks", json={
+        "title": "Check the creek crossing", "task_type": "recheck",
+        "map_object_id": obj["id"], "priority": "high",
+    })
+    assert created.status_code == 201, created.text
+    task = created.json()
+    assert task["map_object_id"] == obj["id"]
+    completed = client.patch(f"/api/surveyor/tasks/{task['id']}", json={"status": "completed"})
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["completed_at"] is not None
+    assert client.get("/api/surveyor/events?event_type=task_completed").json()
+
+
+def test_browser_audio_mime_is_accepted_and_attachment_can_be_deleted(client: TestClient) -> None:
+    obj = create_pin(client, [-79.1, 35.8])
+    uploaded = client.post(f"/api/surveyor/objects/{obj['id']}/attachments", files={
+        "file": ("recording.webm", b"field audio bytes", "audio/webm;codecs=opus"),
+    })
+    assert uploaded.status_code == 201, uploaded.text
+    attachment = uploaded.json()
+    assert attachment["attachment_type"] == "audio"
+    deleted = client.delete(f"/api/surveyor/attachments/{attachment['id']}")
+    assert deleted.status_code == 204

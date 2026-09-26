@@ -1,9 +1,11 @@
 <script setup>
 import TrailCameraEditor from './TrailCameraEditor.vue'
+import AudioRecorder from './AudioRecorder.vue'
+import PhotoCapture from './PhotoCapture.vue'
 import { searchFreshness } from '../../surveyor/zoneState.js'
 
 const props = defineProps({ selected: { type: Object, required: true }, types: { type: Array, required: true }, attachments: { type: Array, default: () => [] }, cameraHistory: { type: Array, default: () => [] }, uploading: Boolean, saving: Boolean, api: { type: String, required: true }, activeTool: { type: String, default: 'select' } })
-const emit = defineEmits(['close', 'save', 'saveHistorical', 'move', 'deactivate', 'delete', 'editGeometry', 'saveGeometry', 'cancelGeometry', 'upload'])
+const emit = defineEmits(['close', 'save', 'saveHistorical', 'move', 'deactivate', 'delete', 'editGeometry', 'saveGeometry', 'cancelGeometry', 'upload', 'deleteAttachment', 'mediaError'])
 const title = defineModel('title', { type: String })
 const subtype = defineModel('subtype', { type: String })
 const notes = defineModel('notes', { type: String })
@@ -20,7 +22,20 @@ const attachmentCaption = defineModel('attachmentCaption', { type: String })
     <TrailCameraEditor v-if="selected.object_type === 'trail_camera'" v-model:heading="cameraHeading" v-model:fov="cameraFov" v-model:range="cameraRange" :history="cameraHistory" />
     <p v-if="selected.subtype === 'searched'" class="coverage-status">Coverage: {{ searchFreshness(selected) }} · {{ selected.properties?.searched_at ? new Date(selected.properties.searched_at).toLocaleDateString() : 'No search date recorded' }}</p>
     <label>Notes<textarea v-model="notes" rows="5"></textarea></label>
-    <section class="attachment-list"><h3>Evidence attachments</h3><article v-for="attachment in attachments" :key="attachment.id"><img v-if="attachment.attachment_type === 'image'" :src="`${api}${attachment.media_url}`" :alt="attachment.caption || 'Evidence photo'" /><a v-else :href="`${api}${attachment.media_url}`" target="_blank" rel="noreferrer">{{ attachment.attachment_type === 'audio' ? 'Play audio evidence' : 'Open file' }}</a><p>{{ attachment.caption || attachment.source }}</p></article><label class="attachment-upload">{{ uploading ? 'Uploading…' : '＋ Add photo, audio, or file' }}<input type="file" accept="image/jpeg,image/png,image/webp,audio/mpeg,audio/wav,application/pdf,text/plain" :disabled="uploading" @change="emit('upload', $event)" /></label><input v-model="attachmentCaption" class="attachment-caption" placeholder="Attachment caption (optional)" /></section>
+    <section class="attachment-list"><h3>Evidence attachments</h3>
+      <article v-for="attachment in attachments" :key="attachment.id" class="evidence-attachment">
+        <img v-if="attachment.attachment_type === 'image'" :src="`${api}${attachment.media_url}`" :alt="attachment.caption || 'Evidence photo'" />
+        <audio v-else-if="attachment.attachment_type === 'audio'" :src="`${api}${attachment.media_url}`" controls preload="none"></audio>
+        <a v-else :href="`${api}${attachment.media_url}`" target="_blank" rel="noreferrer">Open file</a>
+        <p>{{ attachment.caption || attachment.source }}</p>
+        <small>{{ attachment.observed_at ? new Date(attachment.observed_at).toLocaleString() : new Date(attachment.created_at).toLocaleString() }}</small>
+        <button type="button" class="danger-button" @click="emit('deleteAttachment', attachment)">Delete</button>
+      </article>
+      <input v-model="attachmentCaption" class="attachment-caption" placeholder="Caption for next attachment (optional)" />
+      <PhotoCapture @select="emit('upload', $event)" />
+      <AudioRecorder @select="emit('upload', $event)" @error="emit('mediaError', $event)" />
+      <label class="attachment-upload">{{ uploading ? 'Uploading…' : '＋ Add file' }}<input type="file" accept="application/pdf,text/plain,audio/*,image/*" :disabled="uploading" @change="emit('upload', $event)" /></label>
+    </section>
     <div v-if="['Polygon','LineString'].includes(selected.geometry.type) && activeTool !== 'edit'" class="inspector-buttons"><button class="secondary-button" @click="emit('editGeometry')">Edit geometry</button></div>
     <div v-if="selected.geometry.type === 'Point' && selected.object_type !== 'trail_camera'" class="inspector-buttons"><button class="secondary-button" @click="emit('move')">Move on map</button></div>
     <div v-if="activeTool === 'edit'" class="inspector-buttons"><button class="primary" @click="emit('saveGeometry')">Save geometry</button><button class="secondary-button" @click="emit('cancelGeometry')">Cancel</button></div>

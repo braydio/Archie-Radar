@@ -200,3 +200,41 @@ class SurveyorObjectLink(Base):
     properties_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SurveyorAccessRecord(Base):
+    __tablename__ = "surveyor_access_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    map_object_id: Mapped[int] = mapped_column(ForeignKey("surveyor_map_objects.id", ondelete="CASCADE"), unique=True, index=True)
+    access_status: Mapped[str] = mapped_column(String(40), default="unknown", index=True)
+    dog_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outdoor_cat_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    camera_permission: Mapped[str] = mapped_column(String(30), default="unknown")
+    trap_permission: Mapped[str] = mapped_column(String(30), default="unknown")
+    search_permission: Mapped[str] = mapped_column(String(30), default="unknown")
+    contact_name: Mapped[str] = mapped_column(String(180), default="")
+    contact_method: Mapped[str] = mapped_column(String(80), default="")
+    last_contact_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    next_followup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    contact_notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SurveyorTask(Base):
+    __tablename__ = "surveyor_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(240))
+    task_type: Mapped[str] = mapped_column(String(40), default="other", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    priority: Mapped[str] = mapped_column(String(30), default="normal", index=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    map_object_id: Mapped[int | None] = mapped_column(ForeignKey("surveyor_map_objects.id", ondelete="SET NULL"), nullable=True, index=True)
+    search_session_id: Mapped[int | None] = mapped_column(ForeignKey("surveyor_search_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    candidate_post_id: Mapped[int | None] = mapped_column(ForeignKey("pet_posts.id", ondelete="SET NULL"), nullable=True, index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
