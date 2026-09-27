@@ -119,10 +119,6 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
 .candidate-card.priority-high { border-left-color: var(--accent); }
 .candidate-card.priority-medium { border-left-color: #c9a73e; }
 .candidate-card.priority-low { border-left-color: #9aa69f; }
-.candidate-card.has-photo { display: grid; grid-template-columns: 178px minmax(0, 1fr); }
-.candidate-photo { position: relative; min-height: 178px; background: #e5e9e4; border-right: 1px solid var(--line); }
-.candidate-photo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.photo-signal { position: absolute; left: 8px; bottom: 8px; background: rgba(16,32,25,.9); color: white; border-radius: 999px; padding: 5px 8px; font-size: .65rem; font-weight: 850; }
 .candidate-body { padding: 14px 15px 13px; min-width: 0; }
 .candidate-topline { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
 .source-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
@@ -460,10 +456,6 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
   .default-trait-summary-button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 0; padding: 8px 2px; background: transparent; color: #536159; font-size: .72rem; font-weight: 850; text-align: left; }
   .default-trait-summary-button span { color: #304139; text-decoration: underline; text-underline-offset: 2px; }
   .default-trait-strip { margin: 3px 0 9px; }
-  .candidate-card.has-photo { display: block; }
-  .candidate-photo { min-height: 0; border-right: 0; border-bottom: 1px solid var(--line); background: #eef0ec; display: flex; justify-content: center; align-items: center; }
-  .candidate-photo img { position: relative; inset: auto; display: block; width: 100%; height: auto; max-height: 72vh; object-fit: contain; object-position: center; }
-  .photo-signal { left: 8px; bottom: 8px; }
   .candidate-body { padding: 11px 10px 10px; }
   .candidate-topline { align-items: center; }
   .title-row { flex-direction: row; align-items: center; }
@@ -773,4 +765,31 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
   .located-address-banner > div { grid-column: 1 / -1; }
   .located-address-banner > button { width: 100%; min-height: 40px; margin: 0; padding: 5px; font-size: .61rem; white-space: normal; }
   .located-address-banner .dismiss-location-focus { grid-column: 3; grid-row: 1; justify-self: end; width: 32px; }
+}
+
+/* Compact navigation and field layout for short phone-landscape screens. */
+@media (max-width: 430px) {
+  .archie-nav { gap: 4px; }
+  .archie-brand { max-width: 60px; overflow: hidden; font-size: .55rem; letter-spacing: .04em; }
+  .archie-nav nav { min-width: 0; flex: 1 1 auto; justify-content: center; }
+  .archie-nav nav a { flex: 0 1 auto; padding: 0 5px; font-size: .64rem; white-space: nowrap; }
+  .archie-nav .locate-address-trigger { flex: 0 0 auto; width: 64px; max-width: 64px; min-height: 36px; padding: 4px; font-size: .58rem; text-align: center; }
+}
+
+@media (orientation: landscape) and (max-height: 600px) and (min-width: 600px) {
+  .surveyor-page { height: calc(100dvh - 52px); }
+  .surveyor-topbar { flex-basis: 48px; padding: 3px 10px; }
+  .surveyor-topbar h1 { font-size: 1.08rem; }
+  .surveyor-workspace { grid-template-columns: minmax(0, 1fr) clamp(300px, 38vw, 380px); }
+  .surveyor-tools { display: none; }
+  .surveyor-map-shell { grid-column: 1; grid-row: 1; }
+  .surveyor-inspector { display: block; grid-column: 2; grid-row: 1; width: 100%; max-height: 100%; overflow-y: auto; }
+  .mobile-inspector-sheet { display: none; }
+  .surveyor-footer { flex-basis: 44px; }
+  .survey-timeline { gap: 5px; }
+  .survey-timeline select { width: 95px; }
+  .assistant-location-backdrop { place-items: stretch end; padding: 0; }
+  .assistant-location-dialog { width: min(440px, 52vw); height: 100dvh; max-height: 100dvh; border-radius: 0; padding: 14px 12px; }
+  .assistant-location-card { grid-template-columns: 1fr; }
+  .assistant-mini-map { min-height: 190px; }
 }

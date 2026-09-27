@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.models import CandidateCase, CandidateCasePost, CandidateIdentifier, PetPost
+from app.models import CandidateCase, CandidateCasePost, CandidateIdentifier, PetPost, PostVision
 from app.candidates.identity import case_output, ensure_candidate_cases, normalize_external_id
 
 
@@ -78,3 +78,22 @@ def test_identity_normalization_is_scoped_and_listing_ids_are_not_identity_keys(
     assert normalize_external_id("regional_24petconnect", "123")[:2] == ("24petconnect.animal_id", "A123")
     assert normalize_external_id("pawboost", "123")[4] is False
     assert normalize_external_id("unknown", "123") is None
+
+
+def test_case_photo_selection_prefers_resolution_and_deduplicates_mirrors():
+    def run(db):
+        smaller = make_post(db, "regional_24petconnect", "A777", image_url="https://example.test/small.jpg",
+            raw={"image_meta": {"width": 400, "height": 300, "pixel_area": 120000}})
+        larger = make_post(db, "chatham_24petconnect", "777", image_url="https://example.test/large.jpg",
+            raw={"image_meta": {"width": 1200, "height": 900, "pixel_area": 1080000}})
+        db.add_all([
+            PostVision(post_id=smaller.id, status="ok", perceptual_hash="abcdef0123456789", color_histogram="[1]"),
+            PostVision(post_id=larger.id, status="ok", perceptual_hash="abcdef0123456789", color_histogram="[1]"),
+        ])
+        ensure_candidate_cases(db)
+        case = db.scalar(select(CandidateCase))
+        output = case_output(db, case)
+        assert output["primary_image"]["url"] == larger.image_url
+        assert (output["image_width"], output["image_height"]) == (1200, 900)
+        assert len(output["case_images"]) == 1
+    with_db(run)

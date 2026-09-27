@@ -1,6 +1,7 @@
 <script>
 import { computed, ref, watch } from 'vue'
 import { dateOnly, exactDate, relativeTime, sourceLabel, statusLabel } from '../lib/format.js'
+import CandidateMedia from './candidates/CandidateMedia.vue'
 
 const SOURCE_ACCENTS = {
   pawboost: '#cc8a3d',
@@ -15,14 +16,26 @@ const SOURCE_ACCENTS = {
 
 export default {
   name: 'CandidateCard',
+  components: { CandidateMedia },
   props: {
     post: { type: Object, required: true },
     rank: { type: Number, default: 1 }
   },
   emits: ['review', 'locate'],
   setup(props, { emit }) {
-    const imageFailed = ref(false)
-    watch(() => props.post.image_url, () => { imageFailed.value = false })
+    const imageUnavailable = ref(false)
+    const selectedImage = ref(null)
+    const candidateImage = computed(() => props.post.primary_image || props.post.case_images?.[0] || (props.post.image_url ? {
+      url: props.post.image_url, width: props.post.image_width, height: props.post.image_height,
+      aspect_ratio: props.post.image_aspect_ratio, photo_similarity: props.post.photo_similarity,
+      source_post_id: props.post.primary_post_id, source_platform: props.post.source_platform,
+      holding_entity: props.post.holding_entity
+    } : null))
+    const caseImages = computed(() => props.post.case_images?.length
+      ? props.post.case_images.filter(image => image.url !== candidateImage.value?.url)
+      : [])
+    watch(() => [props.post.case_id, candidateImage.value?.url], () => { imageUnavailable.value = false; selectedImage.value = null })
+    const displayedImage = computed(() => selectedImage.value || candidateImage.value)
 
     const priorityClass = computed(() => {
       const score = Number(props.post.match_score || 0)
@@ -31,7 +44,7 @@ export default {
       return 'low'
     })
     const photoPct = computed(() => props.post.photo_similarity == null ? null : Math.round(props.post.photo_similarity * 100))
-    const hasPhoto = computed(() => Boolean(props.post.image_url) && !imageFailed.value)
+    const hasPhoto = computed(() => Boolean(candidateImage.value?.url) && !imageUnavailable.value)
     const sourceAccent = computed(() => SOURCE_ACCENTS[props.post.source] || '#7b897f')
 
     const sourcePostedAt = computed(() => props.post.posted_at || null)
@@ -111,7 +124,7 @@ export default {
     function locate() { emit('locate', props.post) }
 
     return {
-      imageFailed, priorityClass, photoPct, hasPhoto, sourceAccent, candidateHeading, candidateSubheading, identityIds,
+      imageUnavailable, candidateImage, displayedImage, selectedImage, caseImages, priorityClass, photoPct, hasPhoto, sourceAccent, candidateHeading, candidateSubheading, identityIds,
       sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText,
       traitTokens, primaryTraitTokens, reasonSummary, colorClass,
       sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review, locate
@@ -122,10 +135,7 @@ export default {
 
 <template>
   <article :id="`post-${post.id}`" :class="['candidate-card', `priority-${priorityClass}`, colorClass, { 'has-photo': hasPhoto }]" :style="{ '--source-accent': sourceAccent }">
-    <div v-if="hasPhoto" class="candidate-photo">
-      <img :src="post.image_url" :alt="title" loading="lazy" @error="imageFailed = true" />
-      <span v-if="photoPct != null" class="photo-signal">visual {{ photoPct }}%</span>
-    </div>
+    <CandidateMedia v-if="hasPhoto" :image="candidateImage" :other-images="caseImages" :image-width="post.image_width" :image-height="post.image_height" :photo-similarity="photoPct == null ? null : photoPct / 100" :alt="`Candidate cat photo${identityIds[0] ? ` for ${identityIds[0].label} ${identityIds[0].value}` : ''}`" :case-id="post.case_id || post.id" @select-image="selectedImage=$event" @unavailable="imageUnavailable = true" />
 
     <div class="candidate-body">
       <div class="candidate-topline">
@@ -206,6 +216,7 @@ export default {
             <strong>{{ record.holding_entity || record.custody_label || record.source_label }}</strong>
             <span v-if="record.source_id">{{ identityIds[0]?.label || 'Record ID' }} {{ record.source_id }}</span>
             <small>{{ record.custody_label || statusLabel(record.status) }}<template v-if="record.source_platform"> · via {{ record.source_platform }}</template></small>
+            <em v-if="displayedImage?.source_post_id === record.post_id">Current photo</em>
             <a v-if="record.source_url" :href="record.source_url" target="_blank" rel="noopener">Open record ↗</a>
           </article>
         </section>
@@ -234,6 +245,11 @@ export default {
             <template v-if="post.contact_info"><dt>Contact</dt><dd>{{ post.contact_info }}</dd></template>
             <template v-if="post.contact_url"><dt>Contact link</dt><dd><a class="detail-link" :href="post.contact_url" target="_blank" rel="noopener">Open contact ↗</a></dd></template>
           </dl>
+        </section>
+        <section v-if="displayedImage" class="more-detail-section image-details">
+          <h3>Selected source image</h3>
+          <p v-if="displayedImage.width && displayedImage.height">{{ displayedImage.width }} × {{ displayedImage.height }}<span v-if="Math.min(displayedImage.width, displayedImage.height) < 320"> · Low-resolution source</span></p>
+          <p v-if="displayedImage.source_platform || displayedImage.holding_entity">{{ displayedImage.holding_entity || displayedImage.source_platform }}<template v-if="displayedImage.holding_entity && displayedImage.source_platform"> · via {{ displayedImage.source_platform }}</template></p>
         </section>
       </details>
 

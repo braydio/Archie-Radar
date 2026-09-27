@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from io import BytesIO
 from urllib.parse import urlparse
 
 import httpx
+from PIL import Image, ImageOps
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -32,8 +35,16 @@ async def analyze_post_image(
         return None
 
     vision = db.scalar(select(PostVision).where(PostVision.post_id == post_id))
-    if vision and vision.status in {"ok", "no_photo"}:
+    if vision and vision.status == "no_photo":
         return vision
+    if vision and vision.status == "ok":
+        try:
+            current_raw = json.loads(post.raw_json or "{}")
+            image_meta = current_raw.get("image_meta") or {}
+            if int(image_meta.get("width") or 0) > 0 and int(image_meta.get("height") or 0) > 0:
+                return vision
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
     if vision is None:
         vision = PostVision(post_id=post_id, status="pending")
         db.add(vision)
@@ -67,6 +78,27 @@ async def analyze_post_image(
                         raise ValueError("Candidate image exceeds configured size limit")
                     chunks.append(chunk)
         image_bytes = b"".join(chunks)
+
+        # Preserve the source image dimensions for stable, uncropped rendering.
+        # EXIF orientation can rotate the displayed image, so store dimensions
+        # after applying it without rewriting the source bytes.
+        with Image.open(BytesIO(image_bytes)) as opened:
+            oriented = ImageOps.exif_transpose(opened)
+            width, height = oriented.size
+        try:
+            raw = json.loads(post.raw_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        raw["image_meta"] = {
+            "width": width,
+            "height": height,
+            "aspect_ratio": round(width / height, 6) if height else None,
+            "pixel_area": width * height,
+            "analyzed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        post.raw_json = json.dumps(raw)
 
         # Critical dedupe guard: a source's generic no-photo artwork must never
         # cause every imageless animal to be marked as a repost of candidate #1.
