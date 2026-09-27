@@ -181,6 +181,11 @@ def create_sync(db: Session = Depends(get_db)):
     groups = list(db.scalars(select(FacebookGroupSubscription).where(FacebookGroupSubscription.enabled.is_(True))))
     if not groups:
         raise HTTPException(409, "Select at least one Facebook group")
+    active = db.scalar(select(FacebookGroupSyncRun).where(
+        FacebookGroupSyncRun.status.in_(["queued", "syncing"])
+    ).order_by(FacebookGroupSyncRun.id.desc()).limit(1))
+    if active is not None:
+        return _run_out(db, active)
     run = FacebookGroupSyncRun(requested_group_count=len(groups), status="queued")
     db.add(run); db.flush()
     for group in groups:
@@ -260,7 +265,8 @@ def _upsert_facebook_batch(db: Session, payload: BatchIn) -> dict:
             except (TypeError, json.JSONDecodeError):
                 appearances = []
         appearance = {"group_subscription_id": group.id, "group_name": group.group_name,
-            "group_url": group.group_url, "seen_at": (captured.captured_at or utcnow()).isoformat()}
+            "group_url": group.group_url, "seen_at": (captured.captured_at or utcnow()).isoformat(),
+            "posted_at": captured.posted_at.isoformat() if captured.posted_at else None}
         appearances = [item for item in appearances if item.get("group_subscription_id") != group.id]
         appearances.append(appearance)
         image_hash = next((item.sha256.lower() for item in captured.images if item.sha256), None)
@@ -422,10 +428,13 @@ def complete_sync(sync_id: int, payload: SyncCompleteIn, _token: FacebookBridgeT
             item.error = payload.error_summary or "Collector ended before this group completed"
             item.completed_at = utcnow()
     run.completed_at = utcnow()
-    run.error_summary = payload.error_summary
-    if payload.error_summary and run.successful_group_count:
+    problems = [item for item in receipts if item.status in {"failed", "parser_warning"}]
+    problem_summary = [item.error or item.parser_warning for item in problems if item.error or item.parser_warning]
+    summaries = [value for value in (payload.error_summary, *problem_summary) if value]
+    run.error_summary = "\n".join(dict.fromkeys(summaries))
+    if (run.error_summary or problems) and run.successful_group_count:
         run.status = "partial"
-    elif payload.error_summary or not run.successful_group_count:
+    elif run.error_summary or problems or not run.successful_group_count:
         run.status = "failed"
     else:
         run.status = "complete"

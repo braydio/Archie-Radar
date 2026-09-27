@@ -1,10 +1,38 @@
 importScripts('storage.js')
 
 let activeSync = false
+const AUTO_SYNC_ALARM = 'archie-facebook-auto-sync'
 
 chrome.runtime.onInstalled.addListener(() => chrome.alarms.create('archie-facebook-poll', { periodInMinutes: 0.5 }))
 chrome.runtime.onStartup.addListener(() => chrome.alarms.create('archie-facebook-poll', { periodInMinutes: 0.5 }))
-chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === 'archie-facebook-poll') pollForSync() })
+chrome.runtime.onInstalled.addListener(configureAutoSync)
+chrome.runtime.onStartup.addListener(configureAutoSync)
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.facebookAutoSyncCadence) configureAutoSync()
+})
+
+async function configureAutoSync() {
+  const { facebookAutoSyncCadence = 'off' } = await chrome.storage.local.get('facebookAutoSyncCadence')
+  const cadence = { hour: 60, three_hours: 180, twice_daily: 720 }[facebookAutoSyncCadence]
+  if (cadence) chrome.alarms.create(AUTO_SYNC_ALARM, { periodInMinutes: cadence })
+  else chrome.alarms.clear(AUTO_SYNC_ALARM)
+}
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === 'archie-facebook-poll') pollForSync()
+  if (alarm.name === AUTO_SYNC_ALARM) queueAutomaticSync()
+})
+
+async function queueAutomaticSync() {
+  try {
+    await jsonRequest('/api/facebook/sync', {})
+    await pollForSync()
+  } catch (error) {
+    if (!String(error.message).includes('401') && !String(error.message).includes('Select at least one')) {
+      console.warn('Archie Radar automatic Facebook sync:', error.message)
+    }
+  }
+}
 
 async function jsonRequest(path, body = null) {
   const response = await bridgeFetch(path, body ? { method: 'POST', body: JSON.stringify(body) } : {})

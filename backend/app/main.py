@@ -45,7 +45,7 @@ from .candidates.identity import (case_is_inactive, case_output, choose_best_mat
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
-from .models import ArchieProfile, ArchieReferencePhoto, CandidateCase, CandidateCasePost, CandidateIdentifier, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorAttachmentLink, SurveyorObjectLink, SurveyorTask, utcnow
+from .models import ArchieProfile, ArchieReferencePhoto, CandidateCase, CandidateCasePost, CandidateIdentifier, FacebookGroupSubscription, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorAttachmentLink, SurveyorObjectLink, SurveyorTask, utcnow
 from .schemas import (
     FacebookBridgeIn,
     PetPostIn,
@@ -1678,6 +1678,7 @@ def list_candidate_cases(
     review_state: str | None = None,
     min_score: float = Query(0, ge=0, le=100),
     source: str | None = None,
+    facebook_group_subscription_id: int | None = Query(None, ge=1),
     status: str | None = None,
     sex: str | None = None,
     has_photo: bool | None = None,
@@ -1765,6 +1766,15 @@ def list_candidate_cases(
         for row in case_posts:
             if is_source_inactive(row) and not include_inactive:
                 continue
+            if facebook_group_subscription_id is not None:
+                try:
+                    raw_record = json.loads(row.raw_json or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    raw_record = {}
+                appearances = raw_record.get("facebook_group_appearances", []) if isinstance(raw_record, dict) else []
+                if not any(isinstance(item, dict) and item.get("group_subscription_id") == facebook_group_subscription_id
+                           for item in appearances):
+                    continue
             vision = visions.get(row.id)
             output = post_output(row, vision, profile)
             if row.match_score < min_score:
@@ -1965,6 +1975,8 @@ def filter_options(db: Session = Depends(get_db)):
         "collars": ["none", "wearing"],
         "microchips": ["none", "yes"],
         "altered": ["neutered", "intact", "spayed"],
+        "facebook_groups": [{"id": group.id, "group_name": group.group_name, "enabled": group.enabled}
+                            for group in db.scalars(select(FacebookGroupSubscription).order_by(FacebookGroupSubscription.group_name))],
     }
 
 

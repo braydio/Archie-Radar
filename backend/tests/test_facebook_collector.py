@@ -55,6 +55,12 @@ def test_facebook_batch_filters_noise_and_combines_strong_crossposts(client: Tes
     assert cases[0]["record_count"] == 2
     assert {appearance["group_name"] for source in cases[0]["source_records"]
             for appearance in source["facebook_group_appearances"]} == {"Chatham Lost Pets", "Chapel Hill Lost Pets"}
+    filtered_a = client.get(f"/api/candidate-cases?facebook_group_subscription_id={group_a['id']}").json()
+    filtered_b = client.get(f"/api/candidate-cases?facebook_group_subscription_id={group_b['id']}").json()
+    assert [item["case_id"] for item in filtered_a] == [cases[0]["case_id"]]
+    assert [item["case_id"] for item in filtered_b] == [cases[0]["case_id"]]
+    options = client.get("/api/filter-options").json()
+    assert {item["id"] for item in options["facebook_groups"]} >= {group_a["id"], group_b["id"]}
     assert client.post(f"/api/facebook/sync/{run.json()['id']}/complete", headers=headers, json={}).status_code == 200
 
 
@@ -86,3 +92,29 @@ def test_facebook_status_and_failed_group_receipt_are_explicit(client: TestClien
     receipt = result.json()["groups"][0]
     assert receipt["status"] == "failed"
     assert receipt["error"] == "Facebook group page timed out"
+
+
+def test_facebook_independent_report_stays_separate_and_post_rescan_is_idempotent(client: TestClient):
+    group = subscribe(client, "Chatham Lost Pets", "chatham-independent-reports")
+    pair = client.post("/api/facebook/pair").json()
+    headers = {"X-Archie-Facebook-Token": pair["token"]}
+    run = client.post("/api/facebook/sync").json()
+    client.get("/api/facebook/sync/next", headers=headers)
+    batch = {
+        "sync_run_id": run["id"], "group_subscription_id": group["id"], "scanned": 2,
+        "posts": [
+            {"facebook_post_id": "same-post", "canonical_url": "https://www.facebook.com/groups/chatham-independent-reports/posts/same-post",
+             "text": "Orange cat seen near the creek this morning", "posted_at": "2026-09-27T10:00:00Z",
+             "images": [{"url": "https://images.example/first.jpg", "sha256": "a" * 64}]},
+            {"facebook_post_id": "independent-post", "canonical_url": "https://www.facebook.com/groups/chatham-independent-reports/posts/independent-post",
+             "text": "Different orange cat spotted by the library tonight", "posted_at": "2026-09-27T19:00:00Z",
+             "images": [{"url": "https://images.example/second.jpg", "sha256": "b" * 64}]},
+        ],
+    }
+    assert client.post("/api/facebook/ingest-batch", headers=headers, json=batch).status_code == 200
+    repeat = {**batch, "scanned": 2, "posts": [batch["posts"][0]]}
+    result = client.post("/api/facebook/ingest-batch", headers=headers, json=repeat)
+    assert result.status_code == 200
+    assert result.json()["posts_new"] == 0
+    cases = client.get("/api/candidate-cases").json()
+    assert len(cases) == 2

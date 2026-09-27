@@ -12,7 +12,8 @@ const SOURCE_ACCENTS = {
   orange_county_found: '#b06d4f',
   pet911: '#7b5a92',
   petkey: '#6f6f8e',
-  facebook_bridge: '#526aa5'
+  facebook_bridge: '#526aa5',
+  facebook_group: '#526aa5'
 }
 
 export default {
@@ -61,6 +62,15 @@ export default {
     const locationText = computed(() => currentLocation.value?.location_text ?? props.post.location_text)
     const locationDistance = computed(() => currentLocation.value?.distance_from_home_miles ?? props.post.distance_from_home_miles)
     const identityIds = computed(() => props.post.external_ids || [])
+    const facebookAppearances = computed(() => {
+      const byGroup = new Map()
+      for (const record of props.post.source_records || []) {
+        for (const appearance of record.facebook_group_appearances || []) {
+          if (appearance.group_subscription_id != null) byGroup.set(appearance.group_subscription_id, appearance)
+        }
+      }
+      return [...byGroup.values()].sort((a, b) => String(a.group_name).localeCompare(String(b.group_name)))
+    })
     const mapHref = computed(() => {
       const lat = currentLocation.value?.map_latitude ?? props.post.map_latitude
       const lon = currentLocation.value?.map_longitude ?? props.post.map_longitude
@@ -130,7 +140,7 @@ export default {
     return {
       imageUnavailable, candidateImage, displayedImage, selectedImage, caseImages, priorityClass, photoPct, hasPhoto, sourceAccent, candidateHeading, candidateSubheading, identityIds,
       sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText,
-      traitTokens, primaryTraitTokens, reasonSummary, colorClass,
+      traitTokens, primaryTraitTokens, reasonSummary, colorClass, facebookAppearances,
       sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review, locate, locationText, currentLocation
     }
   }
@@ -162,6 +172,7 @@ export default {
         <strong v-for="identifier in identityIds" :key="identifier.namespace + identifier.value">{{ identifier.label }} {{ identifier.value }}</strong>
         <span>Radar case #{{ post.case_id || post.id }}<template v-if="post.record_count > 1"> · {{ post.record_count }} source records</template></span>
       </div>
+      <p v-if="facebookAppearances.length" class="facebook-appearance-summary">Seen in {{ facebookAppearances.length }} Facebook {{ facebookAppearances.length === 1 ? 'group' : 'groups' }}</p>
       <RouterLink class="candidate-case-open" :to="`/candidates/${post.case_id || post.id}`">Open case workspace →</RouterLink>
 
       <div class="date-facts primary-event-date">
@@ -230,6 +241,14 @@ export default {
             <small>{{ record.custody_label || statusLabel(record.status) }}<template v-if="record.source_platform"> · via {{ record.source_platform }}</template></small>
             <em v-if="displayedImage?.source_post_id === record.post_id">Current photo</em>
             <a v-if="record.source_url" :href="record.source_url" target="_blank" rel="noopener">Open record ↗</a>
+          </article>
+        </section>
+        <section v-if="facebookAppearances.length" class="more-detail-section source-history">
+          <h3>Facebook reports · {{ facebookAppearances.length }} {{ facebookAppearances.length === 1 ? 'group' : 'groups' }}</h3>
+          <article v-for="appearance in facebookAppearances" :key="appearance.group_subscription_id" class="source-history-row">
+            <time>{{ exactDate(appearance.posted_at || appearance.seen_at) }}</time>
+            <strong>{{ appearance.group_name }}</strong>
+            <a v-if="appearance.group_url" :href="appearance.group_url" target="_blank" rel="noopener">Open group ↗</a>
           </article>
         </section>
         <section v-if="Object.keys(post.parsed_traits || {}).length" class="more-detail-section">

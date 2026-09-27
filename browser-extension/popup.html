@@ -11,6 +11,7 @@
     p { color: #647166; line-height: 1.4; margin: 0 0 14px; }
     label { display: block; font-weight: 650; margin: 12px 0 5px; }
     input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #c9cec1; border-radius: 8px; background: white; }
+    select { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #c9cec1; border-radius: 8px; background: white; }
     button { width: 100%; border: 0; border-radius: 8px; padding: 11px; margin-top: 12px; background: #294f40; color: white; font-weight: 700; cursor: pointer; }
     button.secondary { background: #e8ebdf; color: #294f40; }
     #status { min-height: 20px; padding-top: 10px; color: #456653; }
@@ -24,6 +25,8 @@
   <input id="api" value="http://127.0.0.1:8000" />
   <label for="token">One-time pairing token</label>
   <input id="token" type="password" autocomplete="off" placeholder="Paste token from Sources" />
+  <label for="cadence">Automatic sync while this browser is open</label>
+  <select id="cadence"><option value="off">Off</option><option value="hour">Every hour</option><option value="three_hours">Every 3 hours</option><option value="twice_daily">Twice daily</option></select>
   <button id="save">Connect browser</button>
   <button id="disconnect" class="secondary">Disconnect this browser</button>
   <div id="status" role="status"></div>

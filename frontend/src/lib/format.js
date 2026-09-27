@@ -11,7 +11,8 @@ export const SOURCE_LABELS = {
   burlington_24petconnect: 'Burlington',
   pet911: 'Pet911',
   petkey: 'Petkey',
-  facebook_bridge: 'Facebook capture'
+  facebook_bridge: 'Facebook capture',
+  facebook_group: 'Facebook'
 }
 
 export function sourceLabel(value) {

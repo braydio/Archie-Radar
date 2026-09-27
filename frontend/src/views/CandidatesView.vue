@@ -4,6 +4,7 @@ import { onBeforeRouteLeave } from 'vue-router'
 import CandidateCard from '../components/CandidateCard.vue'
 import FilterSection from '../components/FilterSection.vue'
 import SearchMap from '../components/SearchMap.vue'
+import FacebookGroupsPanel from '../components/FacebookGroupsPanel.vue'
 import { sourceLabel, statusLabel } from '../lib/format.js'
 
 const FILTER_STORAGE = 'archie-radar-v09-filters'
@@ -11,6 +12,7 @@ const CASE_RETURN_STORAGE = 'archie-radar-case-return'
 const DEFAULT_NOT_BEFORE = '2026-06-01'
 const DEFAULT_FILTERS = Object.freeze({
   source: '',
+  facebookGroupId: '',
   status: '',
   sex: 'male',
   photoFilter: 'any',
@@ -36,7 +38,7 @@ const DEFAULT_FILTERS = Object.freeze({
 
 export default {
   name: 'App',
-  components: { CandidateCard, FilterSection, SearchMap },
+  components: { CandidateCard, FilterSection, SearchMap, FacebookGroupsPanel },
   setup() {
     const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
     const posts = ref([])
@@ -65,6 +67,7 @@ export default {
     const sort = ref('smart')
 
     const source = ref(DEFAULT_FILTERS.source)
+    const facebookGroupId = ref(DEFAULT_FILTERS.facebookGroupId)
     const status = ref(DEFAULT_FILTERS.status)
     const sex = ref(DEFAULT_FILTERS.sex)
     const photoFilter = ref(DEFAULT_FILTERS.photoFilter)
@@ -91,6 +94,7 @@ export default {
     function draftSnapshot() {
       return {
         source: source.value,
+        facebookGroupId: facebookGroupId.value,
         status: status.value,
         sex: sex.value,
         photoFilter: photoFilter.value,
@@ -118,6 +122,7 @@ export default {
     function loadDraft(values) {
       const f = { ...DEFAULT_FILTERS, ...(values || {}) }
       source.value = f.source
+      facebookGroupId.value = f.facebookGroupId
       status.value = f.status
       sex.value = f.sex
       photoFilter.value = f.photoFilter
@@ -170,6 +175,7 @@ export default {
       const f = appliedFilters.value
       const chips = []
       if (f.source !== DEFAULT_FILTERS.source) chips.push(`Source: ${sourceLabel(f.source)}`)
+      if (f.facebookGroupId) chips.push(`Facebook group: ${(filterOptions.value.facebook_groups || []).find(group => String(group.id) === String(f.facebookGroupId))?.group_name || 'Selected group'}`)
       if (f.status !== DEFAULT_FILTERS.status) chips.push(`Status: ${statusLabel(f.status) || f.status}`)
       if (f.maxDistance !== DEFAULT_FILTERS.maxDistance) chips.push(f.maxDistance >= 500 ? 'Any distance' : `${f.maxDistance} mi`)
       if (f.notBefore !== DEFAULT_FILTERS.notBefore) chips.push(f.notBefore ? `On/after ${f.notBefore}` : 'Older dates included')
@@ -295,6 +301,7 @@ export default {
         params.set('include_duplicates', f.hideDuplicates ? 'false' : 'true')
         params.set('sort', sort.value)
         if (f.source) params.set('source', f.source)
+        if (f.facebookGroupId) params.set('facebook_group_subscription_id', String(f.facebookGroupId))
         if (f.status) params.set('status', f.status)
         if (f.traitMode === 'hide') {
           if (f.sex) params.set('sex', f.sex)
@@ -517,7 +524,7 @@ export default {
       API, posts, referencePhotos, searchConfig, queueStats, loading, uploading, error, scanSummary,
       filtersOpen, setupOpen, sourcesOpen, showMap, filterSheet, filterButton, state, sort,
       filterSectionOpen, defaultsExpanded, defaultTraitCount, filterSummaries,
-      source, status, sex, photoFilter, ageDays, minScore, maxDistance, hideDuplicates, color, pattern, coat,
+      source, facebookGroupId, status, sex, photoFilter, ageDays, minScore, maxDistance, hideDuplicates, color, pattern, coat,
       collar, microchip, altered, whiteChest, whiteBelly, whitePaws, whiteFace, ageCompatible, archieCompatible,
       notBefore, traitMode, queueTabs, sourceOptions, statusOptions, setupNeededCount, activeSourceCount, mappedCount,
       nonDefaultApplied, selectedDraftTraits, refreshBusy, refreshReceipt, isDefaultDraft, appliedFilters,
@@ -586,6 +593,7 @@ export default {
           <label>Report age<select v-model.number="ageDays"><option :value="0">Any age</option><option :value="1">Past 24 hours</option><option :value="3">Past 3 days</option><option :value="7">Past 7 days</option><option :value="14">Past 2 weeks</option><option :value="30">Past 30 days</option><option :value="60">Past 60 days</option></select></label>
           <label>On or after:<input class="date-input" type="date" v-model="notBefore" /></label>
           <label>Source<select v-model="source"><option value="">All sources</option><option v-for="item in sourceOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
+          <label>Facebook group<select v-model="facebookGroupId"><option value="">All Facebook groups</option><option v-for="group in filterOptions.facebook_groups || []" :key="group.id" :value="String(group.id)">{{ group.group_name }}{{ group.enabled ? '' : ' · disabled' }}</option></select></label>
           <label>Status<select v-model="status"><option value="">All statuses</option><option v-for="item in statusOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
         </div>
       </FilterSection>
@@ -641,6 +649,7 @@ export default {
           <p v-if="item.detail">{{ item.detail }}</p><small v-if="refreshReceipt[item.key] && !refreshReceipt[item.key]?.error">{{ refreshReceipt[item.key].total ?? 0 }} seen · {{ refreshReceipt[item.key].created ?? 0 }} new</small>
         </article>
       </div>
+      <FacebookGroupsPanel :api="API" @updated="loadFilterOptions" @review-new="setQueue('new')" />
       <details v-if="scanSummary" class="scan-summary"><summary>Last scan receipt</summary><div class="scan-grid"><div v-for="(result, name) in scanSummary" :key="name" :class="['scan-source', { failed: result?.error }]"><strong>{{ name.replaceAll('_', ' ') }}</strong><span v-if="result?.error">error</span><span v-else>{{ result?.total ?? 0 }} seen · {{ result?.created ?? 0 }} new</span></div></div></details>
     </section>
 
