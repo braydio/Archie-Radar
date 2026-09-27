@@ -39,3 +39,15 @@ def test_case_review_legacy_post_route_updates_case(client: TestClient):
     assert reviewed.status_code == 200
     cases = client.get("/api/candidate-cases", params={"review_state": "needs_review"}).json()
     assert [item["case_id"] for item in cases] == [case_id]
+
+
+def test_candidate_case_date_filters_handle_naive_sqlite_timestamps(client: TestClient):
+    create_report(client, "case-naive-date-1", "Recent report")
+
+    recent = client.get("/api/candidate-cases", params={
+        "reported_within_days": 30,
+        "sort": "newest",
+    })
+
+    assert recent.status_code == 200, recent.text
+    assert len(recent.json()) == 1

@@ -1092,6 +1092,16 @@ def _export_timestamp(value: datetime | None) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _candidate_event_timestamp(row: PetPost) -> datetime | None:
+    """Return candidate event timestamps in UTC, including SQLite's naive values."""
+    value = row.reported_at or row.first_seen_at
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _remove_temp_export(path: str):
     Path(path).unlink(missing_ok=True)
 
@@ -1683,7 +1693,8 @@ def list_candidate_cases(
                 continue
             if sex and row.sex != sex:
                 continue
-            if cutoff and (row.reported_at or row.first_seen_at) < cutoff:
+            event_time = _candidate_event_timestamp(row)
+            if cutoff and (event_time is None or event_time < cutoff):
                 continue
             if has_photo is True and (not output.get("image_url")):
                 continue
@@ -1727,12 +1738,16 @@ def list_candidate_cases(
         results.append((result, members))
 
     if sort == "newest":
-        results.sort(key=lambda item: max(((row.reported_at or row.first_seen_at) for row, _, _ in item[1]), default=datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+        results.sort(key=lambda item: max((event_time for row, _, _ in item[1]
+            if (event_time := _candidate_event_timestamp(row)) is not None),
+            default=datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
     elif sort == "closest":
         results.sort(key=lambda item: (item[0].get("distance_from_home_miles") is None,
             item[0].get("distance_from_home_miles") if item[0].get("distance_from_home_miles") is not None else 9999))
     else:
-        results.sort(key=lambda item: (item[0].get("match_score", 0), max((row.reported_at or row.first_seen_at for row, _, _ in item[1]), default=datetime.min.replace(tzinfo=timezone.utc))), reverse=True)
+        results.sort(key=lambda item: (item[0].get("match_score", 0), max((event_time for row, _, _ in item[1]
+            if (event_time := _candidate_event_timestamp(row)) is not None),
+            default=datetime.min.replace(tzinfo=timezone.utc))), reverse=True)
     return [result for result, _ in results[:limit]]
 
 
@@ -1785,7 +1800,9 @@ def queue_stats(
     for case in db.scalars(select(CandidateCase)):
         members = list(db.scalars(select(PetPost).join(CandidateCasePost, CandidateCasePost.post_id == PetPost.id)
                                    .where(CandidateCasePost.case_id == case.id)))
-        recent = [row for row in members if not cutoff or (row.reported_at or row.first_seen_at) >= cutoff]
+        recent = [row for row in members if not cutoff or (
+            (event_time := _candidate_event_timestamp(row)) is not None and event_time >= cutoff
+        )]
         if not recent:
             continue
         grouped[case.review_state] = grouped.get(case.review_state, 0) + 1
