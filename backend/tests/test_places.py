@@ -25,3 +25,20 @@ def test_address_resolver_returns_cached_place_without_provider_call(client, mon
     assert response.status_code == 200
     assert response.json()["matches"] == []
     places.geocoder.lookup_many.assert_awaited_once()
+
+
+def test_cached_address_lookup_preserves_precision_and_ambiguous_choices(client, monkeypatch):
+    results = [
+        {"latitude": 35.9, "longitude": -79.0, "display_name": "Dollar Road, Chapel Hill", "addresstype": "road", "type": "residential"},
+        {"latitude": 36.0, "longitude": -79.1, "display_name": "Dollar Road, Durham", "addresstype": "road", "type": "residential"},
+    ]
+    monkeypatch.setattr(places.geocoder, "lookup_many", AsyncMock(return_value=results))
+
+    first = client.post("/api/places/resolve", json={"query": "Dollar Road, Chapel Hill"})
+    second = client.post("/api/places/resolve", json={"query": "Dollar Road, Chapel Hill"})
+
+    assert first.status_code == second.status_code == 200
+    assert [item["precision"] for item in first.json()["matches"]] == ["street", "street"]
+    assert second.json()["matches"] == first.json()["matches"]
+    assert len(second.json()["matches"]) == 2
+    places.geocoder.lookup_many.assert_awaited_once()

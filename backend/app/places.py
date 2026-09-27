@@ -1,19 +1,30 @@
 from __future__ import annotations
 
-from datetime import timedelta, timezone
+import json
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import DateTime, Integer, String, Text, select
+from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from .db import get_db
-from .geocoder import GeocodeCache, NominatimGeocoder, utcnow
+from .db import Base, get_db
+from .geocoder import NominatimGeocoder, utcnow
 from .settings import get_settings
 
 router = APIRouter(prefix="/api/places", tags=["places"])
 settings = get_settings()
 geocoder = NominatimGeocoder(settings.geocode_user_agent, settings.geocode_base_url, settings.geocode_min_delay_seconds)
+
+
+class PlaceLookupCache(Base):
+    __tablename__ = "place_lookup_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    query: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="ok")
+    results_json: Mapped[str] = mapped_column(Text, default="[]")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ResolvePlaceIn(BaseModel):
@@ -41,8 +52,28 @@ def compass_label(bearing: float) -> str:
 
 
 def _precision(hit: dict) -> str:
-    kind = str(hit.get("addresstype") or hit.get("type") or "").lower()
-    return "address" if kind in {"house", "building", "residential", "road", "street"} else "place"
+    kind = str(hit.get("addresstype") or "").lower()
+    if kind in {"house", "building", "house_number", "apartments"}:
+        return "address"
+    if kind in {"road", "street", "residential", "highway"}:
+        return "street"
+    if kind in {"neighbourhood", "suburb", "quarter", "hamlet"}:
+        return "neighborhood"
+    if kind in {"city", "town", "village", "municipality", "county", "state"}:
+        return "city"
+    return "place" if hit.get("name") or hit.get("type") else "approximate"
+
+
+def _normalized_hit(hit: dict) -> dict:
+    return {
+        "latitude": float(hit["latitude"]),
+        "longitude": float(hit["longitude"]),
+        "display_name": str(hit.get("display_name") or ""),
+        "addresstype": str(hit.get("addresstype") or ""),
+        "type": str(hit.get("type") or ""),
+        "class": str(hit.get("class") or ""),
+        "name": str(hit.get("name") or ""),
+    }
 
 
 @router.post("/resolve")
@@ -51,11 +82,13 @@ async def resolve_address(payload: ResolvePlaceIn, db: Session = Depends(get_db)
         raise HTTPException(503, "Address lookup is disabled in Archie Radar settings")
     query = " ".join(payload.query.split()).strip()
     lookup_query = query if any(term in query.casefold() for term in ("north carolina", " nc", "united states", ", us")) else f"{query}, North Carolina, USA"
-    cached = db.scalar(select(GeocodeCache).where(GeocodeCache.query == lookup_query))
+    cached = db.scalar(select(PlaceLookupCache).where(PlaceLookupCache.query == lookup_query))
     hits = None
-    if cached and cached.status == "ok" and cached.latitude is not None and cached.longitude is not None:
-        hits = [{"latitude": cached.latitude, "longitude": cached.longitude,
-                 "display_name": cached.display_name, "addresstype": "place", "type": "place", "class": "place"}]
+    if cached and cached.status == "ok":
+        try:
+            hits = [_normalized_hit(item) for item in json.loads(cached.results_json or "[]")][:5]
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            hits = None
     elif cached and cached.status == "miss":
         cached_at = cached.updated_at if cached.updated_at.tzinfo else cached.updated_at.replace(tzinfo=timezone.utc)
         if utcnow() - cached_at < timedelta(days=7):
@@ -70,15 +103,14 @@ async def resolve_address(payload: ResolvePlaceIn, db: Session = Depends(get_db)
             raise HTTPException(502, "Address service is temporarily unavailable") from exc
         now = utcnow()
         if cached is None:
-            cached = GeocodeCache(query=lookup_query)
+            cached = PlaceLookupCache(query=lookup_query)
             db.add(cached)
         cached.updated_at = now
         if hits:
-            cached.latitude, cached.longitude = hits[0]["latitude"], hits[0]["longitude"]
-            cached.display_name, cached.status = hits[0]["display_name"], "ok"
+            hits = [_normalized_hit(hit) for hit in hits[:5]]
+            cached.results_json, cached.status = json.dumps(hits), "ok"
         else:
-            cached.latitude = cached.longitude = None
-            cached.display_name, cached.status = "", "miss"
+            cached.results_json, cached.status = "[]", "miss"
         db.commit()
     home_lat, home_lon = settings.home_latitude, settings.home_longitude
     matches = []
@@ -87,5 +119,5 @@ async def resolve_address(payload: ResolvePlaceIn, db: Session = Depends(get_db)
         bearing = bearing_degrees(home_lat, home_lon, hit["latitude"], hit["longitude"])
         matches.append({"display_name": hit["display_name"], "latitude": hit["latitude"], "longitude": hit["longitude"],
             "precision": _precision(hit), "distance_miles": round(distance, 2), "bearing_degrees": round(bearing, 1),
-            "bearing_label": compass_label(bearing)})
+            "bearing_label": compass_label(bearing), "source_type": hit.get("type"), "address_type": hit.get("addresstype")})
     return {"query": query, "home": {"latitude": home_lat, "longitude": home_lon}, "matches": matches}
