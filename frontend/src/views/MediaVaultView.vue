@@ -14,6 +14,8 @@ const fromDate = ref('')
 const toDate = ref('')
 const session = ref('all')
 const camera = ref('all')
+const objectId = ref('all')
+const evidenceOnly = ref(false)
 const selectMode = ref(false)
 const selectedIds = ref(new Set())
 const viewer = ref(null)
@@ -23,10 +25,13 @@ const includeCoordinates = ref(true)
 const now = Date.now()
 const sessions = computed(() => [...new Set(items.value.map(item => item.search_session_id).filter(Boolean))])
 const cameras = computed(() => [...new Map(items.value.filter(item => item.camera_name).map(item => [item.camera_name, item.camera_name])).values()])
+const objects = computed(() => [...new Map(items.value.filter(item => item.map_object_id).map(item => [item.map_object_id, { id: item.map_object_id, name: item.map_object_name || `Map object #${item.map_object_id}` }])).values()])
 const visible = computed(() => items.value.filter(item => {
   if (type.value !== 'all' && item.attachment_type !== type.value) return false
   if (session.value !== 'all' && String(item.search_session_id) !== session.value) return false
   if (camera.value !== 'all' && item.camera_name !== camera.value) return false
+  if (objectId.value !== 'all' && String(item.map_object_id) !== objectId.value) return false
+  if (evidenceOnly.value && item.map_object_type !== 'evidence') return false
   const timestamp = new Date(item.observed_at || item.created_at).getTime()
   if (period.value === 'custom') {
     if (fromDate.value && timestamp < new Date(`${fromDate.value}T00:00:00`).getTime()) return false
@@ -64,6 +69,18 @@ async function remove(item) {
   if (!response.ok) { error.value = 'Media could not be deleted.'; return }
   items.value = items.value.filter(row => row.id !== item.id); viewer.value = null
 }
+async function deleteSelected() {
+  if (!selected.value.length || !confirm(`Delete ${selected.value.length} selected originals and their previews? This cannot be undone.`)) return
+  busy.value = true; error.value = ''
+  try {
+    for (const item of selected.value) {
+      const response = await fetch(`${API}/api/surveyor/attachments/${item.id}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error(`Could not delete ${item.original_filename}`)
+    }
+    const removed = new Set(selectedIds.value); items.value = items.value.filter(item => !removed.has(item.id)); selectedIds.value = new Set(); selectMode.value = false
+  } catch (cause) { error.value = cause.message; await load() }
+  finally { busy.value = false }
+}
 onMounted(() => { if (['tonight','today','7d'].includes(route.query.period)) period.value = route.query.period; load() })
 </script>
 
@@ -76,6 +93,8 @@ onMounted(() => { if (['tonight','today','7d'].includes(route.query.period)) per
       <label v-if="period==='custom'">From<input v-model="fromDate" type="date" /></label><label v-if="period==='custom'">To<input v-model="toDate" type="date" /></label>
       <label>Search session<select v-model="session"><option value="all">All sessions</option><option v-for="id in sessions" :key="id" :value="String(id)">Search #{{ id }}</option></select></label>
       <label>Camera<select v-model="camera"><option value="all">All cameras</option><option v-for="name in cameras" :key="name" :value="name">{{ name }}</option></select></label>
+      <label>Map object<select v-model="objectId"><option value="all">All objects</option><option v-for="obj in objects" :key="obj.id" :value="String(obj.id)">{{ obj.name }}</option></select></label>
+      <label class="media-coordinate-setting"><input v-model="evidenceOnly" type="checkbox" /> Evidence objects only</label>
       <label class="media-coordinate-setting"><input v-model="includeCoordinates" type="checkbox" /> Include exact coordinates</label>
       <button v-if="visible.length" class="secondary-button" :disabled="busy" @click="exportBundle(visible)">{{ busy ? 'Preparing…' : period==='tonight' ? `Export tonight (${visible.length})` : `Export filtered (${visible.length})` }}</button>
       <button class="secondary-button" @click="selectMode=!selectMode; selectedIds=new Set()">{{ selectMode ? 'Done selecting' : 'Select' }}</button>
@@ -83,7 +102,7 @@ onMounted(() => { if (['tonight','today','7d'].includes(route.query.period)) per
     <p v-if="period==='tonight'" class="media-vault-tonight">Tonight's media · {{ visible.filter(item=>item.attachment_type==='image').length }} photos · {{ visible.filter(item=>item.attachment_type==='video').length }} videos · {{ visible.filter(item=>item.attachment_type==='audio').length }} audio</p>
     <p v-if="error" class="surveyor-error" role="alert">{{ error }}</p><p v-else-if="!visible.length" class="journal-empty">No media matches these filters.</p>
     <div v-else class="media-vault-grid"><MediaTile v-for="item in visible" :key="item.id" :item="item" :api="API" :selectable="selectMode" :selected="selectedIds.has(item.id)" @open="viewer=$event" @toggle="toggle" /></div>
-    <div v-if="selectMode && selected.length" class="media-export-bar"><strong>{{ selected.length }} selected · {{ formatSize(selectedBytes) }}</strong><button class="primary" :disabled="busy" @click="exportBundle()">{{ busy ? 'Preparing export…' : 'Export bundle' }}</button></div>
+    <div v-if="selectMode && selected.length" class="media-export-bar"><strong>{{ selected.length }} selected · {{ formatSize(selectedBytes) }}</strong><button class="danger-button" :disabled="busy" @click="deleteSelected">Delete</button><button class="primary" :disabled="busy" @click="exportBundle()">{{ busy ? 'Preparing export…' : 'Export bundle' }}</button></div>
     <MediaViewer v-if="viewer" :item="viewer" :api="API" @close="viewer=null" @delete="remove" />
   </main>
 </template>

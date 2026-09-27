@@ -24,6 +24,7 @@ async function upload(file) {
   finally { uploading.value = false }
 }
 async function remove(item) {
+  if (!confirm(`Delete ${item.original_filename}? This removes the stored original.`)) return
   try { const response = await fetch(`${props.api}/api/surveyor/attachments/${item.id}`, { method: 'DELETE' }); if (!response.ok) throw new Error('Could not delete attachment'); attachments.value = attachments.value.filter(row => row.id !== item.id) }
   catch (cause) { error.value = cause.message }
 }

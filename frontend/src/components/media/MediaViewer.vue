@@ -14,7 +14,7 @@ async function exportItem() {
     const blob = await response.blob()
     const file = new File([blob], props.item.original_filename, { type: props.item.mime_type })
     if (navigator.canShare?.({ files: [file] }) && navigator.share) await navigator.share({ files: [file], title: props.item.caption || file.name })
-    else { const href = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = href; link.download = file.name; link.click(); URL.revokeObjectURL(href) }
+    else { const href = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = href; link.download = file.name; link.click(); setTimeout(() => URL.revokeObjectURL(href), 1000) }
   } catch (cause) { error.value = cause.message || 'Share is unavailable' }
 }
 async function exportBundle() {

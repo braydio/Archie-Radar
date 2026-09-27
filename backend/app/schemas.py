@@ -303,6 +303,9 @@ class SurveyorAttachmentOut(BaseModel):
     camera_name: str | None = None
     session_label: str | None = None
     candidate_case_id: int | None = None
+    map_object_type: str | None = None
+    map_object_id: int | None = None
+    camera_id: int | None = None
 
 
 class SurveyorMediaExportIn(BaseModel):

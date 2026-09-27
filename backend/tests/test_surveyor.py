@@ -194,6 +194,7 @@ def test_media_export_contains_original_and_context_manifests(client: TestClient
     library = client.get("/api/surveyor/media?limit=20")
     assert library.status_code == 200
     assert library.json()[0]["map_object_name"] == "East Creek"
+    assert library.json()[0]["map_object_type"] == "pin"
     assert client.get("/api/surveyor/media/config").json()["max_video_mb"] == main.settings.surveyor_max_video_mb
 
     exported = client.post("/api/surveyor/media/export", json={"attachment_ids": [attachment["id"]]})

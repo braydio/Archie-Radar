@@ -937,6 +937,9 @@ def list_surveyor_media(
             "camera_name": camera.name if camera else None,
             "session_label": f"Search #{session.id}" if session else None,
             "candidate_case_id": candidate_case_id,
+            "map_object_type": obj.object_type if obj else None,
+            "map_object_id": obj.id if obj else None,
+            "camera_id": camera.id if camera else None,
         })
         result.append(output)
         if len(result) >= limit:
