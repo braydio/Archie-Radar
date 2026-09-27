@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Archie Radar Facebook Collector</title>
+  <style>
+    :root { color-scheme: light; font: 14px system-ui, sans-serif; color: #243a30; background: #faf8ef; }
+    body { width: 330px; margin: 0; padding: 18px; }
+    h1 { font-size: 17px; margin: 0 0 8px; }
+    p { color: #647166; line-height: 1.4; margin: 0 0 14px; }
+    label { display: block; font-weight: 650; margin: 12px 0 5px; }
+    input { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #c9cec1; border-radius: 8px; background: white; }
+    button { width: 100%; border: 0; border-radius: 8px; padding: 11px; margin-top: 12px; background: #294f40; color: white; font-weight: 700; cursor: pointer; }
+    button.secondary { background: #e8ebdf; color: #294f40; }
+    #status { min-height: 20px; padding-top: 10px; color: #456653; }
+    .small { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Archie Radar Facebook Collector</h1>
+  <p>Pairs this browser without sending Facebook passwords, cookies, or login tokens to Archie Radar.</p>
+  <label for="api">Archie Radar server</label>
+  <input id="api" value="http://127.0.0.1:8000" />
+  <label for="token">One-time pairing token</label>
+  <input id="token" type="password" autocomplete="off" placeholder="Paste token from Sources" />
+  <button id="save">Connect browser</button>
+  <button id="disconnect" class="secondary">Disconnect this browser</button>
+  <div id="status" role="status"></div>
+  <p class="small">Sync jobs run only for groups explicitly selected in Archie Radar.</p>
+  <script src="popup.js"></script>
+</body>
+</html>

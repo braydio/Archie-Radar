@@ -19,7 +19,7 @@ from ..service import upsert_posts
 from ..candidates.identity import merge_candidate_cases
 from .classifier import candidate_status, is_cat_related
 from .dedupe import likely_crosspost, text_fingerprint
-from .schemas import BatchIn, GroupIn, GroupPatch, SyncCompleteIn
+from .schemas import BatchIn, GroupIn, GroupPatch, GroupReceiptIn, SyncCompleteIn
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-collector"])
 
@@ -110,6 +110,21 @@ def pair_browser(db: Session = Depends(get_db)):
 @router.get("/bridge/status")
 def bridge_status(_token: FacebookBridgeToken = Depends(require_bridge_token)):
     return {"paired": True, "device_name": _token.device_name, "last_seen_at": _token.last_seen_at}
+
+
+@router.get("/status")
+def collector_status(db: Session = Depends(get_db)):
+    token = db.scalar(select(FacebookBridgeToken).where(
+        FacebookBridgeToken.revoked_at.is_(None)
+    ).order_by(FacebookBridgeToken.created_at.desc()))
+    latest_run = db.scalar(select(FacebookGroupSyncRun).order_by(
+        FacebookGroupSyncRun.started_at.desc(), FacebookGroupSyncRun.id.desc()
+    ).limit(1))
+    return {
+        "paired": token is not None,
+        "last_seen_at": token.last_seen_at if token else None,
+        "last_sync": _run_out(db, latest_run) if latest_run else None,
+    }
 
 
 @router.get("/groups")
@@ -361,6 +376,37 @@ def re_search_finder(text: str) -> bool:
 @router.post("/ingest-batch")
 def ingest_batch(payload: BatchIn, _token: FacebookBridgeToken = Depends(require_bridge_token), db: Session = Depends(get_db)):
     return _upsert_facebook_batch(db, payload)
+
+
+@router.post("/sync/{sync_id:int}/groups/{group_id:int}/fail")
+def fail_group_receipt(
+    sync_id: int,
+    group_id: int,
+    payload: GroupReceiptIn,
+    _token: FacebookBridgeToken = Depends(require_bridge_token),
+    db: Session = Depends(get_db),
+):
+    run = db.get(FacebookGroupSyncRun, sync_id)
+    receipt = db.scalar(select(FacebookGroupSyncReceipt).where(
+        FacebookGroupSyncReceipt.sync_run_id == sync_id,
+        FacebookGroupSyncReceipt.group_subscription_id == group_id,
+    ))
+    group = db.get(FacebookGroupSubscription, group_id)
+    if run is None or receipt is None or group is None:
+        raise HTTPException(404, "Sync run or group receipt not found")
+    if run.status not in {"queued", "syncing"} or receipt.status not in {"queued", "syncing"}:
+        raise HTTPException(409, "This group is not part of an active sync run")
+    now = utcnow()
+    receipt.scanned = payload.scanned
+    receipt.parser_warning = payload.parser_warning
+    receipt.error = payload.error or payload.parser_warning or "Facebook group scan failed"
+    receipt.status = "parser_warning" if payload.parser_warning and not payload.error else "failed"
+    receipt.completed_at = now
+    group.last_sync_completed_at = now
+    group.last_error = receipt.error
+    group.parser_warning = payload.parser_warning
+    db.commit()
+    return {"status": receipt.status, "error": receipt.error}
 
 
 @router.post("/sync/{sync_id:int}/complete")

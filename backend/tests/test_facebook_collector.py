@@ -65,3 +65,24 @@ def test_facebook_bridge_endpoints_require_paired_token(client: TestClient):
     pair = client.post("/api/facebook/pair").json()
     assert pair["token"]
     assert client.get("/api/facebook/bridge/status", headers={"X-Archie-Facebook-Token": pair["token"]}).json()["paired"]
+
+
+def test_facebook_status_and_failed_group_receipt_are_explicit(client: TestClient):
+    assert client.get("/api/facebook/status").json()["paired"] is False
+    group = subscribe(client, "Triangle Lost Pets", "triangle-status-lost-pets")
+    pair = client.post("/api/facebook/pair").json()
+    headers = {"X-Archie-Facebook-Token": pair["token"]}
+    assert client.get("/api/facebook/status").json()["paired"] is True
+
+    run = client.post("/api/facebook/sync").json()
+    client.get("/api/facebook/sync/next", headers=headers)
+    failed = client.post(
+        f"/api/facebook/sync/{run['id']}/groups/{group['id']}/fail",
+        headers=headers,
+        json={"scanned": 0, "parser_warning": "", "error": "Facebook group page timed out"},
+    )
+    assert failed.status_code == 200
+    result = client.post(f"/api/facebook/sync/{run['id']}/complete", headers=headers, json={})
+    receipt = result.json()["groups"][0]
+    assert receipt["status"] == "failed"
+    assert receipt["error"] == "Facebook group page timed out"
