@@ -189,6 +189,12 @@ export default {
         <span v-if="sourcePostedAt && (!eventAt || dateOnly(sourcePostedAt) !== dateOnly(eventAt))" class="date-primary">Posted {{ dateOnly(sourcePostedAt) }}</span>
       </div>
 
+      <div class="review-actions">
+        <button class="possible" @click="review('possible')">Possible Archie</button>
+        <button class="hold" @click="review('needs_review')">Hold</button>
+        <button class="dismiss" @click="review('dismissed')">Not Archie</button>
+      </div>
+
       <details class="candidate-more-details">
         <summary>More details</summary>
         <section v-if="post.description" class="more-detail-section">
@@ -214,7 +220,7 @@ export default {
           <article v-for="record in post.source_records" :key="record.post_id" class="source-history-row">
             <time>{{ exactDate(record.last_seen_at || record.first_seen_at) }}</time>
             <strong>{{ record.holding_entity || record.custody_label || record.source_label }}</strong>
-            <span v-if="record.source_id">{{ identityIds[0]?.label || 'Record ID' }} {{ record.source_id }}</span>
+            <span v-if="record.source_id">{{ record.identifier_label }} {{ record.source_id }}</span>
             <small>{{ record.custody_label || statusLabel(record.status) }}<template v-if="record.source_platform"> · via {{ record.source_platform }}</template></small>
             <em v-if="displayedImage?.source_post_id === record.post_id">Current photo</em>
             <a v-if="record.source_url" :href="record.source_url" target="_blank" rel="noopener">Open record ↗</a>
@@ -253,11 +259,6 @@ export default {
         </section>
       </details>
 
-      <div class="review-actions">
-        <button class="possible" @click="review('possible')">Possible Archie</button>
-        <button class="hold" @click="review('needs_review')">Hold</button>
-        <button class="dismiss" @click="review('dismissed')">Not Archie</button>
-      </div>
     </div>
   </article>
 </template>

@@ -149,6 +149,50 @@ def choose_primary_post(posts: list[PetPost], db: Session | None = None) -> PetP
     return max(posts, key=quality)
 
 
+def _lifecycle_state(post: PetPost) -> str:
+    value = _raw(post).get("listing_state")
+    return value if value in {"active", "inactive"} else "unknown"
+
+
+def _timestamp(post: PetPost):
+    from datetime import timezone
+    values = [value for value in (post.reported_at, post.last_seen_at, post.first_seen_at) if value is not None]
+    normalized = []
+    for value in values:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        normalized.append(value.timestamp())
+    return max(normalized, default=0.0)
+
+
+def choose_current_record(posts: list[PetPost]) -> PetPost | None:
+    """Choose the freshest source record, preferring records explicitly still active."""
+    active = [post for post in posts if _lifecycle_state(post) == "active"]
+    pool = active or [post for post in posts if _lifecycle_state(post) != "inactive"] or posts
+    return max(pool, key=lambda post: (_timestamp(post), bool(post.description), bool(post.location_text)), default=None)
+
+
+def choose_current_location_record(posts: list[PetPost], outputs: dict[int, dict]) -> PetPost | None:
+    candidates = [post for post in posts if _lifecycle_state(post) != "inactive" and
+                  (outputs[post.id].get("map_latitude") is not None or post.location_text)]
+    return max(candidates, key=lambda post: (_timestamp(post), bool(post.latitude is not None and post.longitude is not None)), default=None)
+
+
+def choose_current_custody_record(posts: list[PetPost]) -> PetPost | None:
+    candidates = []
+    for post in posts:
+        if _lifecycle_state(post) == "inactive":
+            continue
+        raw = _raw(post)
+        if raw.get("holding_entity") or raw.get("custody_type") or raw.get("custody_label"):
+            candidates.append(post)
+    return max(candidates, key=_timestamp, default=None)
+
+
+def choose_best_match_record(posts: list[PetPost]) -> PetPost | None:
+    return max(posts, key=lambda post: (float(post.match_score or 0), _timestamp(post)), default=None)
+
+
 def _merge_case_ids(db: Session, case_ids: set[int]) -> int:
     cases = list(db.scalars(select(CandidateCase).where(CandidateCase.id.in_(case_ids))))
     if not cases:
@@ -258,16 +302,42 @@ def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
             "holding_entity": raw.get("holding_entity"), "custody_type": raw.get("custody_type"),
             "custody_label": raw.get("custody_label"), "source_platform": raw.get("source_platform"),
             "image_width": meta.get("width"), "image_height": meta.get("height"),
-            "image_aspect_ratio": meta.get("aspect_ratio")})
+            "image_aspect_ratio": meta.get("aspect_ratio"),
+            "listing_state": _lifecycle_state(post),
+            "identifier_label": next((item[3] for item in extract_identifiers(post)), "Record ID")})
     identifiers = list(db.scalars(select(CandidateIdentifier).where(
         CandidateIdentifier.case_id == case.id, CandidateIdentifier.is_identity_key.is_(True)).order_by(CandidateIdentifier.identifier_kind, CandidateIdentifier.id)))
     case_images = _case_images(posts, visions)
     image_post = choose_primary_case_image(posts, visions, primary.id)
     primary_image = next((image for image in case_images if image["source_post_id"] == image_post.id), None) if image_post else None
-    scores = [float(output_by_id[post.id].get("match_score") or 0) for post in posts]
-    photo_scores = [output_by_id[post.id]["photo_similarity"] for post in posts if output_by_id[post.id].get("photo_similarity") is not None]
-    distances = [output_by_id[post.id]["distance_from_home_miles"] for post in posts if output_by_id[post.id].get("distance_from_home_miles") is not None]
-    return {**primary_output,
+    current = choose_current_record(posts)
+    location_record = choose_current_location_record(posts, output_by_id)
+    custody_record = choose_current_custody_record(posts)
+    match_record = choose_best_match_record(posts)
+    photo_score_record = max((post for post in posts if output_by_id[post.id].get("photo_similarity") is not None),
+                             key=lambda post: (output_by_id[post.id]["photo_similarity"], _timestamp(post)), default=None)
+    current_output = output_by_id[current.id] if current else primary_output
+    location_output = output_by_id[location_record.id] if location_record else {}
+    custody_raw = _raw(custody_record) if custody_record else {}
+    current_location = ({
+        "record_id": location_record.id,
+        "location_text": location_record.location_text,
+        "latitude": location_record.latitude,
+        "longitude": location_record.longitude,
+        "map_latitude": location_output.get("map_latitude"),
+        "map_longitude": location_output.get("map_longitude"),
+        "precision": location_output.get("location_precision"),
+        "distance_from_home_miles": location_output.get("distance_from_home_miles"),
+        "distance_is_approximate": location_output.get("distance_is_approximate", False),
+    } if location_record else None)
+    current_custody = ({
+        "record_id": custody_record.id,
+        "holding_entity": custody_raw.get("holding_entity"),
+        "custody_type": custody_raw.get("custody_type"),
+        "custody_label": custody_raw.get("custody_label"),
+        "as_of": custody_record.last_seen_at,
+    } if custody_record else None)
+    return {**current_output,
         "image_url": primary_image["url"] if primary_image else None,
         "image_width": primary_image["width"] if primary_image else None,
         "image_height": primary_image["height"] if primary_image else None,
@@ -276,12 +346,22 @@ def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
         "case_images": case_images,
         "id": case.id, "case_id": case.id, "review_state": case.review_state,
         "display_name": case.display_name or primary.name,
-        "holding_entity": case.holding_entity or next((r["holding_entity"] for r in records if r["holding_entity"]), None),
-        "custody_type": next((r["custody_type"] for r in records if r["custody_type"]), None),
-        "custody_label": next((r["custody_label"] for r in records if r["custody_label"]), None),
-        "source_platform": next((r["source_platform"] for r in records if r["source_platform"]), None),
+        "holding_entity": current_custody["holding_entity"] if current_custody else "",
+        "custody_type": current_custody["custody_type"] if current_custody else None,
+        "custody_label": current_custody["custody_label"] if current_custody else "Status unknown",
+        "source_platform": _raw(custody_record).get("source_platform") if custody_record else None,
+        "current_record_id": current.id if current else None,
+        "current_location": current_location,
+        "current_custody": current_custody,
         "primary_post_id": primary.id, "primary": primary_output,
         "external_ids": [{"kind": row.identifier_kind, "label": row.display_label, "value": row.value, "namespace": row.namespace} for row in identifiers],
-        "record_count": len(posts), "source_records": records, "match_score": max(scores, default=0),
-        "photo_similarity": max(photo_scores, default=None), "distance_from_home_miles": min(distances, default=None),
+        "record_count": len(posts), "source_records": records, "match_score": float(match_record.match_score or 0) if match_record else 0,
+        "match_record_id": match_record.id if match_record else None,
+        "photo_similarity": output_by_id[photo_score_record.id]["photo_similarity"] if photo_score_record else None,
+        "photo_similarity_record_id": photo_score_record.id if photo_score_record else None,
+        "location_record_id": location_record.id if location_record else None,
+        "distance_from_home_miles": current_location["distance_from_home_miles"] if current_location else None,
+        "map_latitude": current_location["map_latitude"] if current_location else None,
+        "map_longitude": current_location["map_longitude"] if current_location else None,
+        "location_text": current_location["location_text"] if current_location else "",
         "possible_duplicate_post_ids": sorted({output_by_id[p.id]["duplicate_of_post_id"] for p in posts if output_by_id[p.id].get("duplicate_of_post_id")})}
