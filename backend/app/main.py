@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
@@ -38,7 +39,9 @@ from .connectors.aps_durham import APSDurhamFoundPetsConnector
 from .connectors.wake_county import WakeCountyLostFoundConnector
 from .connectors.pet911 import Pet911Connector
 from .connectors.petkey import PetkeyConnector
-from .candidates.identity import case_is_inactive, case_output, ensure_candidate_cases, is_source_inactive
+from .candidates.identity import (case_is_inactive, case_output, choose_best_match_record,
+    choose_current_custody_record, choose_current_location_record, choose_current_record, choose_primary_case_image,
+    ensure_candidate_cases, is_source_inactive)
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
@@ -1389,6 +1392,7 @@ def list_surveyor_objects(
     status: str | None = None,
     db: Session = Depends(get_db),
 ):
+    started = time.perf_counter()
     query = select(SurveyorMapObject).where(or_(SurveyorMapObject.status.is_(None), SurveyorMapObject.status != "archived"))
     if object_type:
         query = query.where(SurveyorMapObject.object_type == object_type)
@@ -1411,7 +1415,10 @@ def list_surveyor_objects(
             SurveyorMapObject.bbox_east >= west, SurveyorMapObject.bbox_west <= east,
             SurveyorMapObject.bbox_north >= south, SurveyorMapObject.bbox_south <= north,
         )
-    return [_surveyor_out(row) for row in db.scalars(query.order_by(SurveyorMapObject.created_at.desc()))]
+    output = [_surveyor_out(row) for row in db.scalars(query.order_by(SurveyorMapObject.created_at.desc()))]
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("surveyor.objects %dms objects=%d", int((time.perf_counter()-started)*1000), len(output))
+    return output
 
 
 @app.post("/api/surveyor/objects", response_model=SurveyorObjectOut, status_code=201)
@@ -1694,32 +1701,69 @@ def list_candidate_cases(
     db: Session = Depends(get_db),
 ):
     """Return one row per animal case while matching filters against member records."""
-    ensure_candidate_cases(db)
+    started = time.perf_counter()
     profile = get_or_create_profile(db)
-    cases = list(db.scalars(select(CandidateCase).where(
-        CandidateCase.review_state == review_state if review_state else True
-    )))
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=reported_within_days) if reported_within_days else None
     if not_before is not None:
         requested_cutoff = not_before if not_before.tzinfo else not_before.replace(tzinfo=timezone.utc)
         cutoff = max(cutoff, requested_cutoff) if cutoff else requested_cutoff
-
+    eligible_members = select(CandidateCasePost.case_id).distinct().join(
+        PetPost, PetPost.id == CandidateCasePost.post_id
+    )
+    if source:
+        eligible_members = eligible_members.where(PetPost.source == source)
+    if status:
+        eligible_members = eligible_members.where(PetPost.status == status)
+    if sex:
+        eligible_members = eligible_members.where(PetPost.sex == sex)
+    eligible_members = eligible_members.where(PetPost.match_score >= min_score)
+    effective_event_date = func.coalesce(PetPost.reported_at, PetPost.first_seen_at)
+    if cutoff:
+        eligible_members = eligible_members.where(effective_event_date >= cutoff)
+    if has_photo is not None or not include_duplicates:
+        eligible_members = eligible_members.outerjoin(PostVision, PostVision.post_id == PetPost.id)
+        if has_photo is True:
+            eligible_members = eligible_members.where(PetPost.image_url.is_not(None), PetPost.image_url != "",
+                or_(PostVision.id.is_(None), PostVision.status != "no_photo"))
+        elif has_photo is False:
+            eligible_members = eligible_members.where(or_(PetPost.image_url.is_(None), PetPost.image_url == "", PostVision.status == "no_photo"))
+        if not include_duplicates:
+            eligible_members = eligible_members.where(or_(PostVision.id.is_(None), PostVision.duplicate_of_post_id.is_(None)))
+    case_query = select(CandidateCase)
+    if review_state:
+        case_query = case_query.where(CandidateCase.review_state == review_state)
+    case_query = case_query.where(CandidateCase.id.in_(eligible_members))
+    cases = list(db.scalars(case_query))
+    if not cases:
+        return []
+    case_by_id = {case.id: case for case in cases}
+    case_ids = list(case_by_id)
+    joined = db.execute(select(CandidateCasePost.case_id, PetPost).join(
+        PetPost, PetPost.id == CandidateCasePost.post_id
+    ).where(CandidateCasePost.case_id.in_(case_ids))).all()
+    posts_by_case: dict[int, list[PetPost]] = {}
+    all_posts = []
+    for case_id, post in joined:
+        posts_by_case.setdefault(case_id, []).append(post)
+        all_posts.append(post)
+    if not all_posts:
+        return []
+    post_ids = [post.id for post in all_posts]
+    visions = {row.post_id: row for row in db.scalars(select(PostVision).where(PostVision.post_id.in_(post_ids)))}
+    identifiers_by_case: dict[int, list[CandidateIdentifier]] = {}
+    for row in db.scalars(select(CandidateIdentifier).where(CandidateIdentifier.case_id.in_(case_ids))):
+        identifiers_by_case.setdefault(row.case_id, []).append(row)
     results = []
-    for case in cases:
-        memberships = list(db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)))
-        case_posts = [db.get(PetPost, membership.post_id) for membership in memberships]
-        case_posts = [row for row in case_posts if row]
+    for case_id, case in case_by_id.items():
+        case_posts = posts_by_case.get(case_id, [])
         if not include_inactive and case_is_inactive(case_posts):
             continue
         members = []
-        for membership in memberships:
-            row = db.get(PetPost, membership.post_id)
-            if not row:
-                continue
+        for row in case_posts:
             if is_source_inactive(row) and not include_inactive:
                 continue
-            vision = db.scalar(select(PostVision).where(PostVision.post_id == row.id))
+            vision = visions.get(row.id)
             output = post_output(row, vision, profile)
             if row.match_score < min_score:
                 continue
@@ -1768,7 +1812,8 @@ def list_candidate_cases(
             members.append((row, vision, output))
         if not members:
             continue
-        result = case_output(db, case, profile)
+        result = case_output(db, case, profile, posts=case_posts, visions=visions,
+                             identifiers=identifiers_by_case.get(case_id, []))
         eligible_scores = [float(member[0].match_score or 0) for member in members]
         result["match_score"] = max(eligible_scores)
         results.append((result, members))
@@ -1784,7 +1829,104 @@ def list_candidate_cases(
         results.sort(key=lambda item: (item[0].get("match_score", 0), max((event_time for row, _, _ in item[1]
             if (event_time := _candidate_event_timestamp(row)) is not None),
             default=datetime.min.replace(tzinfo=timezone.utc))), reverse=True)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("candidate_cases.list %dms cases=%d posts=%d", int((time.perf_counter()-started)*1000), min(len(results), limit), len(all_posts))
     return [result for result, _ in results[:limit]]
+
+
+@app.get("/api/candidate-cases/map")
+def list_candidate_case_map(
+    review_state: str | None = None,
+    not_before: datetime | None = None,
+    max_distance_miles: float | None = Query(None, ge=0, le=500),
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Lean, one-feature-per-case projection for map overlays."""
+    started = time.perf_counter()
+    statement = select(CandidateCase)
+    if review_state:
+        statement = statement.where(CandidateCase.review_state == review_state)
+    cases = list(db.scalars(statement))
+    if not cases:
+        return []
+    case_by_id = {case.id: case for case in cases}
+    case_ids = list(case_by_id)
+    joined = db.execute(select(CandidateCasePost.case_id, PetPost).join(
+        PetPost, PetPost.id == CandidateCasePost.post_id
+    ).where(CandidateCasePost.case_id.in_(case_ids))).all()
+    posts_by_case: dict[int, list[PetPost]] = {}
+    all_posts = []
+    for case_id, post in joined:
+        posts_by_case.setdefault(case_id, []).append(post)
+        all_posts.append(post)
+    if not all_posts:
+        return []
+    post_ids = [post.id for post in all_posts]
+    visions = {row.post_id: row for row in db.scalars(select(PostVision).where(PostVision.post_id.in_(post_ids)))}
+    identifiers_by_case: dict[int, list[CandidateIdentifier]] = {}
+    for identifier in db.scalars(select(CandidateIdentifier).where(
+        CandidateIdentifier.case_id.in_(case_ids), CandidateIdentifier.is_identity_key.is_(True)
+    ).order_by(CandidateIdentifier.identifier_kind, CandidateIdentifier.id)):
+        identifiers_by_case.setdefault(identifier.case_id, []).append(identifier)
+    profile = get_or_create_profile(db)
+    normalized_cutoff = not_before
+    if normalized_cutoff and normalized_cutoff.tzinfo is None:
+        normalized_cutoff = normalized_cutoff.replace(tzinfo=timezone.utc)
+    results = []
+    for case_id, case in case_by_id.items():
+        all_members = posts_by_case.get(case_id, [])
+        members = all_members if include_inactive else [post for post in all_members if not is_source_inactive(post)]
+        if not members:
+            continue
+        outputs = {post.id: post_output(post, visions.get(post.id), profile) for post in members}
+        location_record = choose_current_location_record(members, outputs)
+        if location_record is None:
+            continue
+        location = outputs[location_record.id]
+        distance = location.get("distance_from_home_miles")
+        if max_distance_miles is not None and distance is not None and distance > max_distance_miles:
+            continue
+        current = choose_current_record(members) or members[0]
+        event_date = current.reported_at or current.first_seen_at
+        try:
+            current_raw = json.loads(current.raw_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            current_raw = {}
+        if normalized_cutoff and (event_date is None or _candidate_event_timestamp(current) < normalized_cutoff):
+            continue
+        custody = choose_current_custody_record(members)
+        custody_raw = {}
+        if custody:
+            try:
+                custody_raw = json.loads(custody.raw_json or "{}")
+            except (TypeError, json.JSONDecodeError):
+                pass
+        match = choose_best_match_record(members)
+        image_post = choose_primary_case_image(members, visions, case.primary_post_id)
+        identifiers = identifiers_by_case.get(case_id, [])
+        identity = identifiers[0] if identifiers else None
+        results.append({
+            "case_id": case_id,
+            "map_latitude": location.get("map_latitude"),
+            "map_longitude": location.get("map_longitude"),
+            "location_precision": location.get("location_precision"),
+            "location_text": location_record.location_text,
+            "distance_from_home_miles": location.get("distance_from_home_miles"),
+            "holding_entity": custody_raw.get("holding_entity") or "",
+            "custody_label": custody_raw.get("custody_label") or "Status unknown",
+            "source_platform": custody_raw.get("source_platform"),
+            "reported_at": event_date,
+            "posted_at": current_raw.get("posted_at"),
+            "match_score": float(match.match_score or 0) if match else 0,
+            "image_url": image_post.image_url if image_post else None,
+            "primary_external_id": {"label": identity.display_label, "value": identity.value} if identity else None,
+            "record_count": len(all_members),
+        })
+    results.sort(key=lambda item: (item["reported_at"] is not None, item["reported_at"] or datetime.min), reverse=True)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("candidate_cases.map %dms cases=%d posts=%d", int((time.perf_counter()-started)*1000), len(results), len(all_posts))
+    return results
 
 
 @app.patch("/api/candidate-cases/{case_id}/review")
@@ -1829,24 +1971,31 @@ def queue_stats(
     not_before: datetime | None = None,
     db: Session = Depends(get_db),
 ):
-    ensure_candidate_cases(db)
+    started = time.perf_counter()
     cutoff = (not_before if not_before.tzinfo else not_before.replace(tzinfo=timezone.utc)) if not_before else None
     grouped = {state: 0 for state in ("new", "possible", "needs_review", "dismissed", "confirmed")}
+    cases = {case.id: case for case in db.scalars(select(CandidateCase))}
     high_new = with_photo = 0
-    for case in db.scalars(select(CandidateCase)):
-        members = list(db.scalars(select(PetPost).join(CandidateCasePost, CandidateCasePost.post_id == PetPost.id)
-                                   .where(CandidateCasePost.case_id == case.id)))
-        recent = [row for row in members if not is_source_inactive(row) and (not cutoff or (
-            (event_time := _candidate_event_timestamp(row)) is not None and event_time >= cutoff
-        ))]
-        if not recent:
-            continue
-        grouped[case.review_state] = grouped.get(case.review_state, 0) + 1
-        if case.review_state == "new" and max((row.match_score for row in recent), default=0) >= 65:
-            high_new += 1
-        if case.review_state == "new" and any(row.image_url for row in recent):
-            with_photo += 1
-    return {
+    if cases:
+        rows = db.execute(select(CandidateCasePost.case_id, PetPost).join(
+            PetPost, PetPost.id == CandidateCasePost.post_id
+        ).where(CandidateCasePost.case_id.in_(list(cases)))).all()
+        recent_by_case: dict[int, list[PetPost]] = {}
+        for case_id, post in rows:
+            if is_source_inactive(post):
+                continue
+            event_time = _candidate_event_timestamp(post)
+            if cutoff and (event_time is None or event_time < cutoff):
+                continue
+            recent_by_case.setdefault(case_id, []).append(post)
+        for case_id, recent in recent_by_case.items():
+            case = cases[case_id]
+            grouped[case.review_state] = grouped.get(case.review_state, 0) + 1
+            if case.review_state == "new" and max((row.match_score for row in recent), default=0) >= 65:
+                high_new += 1
+            if case.review_state == "new" and any(row.image_url for row in recent):
+                with_photo += 1
+    result = {
         "new": grouped.get("new", 0),
         "possible": grouped.get("possible", 0),
         "needs_review": grouped.get("needs_review", 0),
@@ -1855,6 +2004,9 @@ def queue_stats(
         "high_priority_new": high_new,
         "new_with_source_photo": with_photo,
     }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("queue_stats %dms cases=%d", int((time.perf_counter()-started)*1000), len(cases))
+    return result
 
 
 @app.post("/api/posts/{post_id}/review", response_model=PetPostOut)

@@ -58,7 +58,7 @@ def _sort_time(item: dict) -> float:
     return value.timestamp()
 
 
-@router.get("/{case_id}")
+@router.get("/{case_id:int}")
 def get_candidate_case(case_id: int, db: Session = Depends(get_db)):
     case = _case_or_404(db, case_id)
     output = case_output(db, case)
@@ -212,8 +212,8 @@ def split_case(case_id: int, payload: CandidateCaseSplitIn, db: Session = Depend
             if identifier:
                 identifier.case_id = new_case.id
 
-    case.primary_post_id = choose_primary_post(remaining_posts, db).id
-    new_case.primary_post_id = choose_primary_post(selected_posts, db).id
+    case.primary_post_id = choose_primary_post(remaining_posts).id
+    new_case.primary_post_id = choose_primary_post(selected_posts).id
     db.add(SurveyorEvent(event_type="candidate_case_split", entity_type="candidate_case",
         entity_id=str(case_id), action=f"Split into case #{new_case.id}",
         after_json=f'{{"new_case_id": {new_case.id}, "post_ids": {sorted(selected_ids)}}}', notes=payload.reason))

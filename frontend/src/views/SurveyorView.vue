@@ -113,12 +113,16 @@ let geoWatchId = null
 let checkpointBusy = false
 let cameraHandleDrag = null
 let screenWakeLock = null
+let candidateMapLoaded = false
+let candidateMapRequest = null
+let surveyorCoreLoaded = false
 
 const types = PIN_TYPES
 watch(snapSettings, settings => { try { localStorage.setItem(SNAP_STORAGE, JSON.stringify(settings)) } catch {} }, { deep: true })
 watch(layerSettings, settings => {
   try { localStorage.setItem(LAYER_STORAGE, JSON.stringify(settings)) } catch {}
   candidatesVisible.value = settings.candidates
+  if (settings.candidates && surveyorCoreLoaded && !candidateMapLoaded) loadCandidates()
   cameraHistoryVisible.value = settings.cameraHistory
   for (const layer of ['surveyor-zones-fill', 'surveyor-zones-outline', 'surveyor-lines', 'surveyor-points', 'surveyor-icons', 'surveyor-labels', 'surveyor-access-badges', 'surveyor-access-context', 'surveyor-task-badges', 'surveyor-task-counts']) {
     if (map?.getLayer(layer)) map.setLayoutProperty(layer, 'visibility', settings.objects ? 'visible' : 'none')
@@ -182,8 +186,9 @@ async function loadObjects() {
       map?.flyTo({ center, zoom: Math.max(map.getZoom(), 14) })
     }
   } catch (err) { error.value = err.message }
-  finally { loading.value = false }
-  loadCandidates()
+  finally { loading.value = false; surveyorCoreLoaded = true }
+  const defer = window.requestIdleCallback || (callback => window.setTimeout(callback, 350))
+  defer(() => { if (layerSettings.value.candidates) loadCandidates() })
   loadCameras()
   loadLinks()
   loadActiveSession()
@@ -457,21 +462,28 @@ async function finishSearch(result) {
 }
 
 async function loadCandidates() {
+  if (candidateMapLoaded || candidateMapRequest) return candidateMapRequest
+  candidateMapRequest = (async () => {
   try {
-    const response = await fetch(`${API}/api/candidate-cases?limit=2000&sort=newest&max_distance_miles=500`)
+    const response = await fetch(`${API}/api/candidate-cases/map?max_distance_miles=500`)
     if (!response.ok) return
     candidates.value = (await response.json()).filter(post => post.map_latitude != null && post.map_longitude != null)
+      .map(post => ({ ...post, id: post.case_id }))
+    candidateMapLoaded = true
     refreshCandidates()
   } catch { /* Candidate reports remain an optional layer. */ }
+  finally { candidateMapRequest = null }
+  })()
+  return candidateMapRequest
 }
 
 function candidateCollection() {
   return { type: 'FeatureCollection', features: candidates.value.filter(post => inTimeline(post.reported_at || post.posted_at || post.first_seen_at)).map(post => ({
-    type: 'Feature', id: post.case_id || post.id, properties: { id: post.case_id || post.id, primary_post_id: post.primary_post_id, title: post.holding_entity || post.custody_label || post.name || 'Candidate report', source: post.source_platform || post.source,
-      source_id: post.source_id, source_url: post.source_url || '', reported_at: post.reported_at || '', posted_at: post.posted_at || '',
-      first_seen_at: post.first_seen_at || '', location_text: post.location_text || '', match_score: post.match_score ?? 0,
+    type: 'Feature', id: post.case_id, properties: { id: post.case_id, case_id: post.case_id, title: post.holding_entity || post.custody_label || 'Candidate report', source: post.source_platform || '',
+      reported_at: post.reported_at || '', posted_at: post.posted_at || '',
+      location_text: post.location_text || '', match_score: post.match_score ?? 0,
       distance_from_home_miles: post.distance_from_home_miles ?? null, location_precision: post.location_precision || '', image_url: post.image_url || '',
-      record_count: post.record_count || 1, external_ids: post.external_ids || [], holding_entity: post.holding_entity || '', custody_label: post.custody_label || '' },
+      record_count: post.record_count || 1, primary_external_id: post.primary_external_id || null, holding_entity: post.holding_entity || '', custody_label: post.custody_label || '' },
     geometry: { type: 'Point', coordinates: [Number(post.map_longitude), Number(post.map_latitude)] }
   })) }
 }
@@ -914,7 +926,7 @@ async function deleteAttachment(attachment) {
   } catch (err) { error.value = err.message }
 }
 
-function chooseCandidate(event) {
+async function chooseCandidate(event) {
   const userObjects = map.queryRenderedFeatures(event.point, { layers: ['trail-camera-points', 'surveyor-points', 'surveyor-zones-fill', 'surveyor-lines', 'surveyor-task-badges'] })
   if (userObjects.length) { chooseObject(event); return }
   const id = Number(event.features?.[0]?.properties?.id)
@@ -922,6 +934,10 @@ function chooseCandidate(event) {
   selected.value = null
   selectedHistoricalPlacement.value = null
   refreshCameraSource()
+  try {
+    const response = await fetch(`${API}/api/candidate-cases/${id}`)
+    if (response.ok && selectedCandidate.value?.id === id) selectedCandidate.value = await response.json()
+  } catch { /* Keep the useful map summary if rich detail is unavailable. */ }
 }
 
 function showCandidateCluster(feature) {
@@ -1239,7 +1255,7 @@ onMounted(() => {
       paint: { 'text-color': ['match', ['get', 'access_status'], 'permission_granted', '#267148', 'partial_permission', '#ae781d', 'permission_denied', '#a34232', 'do_not_contact', '#762722', '#57675e'], 'text-halo-color': '#fffaf0', 'text-halo-width': 2 } })
     map.addLayer({ id: 'surveyor-access-context', type: 'symbol', source: 'surveyor-objects', minzoom: 15,
       filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'object_type'], 'access']],
-      layout: { 'text-field': ['concat', ['case', ['>', ['get', 'dog_count'], 0], ['concat', 'D', ['to-string', ['get', 'dog_count']]], ''], ['case', ['>', ['get', 'outdoor_cat_count'], 0], ['concat', ' · C', ['to-string', ['get', 'outdoor_cat_count']]], ''], ['case', ['==', ['get', 'camera_permission'], 'yes'], ' · CAM', '']],
+      layout: { 'text-field': ['concat', ['case', ['>', ['coalesce', ['get', 'dog_count'], 0], 0], ['concat', 'D', ['to-string', ['coalesce', ['get', 'dog_count'], 0]]], ''], ['case', ['>', ['coalesce', ['get', 'outdoor_cat_count'], 0], 0], ['concat', ' · C', ['to-string', ['coalesce', ['get', 'outdoor_cat_count'], 0]]], ''], ['case', ['==', ['get', 'camera_permission'], 'yes'], ' · CAM', '']],
         'text-size': 9, 'text-offset': [1, 1.05], 'text-allow-overlap': false }, paint: { 'text-color': '#34483c', 'text-halo-color': '#fffaf0', 'text-halo-width': 1.5 } })
     map.addLayer({ id: 'trail-camera-points', type: 'circle', source: 'surveyor-objects', filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'object_type'], 'trail_camera']], paint: {
       'circle-radius': 9, 'circle-color': '#477b7a', 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2

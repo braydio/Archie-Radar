@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from app import main
 
 
 def create_report(client: TestClient, source_id: str, name: str = "Found cat") -> dict:
@@ -51,6 +52,31 @@ def test_candidate_case_date_filters_handle_naive_sqlite_timestamps(client: Test
 
     assert recent.status_code == 200, recent.text
     assert len(recent.json()) == 1
+
+
+def test_candidate_reads_do_not_run_full_identity_backfill(client: TestClient, monkeypatch):
+    create_report(client, "case-read-no-backfill")
+
+    def unexpected_backfill(_db):
+        raise AssertionError("read endpoint invoked full identity backfill")
+
+    monkeypatch.setattr(main, "ensure_candidate_cases", unexpected_backfill)
+    assert client.get("/api/candidate-cases").status_code == 200
+    assert client.get("/api/queue-stats").status_code == 200
+
+
+def test_candidate_map_endpoint_is_one_lean_record_per_case(client: TestClient):
+    create_report(client, "case-map-a", "Milo")
+    create_report(client, "case-map-b", "Otis")
+
+    response = client.get("/api/candidate-cases/map")
+
+    assert response.status_code == 200, response.text
+    items = response.json()
+    assert len(items) == 2
+    assert len({item["case_id"] for item in items}) == 2
+    assert all(item["map_latitude"] is not None for item in items)
+    assert all("source_records" not in item and "case_images" not in item and "parsed_traits" not in item for item in items)
 
 
 def test_candidate_case_workspace_exposes_detail_notes_and_activity(client: TestClient):

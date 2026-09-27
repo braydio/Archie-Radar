@@ -58,6 +58,8 @@ export default {
     const filterButton = ref(null)
     const refreshBusy = ref({})
     const refreshReceipt = ref({})
+    let candidateFeedController = null
+    let candidateRequestVersion = 0
 
     const state = ref('new')
     const sort = ref('smart')
@@ -279,6 +281,10 @@ export default {
     }
 
     async function load() {
+      candidateFeedController?.abort()
+      const controller = new AbortController()
+      candidateFeedController = controller
+      const requestVersion = ++candidateRequestVersion
       loading.value = true
       error.value = ''
       try {
@@ -311,13 +317,14 @@ export default {
         if (f.notBefore) params.set('not_before', `${f.notBefore}T00:00:00Z`)
         if (f.maxDistance < 500) params.set('max_distance_miles', String(f.maxDistance))
         params.set('limit', '500')
-        const res = await fetch(`${API}/api/candidate-cases?${params}`)
+        const res = await fetch(`${API}/api/candidate-cases?${params}`, { signal: controller.signal })
         if (!res.ok) throw new Error(`Candidate feed ${res.status}`)
-        posts.value = clientPrioritize(await res.json(), f)
+        const responsePosts = await res.json()
+        if (requestVersion === candidateRequestVersion) posts.value = clientPrioritize(responsePosts, f)
       } catch (e) {
-        error.value = e?.message || String(e)
+        if (e?.name !== 'AbortError' && requestVersion === candidateRequestVersion) error.value = e?.message || String(e)
       } finally {
-        loading.value = false
+        if (requestVersion === candidateRequestVersion) loading.value = false
       }
     }
 
@@ -500,7 +507,11 @@ export default {
       }
       catch (e) { error.value = e?.message || String(e) }
     })
-    onBeforeUnmount(() => document.removeEventListener('pointerdown', handleOutside))
+    onBeforeUnmount(() => {
+      candidateRequestVersion += 1
+      candidateFeedController?.abort()
+      document.removeEventListener('pointerdown', handleOutside)
+    })
 
     return {
       API, posts, referencePhotos, searchConfig, queueStats, loading, uploading, error, scanSummary,

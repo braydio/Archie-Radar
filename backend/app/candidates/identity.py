@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import (CandidateCase, CandidateCaseMerge, CandidateCasePost, CandidateIdentifier,
@@ -138,11 +138,11 @@ def extract_identifiers(post: PetPost):
     return [item] if item else []
 
 
-def choose_primary_post(posts: list[PetPost], db: Session | None = None) -> PetPost:
+def choose_primary_post(posts: list[PetPost], visions: dict[int, PostVision] | None = None) -> PetPost:
     def quality(post: PetPost):
         raw = _raw(post)
         richness = sum(bool(v) for v in (post.name, post.description, post.location_text, post.source_url, raw.get("status_text")))
-        vision = db.scalar(select(PostVision).where(PostVision.post_id == post.id)) if db is not None else None
+        vision = (visions or {}).get(post.id)
         usable_image = bool(post.image_url) and not (vision and vision.status == "no_photo")
         return (usable_image, post.latitude is not None and post.longitude is not None,
                 richness, bool(raw.get("holding_entity")), post.reported_at.timestamp() if post.reported_at else 0,
@@ -361,36 +361,61 @@ def find_or_create_case(db: Session, post: PetPost) -> CandidateCase:
     return case
 
 
-def ensure_candidate_cases(db: Session) -> int:
-    posts = list(db.scalars(select(PetPost).order_by(PetPost.id)))
+def ensure_case_for_posts(db: Session, post_ids: list[int]) -> int:
+    """Incrementally reconcile only the source records changed by ingestion."""
+    ids = list(dict.fromkeys(int(value) for value in post_ids))
+    if not ids:
+        return 0
+    posts = list(db.scalars(select(PetPost).where(PetPost.id.in_(ids))))
+    case_ids = set()
     for post in posts:
-        find_or_create_case(db, post)
-    cases = list(db.scalars(select(CandidateCase)))
-    for case in cases:
-        members = list(db.scalars(select(PetPost).join(CandidateCasePost, CandidateCasePost.post_id == PetPost.id)
-                                   .where(CandidateCasePost.case_id == case.id)))
-        if not members:
-            continue
-        states = {post.review_state for post in members}
-        case.review_state = next((state for state in REVIEW_PRECEDENCE if state in states), "new")
-        primary = choose_primary_post(members, db)
-        case.primary_post_id = primary.id
-        raw = _raw(primary)
-        case.display_name = primary.name
-        case.holding_entity = raw.get("holding_entity")
+        case_ids.add(find_or_create_case(db, post).id)
+    if case_ids:
+        memberships = db.execute(select(CandidateCasePost.case_id, PetPost).join(
+            PetPost, PetPost.id == CandidateCasePost.post_id
+        ).where(CandidateCasePost.case_id.in_(case_ids))).all()
+        posts_by_case: dict[int, list[PetPost]] = {}
+        member_ids = []
+        for case_id, post in memberships:
+            posts_by_case.setdefault(case_id, []).append(post)
+            member_ids.append(post.id)
+        visions = {row.post_id: row for row in db.scalars(select(PostVision).where(PostVision.post_id.in_(member_ids)))} if member_ids else {}
+        cases_by_id = {case.id: case for case in db.scalars(select(CandidateCase).where(CandidateCase.id.in_(case_ids)))}
+        for case_id, members in posts_by_case.items():
+            case = cases_by_id.get(case_id)
+            if case is None:
+                continue
+            states = {post.review_state for post in members}
+            case.review_state = next((state for state in REVIEW_PRECEDENCE if state in states), "new")
+            primary = choose_primary_post(members, visions)
+            case.primary_post_id = primary.id
+            case.display_name = primary.name
+            case.holding_entity = _raw(primary).get("holding_entity")
     db.commit()
-    return len(cases)
+    return len(case_ids)
 
 
-def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
-    memberships = list(db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)))
-    posts = [db.get(PetPost, member.post_id) for member in memberships]
-    posts = [post for post in posts if post]
+def ensure_candidate_cases(db: Session) -> int:
+    """Startup-only additive backfill for legacy posts that lack a case link."""
+    missing_ids = list(db.scalars(select(PetPost.id).outerjoin(
+        CandidateCasePost, CandidateCasePost.post_id == PetPost.id
+    ).where(CandidateCasePost.id.is_(None)).order_by(PetPost.id)))
+    if missing_ids:
+        ensure_case_for_posts(db, missing_ids)
+    return int(db.scalar(select(func.count(CandidateCase.id))) or 0)
+
+
+def case_output(db: Session, case: CandidateCase, profile=None, *, posts=None, visions=None, identifiers=None) -> dict:
+    if posts is None:
+        memberships = list(db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)))
+        posts = [db.get(PetPost, member.post_id) for member in memberships]
+        posts = [post for post in posts if post]
     if not posts:
         return {"case_id": case.id, "record_count": 0, "source_records": []}
-    primary = next((post for post in posts if post.id == case.primary_post_id), None) or choose_primary_post(posts, db)
+    primary = next((post for post in posts if post.id == case.primary_post_id), None) or choose_primary_post(posts, visions)
     profile = profile or get_or_create_profile(db)
-    visions = {row.post_id: row for row in db.scalars(select(PostVision).where(PostVision.post_id.in_([post.id for post in posts])))}
+    if visions is None:
+        visions = {row.post_id: row for row in db.scalars(select(PostVision).where(PostVision.post_id.in_([post.id for post in posts])))}
     output_by_id = {post.id: post_output(post, visions.get(post.id), profile) for post in posts}
     primary_output = output_by_id[primary.id]
     records = []
@@ -412,8 +437,11 @@ def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
             "listing_state_reason": _raw(post).get("listing_state_reason"),
             "listing_state_checked_at": _raw(post).get("listing_state_checked_at"),
             "identifier_label": next((item[3] for item in extract_identifiers(post)), "Record ID")})
-    identifiers = list(db.scalars(select(CandidateIdentifier).where(
-        CandidateIdentifier.case_id == case.id, CandidateIdentifier.is_identity_key.is_(True)).order_by(CandidateIdentifier.identifier_kind, CandidateIdentifier.id)))
+    if identifiers is None:
+        identifiers = list(db.scalars(select(CandidateIdentifier).where(
+            CandidateIdentifier.case_id == case.id, CandidateIdentifier.is_identity_key.is_(True)).order_by(CandidateIdentifier.identifier_kind, CandidateIdentifier.id)))
+    else:
+        identifiers = [row for row in identifiers if row.case_id == case.id and row.is_identity_key]
     known_ids = {(row.namespace, row.value) for row in identifiers}
     external_ids = [{"kind": row.identifier_kind, "label": row.display_label,
                      "value": row.value, "namespace": row.namespace} for row in identifiers]
