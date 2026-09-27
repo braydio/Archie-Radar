@@ -1,5 +1,6 @@
 <script>
 import { computed, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import { dateOnly, exactDate, relativeTime, sourceLabel, statusLabel } from '../lib/format.js'
 import CandidateMedia from './candidates/CandidateMedia.vue'
 
@@ -16,7 +17,7 @@ const SOURCE_ACCENTS = {
 
 export default {
   name: 'CandidateCard',
-  components: { CandidateMedia },
+  components: { CandidateMedia, RouterLink },
   props: {
     post: { type: Object, required: true },
     rank: { type: Number, default: 1 }
@@ -158,6 +159,7 @@ export default {
         <strong v-for="identifier in identityIds" :key="identifier.namespace + identifier.value">{{ identifier.label }} {{ identifier.value }}</strong>
         <span>Radar case #{{ post.case_id || post.id }}<template v-if="post.record_count > 1"> · {{ post.record_count }} source records</template></span>
       </div>
+      <RouterLink class="candidate-case-open" :to="`/candidates/${post.case_id || post.id}`">Open case workspace →</RouterLink>
 
       <div class="date-facts primary-event-date">
         <template v-if="eventAt">

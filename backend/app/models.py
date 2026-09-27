@@ -66,6 +66,15 @@ class CandidateCasePost(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CandidateCaseNote(Base):
+    __tablename__ = "candidate_case_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("candidate_cases.id", ondelete="CASCADE"), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class CandidateIdentifier(Base):
     __tablename__ = "candidate_identifiers"
     __table_args__ = (UniqueConstraint("namespace", "value", name="uq_candidate_identifiers_namespace_value"),)

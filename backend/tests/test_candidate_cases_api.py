@@ -51,3 +51,19 @@ def test_candidate_case_date_filters_handle_naive_sqlite_timestamps(client: Test
 
     assert recent.status_code == 200, recent.text
     assert len(recent.json()) == 1
+
+
+def test_candidate_case_workspace_exposes_detail_notes_and_activity(client: TestClient):
+    create_report(client, "case-workspace-1", "Milo")
+    case_id = client.get("/api/candidate-cases").json()[0]["case_id"]
+
+    detail = client.get(f"/api/candidate-cases/{case_id}")
+    note = client.post(f"/api/candidate-cases/{case_id}/notes", json={"body": "Asked finder for a side photo."})
+    notes = client.get(f"/api/candidate-cases/{case_id}/notes")
+    timeline = client.get(f"/api/candidate-cases/{case_id}/timeline")
+
+    assert detail.status_code == 200
+    assert note.status_code == 201, note.text
+    assert notes.json()[0]["body"] == "Asked finder for a side photo."
+    assert any(item["kind"] == "note" for item in timeline.json())
+    assert any(item["kind"] == "source_record" for item in timeline.json())
