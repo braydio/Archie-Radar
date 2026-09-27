@@ -4,7 +4,8 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 
 const AssistantMiniMap = defineAsyncComponent(() => import('./AssistantMiniMap.vue'))
 
 const emit = defineEmits(['open-surveyor'])
-const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
+import { API_BASE } from '../../apiBase.js'
+const API = API_BASE
 const open = ref(false)
 const query = ref('')
 const matches = ref([])

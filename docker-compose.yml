@@ -3,7 +3,7 @@ services:
     build: ./backend
     environment:
       ARCHIE_DATABASE_URL: sqlite:////data/archie_radar.db
-      ARCHIE_CORS_ORIGINS: "*"
+      ARCHIE_CORS_ORIGINS: ${ARCHIE_CORS_ORIGINS:-*}
       ARCHIE_MEDIA_DIR: /data/media
       ARCHIE_PAWBOOST_AREAS: ${ARCHIE_PAWBOOST_AREAS:-chapel-hill-nc-27516,durham-nc-27701,mebane-nc-27302,pittsboro-nc-27312,raleigh-nc-27601,sanford-nc-27330}
       ARCHIE_PAWBOOST_PAGES: ${ARCHIE_PAWBOOST_PAGES:-2}
@@ -33,12 +33,13 @@ services:
     volumes:
       - archie-data:/data
     ports:
-      - "8000:8000"
+      - "${ARCHIE_API_HOST_PORT:-8001}:8000"
 
   web:
     build: ./frontend
     environment:
-      VITE_API_BASE: ""
+      VITE_API_BASE: ${VITE_API_BASE:-}
+      VITE_API_PORT: ${ARCHIE_API_HOST_PORT:-8001}
     ports:
       - "5173:5173"
     depends_on:

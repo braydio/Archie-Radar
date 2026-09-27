@@ -6,6 +6,7 @@ import FilterSection from '../components/FilterSection.vue'
 import SearchMap from '../components/SearchMap.vue'
 import FacebookGroupsPanel from '../components/FacebookGroupsPanel.vue'
 import { sourceLabel, statusLabel } from '../lib/format.js'
+import { API_BASE } from '../apiBase.js'
 
 const FILTER_STORAGE = 'archie-radar-v09-filters'
 const CASE_RETURN_STORAGE = 'archie-radar-case-return'
@@ -40,7 +41,7 @@ export default {
   name: 'App',
   components: { CandidateCard, FilterSection, SearchMap, FacebookGroupsPanel },
   setup() {
-    const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
+    const API = API_BASE
     const posts = ref([])
     const referencePhotos = ref([])
     const searchConfig = ref(null)

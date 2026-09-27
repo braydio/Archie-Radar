@@ -35,7 +35,8 @@ import { createUndoStack } from '../surveyor/undoStack.js'
 import { clearSurveyorDraft, readSurveyorDraft } from '../surveyor/draftStorage.js'
 import { clearLocationFocus, getLocationFocus } from '../surveyor/locationFocus.js'
 
-const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
+import { API_BASE } from '../apiBase.js'
+const API = API_BASE
 const route = useRoute()
 const timelineWindow = ref({ preset: '30d', from: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 16), to: new Date().toISOString().slice(0, 16) })
 const LAYER_STORAGE = 'archie-radar-surveyor-layers'

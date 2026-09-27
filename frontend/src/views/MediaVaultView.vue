@@ -5,7 +5,8 @@ import MediaViewer from '../components/media/MediaViewer.vue'
 import { downloadMediaBundle } from '../surveyor/mediaCapture.js'
 import { useRoute, useRouter } from 'vue-router'
 
-const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
+import { API_BASE } from '../apiBase.js'
+const API = API_BASE
 const route = useRoute()
 const router = useRouter()
 const items = ref([])

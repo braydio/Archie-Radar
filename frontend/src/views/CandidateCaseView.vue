@@ -7,7 +7,8 @@ import MediaGallery from '../components/media/MediaGallery.vue'
 import CandidateCaseMap from '../components/candidates/CandidateCaseMap.vue'
 import { setLocationFocus } from '../surveyor/locationFocus.js'
 
-const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
+import { API_BASE } from '../apiBase.js'
+const API = API_BASE
 const route = useRoute()
 const router = useRouter()
 const item = ref(null)

@@ -3,7 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { eventLabel } from '../surveyor/eventLabels.js'
 
-const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
+import { API_BASE } from '../apiBase.js'
+const API = API_BASE
 const entries = ref([])
 const filter = ref('all')
 const loading = ref(true)
