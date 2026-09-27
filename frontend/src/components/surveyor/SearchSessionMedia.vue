@@ -1,7 +1,7 @@
 <script setup>
 import { ref, watch } from 'vue'
-import PhotoCapture from './PhotoCapture.vue'
-import AudioRecorder from './AudioRecorder.vue'
+import MediaCaptureSheet from './MediaCaptureSheet.vue'
+import MediaGallery from '../media/MediaGallery.vue'
 import { uploadMedia } from '../../surveyor/mediaCapture.js'
 const props = defineProps({ api: { type: String, required: true }, sessionId: { type: Number, required: true } })
 const emit = defineEmits(['close'])
@@ -9,6 +9,7 @@ const attachments = ref([])
 const caption = ref('')
 const uploading = ref(false)
 const error = ref('')
+const captureOpen = ref(false)
 async function load() {
   try { const response = await fetch(`${props.api}/api/surveyor/sessions/${props.sessionId}/attachments`); if (!response.ok) throw new Error(); attachments.value = await response.json() }
   catch { attachments.value = []; error.value = 'Session media could not be loaded.' }
@@ -32,9 +33,9 @@ watch(() => props.sessionId, load, { immediate: true })
   <form class="field-sheet session-media-sheet" @submit.prevent>
     <header><div><p class="eyebrow">ACTIVE SEARCH · SESSION MEDIA</p><h2>Field media</h2></div><button type="button" aria-label="Close" @click="emit('close')">×</button></header>
     <label>Caption for next attachment<input v-model="caption" maxlength="500" /></label>
-    <PhotoCapture @select="upload" /><AudioRecorder @select="upload" @error="error=$event" />
-    <label class="attachment-upload">{{ uploading ? 'Uploading…' : 'Add file' }}<input type="file" accept="audio/*,image/*,application/pdf,text/plain" :disabled="uploading" @change="upload($event.target.files?.[0]); $event.target.value=''" /></label>
+    <button type="button" class="secondary-button" :disabled="uploading" @click="captureOpen=!captureOpen">{{ uploading ? 'Uploading…' : '＋ Media' }}</button>
+    <MediaCaptureSheet v-if="captureOpen" :api="api" @select="upload($event); captureOpen=false" @cancel="captureOpen=false" @error="error=$event" />
     <p v-if="error" class="media-capture-error" role="status">{{ error }}</p>
-    <section class="attachment-list"><h3>Session attachments · {{ attachments.length }}</h3><article v-for="item in attachments" :key="item.id" class="evidence-attachment"><img v-if="item.attachment_type==='image'" :src="`${api}${item.media_url}`" :alt="item.caption || 'Search evidence photo'"/><audio v-else-if="item.attachment_type==='audio'" :src="`${api}${item.media_url}`" controls preload="none"></audio><a v-else :href="`${api}${item.media_url}`" target="_blank" rel="noreferrer">Open attachment</a><p>{{ item.caption || item.source }}</p><small>{{ item.observed_at ? new Date(item.observed_at).toLocaleString() : new Date(item.created_at).toLocaleString() }}</small><button type="button" class="danger-button" @click="remove(item)">Delete</button></article></section>
+    <MediaGallery :items="attachments" :api="api" title="Session media" @delete="remove" />
   </form>
 </template>

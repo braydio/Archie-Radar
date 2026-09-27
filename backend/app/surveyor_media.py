@@ -7,16 +7,19 @@ import re
 import shutil
 import subprocess
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, UploadFile
 from PIL import Image, ImageOps
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.staticfiles import StaticFiles
 
 CHUNK_SIZE = 1024 * 1024
 ALLOWED_TYPES = {
     "image/jpeg": "image", "image/png": "image", "image/webp": "image", "image/gif": "image",
+    "image/heic": "image", "image/heif": "image",
     "video/mp4": "video", "video/webm": "video", "video/quicktime": "video", "video/3gpp": "video",
     "audio/mpeg": "audio", "audio/mp3": "audio", "audio/wav": "audio", "audio/x-wav": "audio",
     "audio/webm": "audio", "audio/ogg": "audio", "audio/mp4": "audio", "audio/m4a": "audio",
@@ -48,6 +51,26 @@ def contained_path(media_dir: Path, storage_path: str) -> Path:
     if path != root and root not in path.parents:
         raise HTTPException(status_code=400, detail="Attachment path is outside the media directory")
     return path
+
+
+class PublicMediaFiles(StaticFiles):
+    """Serve existing public/candidate assets without exposing Surveyor originals."""
+    async def get_response(self, path: str, scope):
+        if Path(path).parts[:1] == ("surveyor",):
+            raise StarletteHTTPException(status_code=404)
+        return await super().get_response(path, scope)
+
+
+def delete_attachment_files(row, media_dir: Path) -> None:
+    paths = []
+    if row.storage_path:
+        paths.append(row.storage_path)
+    for relative in (attachment_metadata(row).get("derivatives") or {}).values():
+        paths.append((Path("surveyor") / relative).as_posix())
+    resolved_paths = [contained_path(media_dir, relative) for relative in paths]
+    for path in resolved_paths:
+        if path.is_file():
+            path.unlink()
 
 
 def _format_for_mime(mime_type: str) -> str:
@@ -82,7 +105,7 @@ def _make_image_derivatives(original: Path, derived: Path, stem: str, mime_type:
             destination.parent.mkdir(parents=True, exist_ok=True)
             display.save(destination, "JPEG", quality=86, optimize=True)
             paths[label] = str(destination.relative_to(original.parents[1]))
-        result = {"width": width, "height": height, "derivatives": paths}
+        result = {"width": width, "height": height, "aspect_ratio": round(width / height, 6) if height else None, "derivatives": paths}
         if gps:
             result["exif_gps"] = gps
         return result
@@ -162,11 +185,6 @@ async def store_upload(
         details: dict[str, Any] = {}
         derived_dir = media_dir / "surveyor" / "derived"
         if media_type == "image":
-            try:
-                with Image.open(destination) as image:
-                    image.verify()
-            except Exception as exc:
-                raise HTTPException(status_code=422, detail="The selected file is not a valid image") from exc
             details = await asyncio.to_thread(_make_image_derivatives, destination, derived_dir, stem, mime_type)
         elif media_type == "video":
             details = await asyncio.to_thread(_video_details, destination, derived_dir, stem)

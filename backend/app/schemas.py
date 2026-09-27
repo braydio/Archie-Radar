@@ -284,6 +284,7 @@ class SurveyorAttachmentOut(BaseModel):
     duration_seconds: float | None
     width: int | None
     height: int | None
+    aspect_ratio: float | None = None
     file_size_bytes: int
     latitude: float | None
     longitude: float | None
@@ -298,10 +299,14 @@ class SurveyorAttachmentOut(BaseModel):
     source: str
     metadata: dict
     created_at: datetime
+    map_object_name: str | None = None
+    camera_name: str | None = None
+    session_label: str | None = None
+    candidate_case_id: int | None = None
 
 
 class SurveyorMediaExportIn(BaseModel):
-    attachment_ids: list[int] = Field(min_length=1, max_length=500)
+    attachment_ids: list[int] = Field(min_length=1, max_length=2000)
     include_originals: bool = True
     include_manifest_json: bool = True
     include_manifest_csv: bool = True

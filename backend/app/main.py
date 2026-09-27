@@ -79,7 +79,7 @@ from .service import (
 )
 from .settings import get_settings
 from .vision import fingerprint_image
-from .surveyor_media import attachment_metadata, classify_media, contained_path, safe_original_name, store_upload
+from .surveyor_media import PublicMediaFiles, attachment_metadata, classify_media, contained_path, delete_attachment_files, store_upload
 from .traits import ARCHIE_TRAITS, is_archie_compatible
 
 
@@ -347,7 +347,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/media", StaticFiles(directory=str(media_dir)), name="media")
+app.mount("/media", PublicMediaFiles(directory=str(media_dir)), name="media")
 
 
 def _geometry_stats(geometry: dict) -> tuple[float, float, float, float, float, float]:
@@ -447,6 +447,7 @@ def _attachment_output(row: SurveyorAttachment) -> SurveyorAttachmentOut:
         attachment_type=kind, original_filename=metadata.get("original_filename") or metadata.get("source_filename") or Path(row.storage_path or "field-media").name,
         mime_type=metadata.get("mime_type") or metadata.get("content_type") or "application/octet-stream",
         duration_seconds=metadata.get("duration_seconds"), width=metadata.get("width"), height=metadata.get("height"),
+        aspect_ratio=metadata.get("aspect_ratio"),
         file_size_bytes=int(metadata.get("file_size_bytes") or metadata.get("size_bytes") or 0),
         latitude=metadata.get("latitude"), longitude=metadata.get("longitude"),
         media_url=preview, preview_url=preview, thumbnail_url=thumbnail,
@@ -819,12 +820,7 @@ def delete_surveyor_attachment(attachment_id: int, db: Session = Depends(get_db)
     if row is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
     if row.storage_path:
-        media_root = (media_dir / "surveyor").resolve()
-        stored_path = (media_dir / row.storage_path).resolve()
-        if stored_path != media_root and media_root not in stored_path.parents:
-            raise HTTPException(status_code=400, detail="Attachment path is outside the Surveyor media directory")
-        if stored_path.exists() and stored_path.is_file():
-            stored_path.unlink()
+        delete_attachment_files(row, media_dir)
     owner_type = "map_object" if row.map_object_id is not None else "search_session"
     owner_id = row.map_object_id if row.map_object_id is not None else row.search_session_id
     _record_surveyor_event(db, "attachment_deleted", owner_type, owner_id, "Deleted evidence attachment",
@@ -928,10 +924,30 @@ def list_surveyor_media(
             continue
         if observed_to and moment > observed_to:
             continue
-        result.append(_attachment_output(row))
+        output = _attachment_output(row)
+        obj = db.get(SurveyorMapObject, row.map_object_id) if row.map_object_id else None
+        session = db.get(SurveyorSearchSession, row.search_session_id) if row.search_session_id else None
+        camera = db.scalar(select(SurveyorTrailCamera).where(SurveyorTrailCamera.map_object_id == obj.id)) if obj else None
+        candidate_case_id = None
+        if obj:
+            object_properties = json.loads(obj.properties_json or "{}")
+            candidate_case_id = object_properties.get("candidate_case_id")
+        output = output.model_copy(update={
+            "map_object_name": obj.name if obj else None,
+            "camera_name": camera.name if camera else None,
+            "session_label": f"Search #{session.id}" if session else None,
+            "candidate_case_id": candidate_case_id,
+        })
+        result.append(output)
         if len(result) >= limit:
             break
     return result
+
+
+@app.get("/api/surveyor/media/config")
+def surveyor_media_config():
+    return {"max_video_mb": settings.surveyor_max_video_mb, "max_audio_mb": settings.surveyor_max_audio_mb,
+            "max_document_mb": settings.surveyor_max_document_mb, "max_image_mb": round(settings.max_image_bytes / (1024 * 1024), 1)}
 
 
 def _slug(value: str) -> str:

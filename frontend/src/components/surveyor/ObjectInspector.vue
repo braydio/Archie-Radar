@@ -1,12 +1,13 @@
 <script setup>
 import TrailCameraEditor from './TrailCameraEditor.vue'
-import AudioRecorder from './AudioRecorder.vue'
-import PhotoCapture from './PhotoCapture.vue'
+import MediaCaptureSheet from './MediaCaptureSheet.vue'
+import MediaGallery from '../media/MediaGallery.vue'
 import TaskEditor from './TaskEditor.vue'
 import EvidenceEditor from './EvidenceEditor.vue'
 import ChecklistEditor from './ChecklistEditor.vue'
 import { searchFreshness } from '../../surveyor/zoneState.js'
 import { metersToFeet } from '../../surveyor/units.js'
+import { downloadMediaBundle } from '../../surveyor/mediaCapture.js'
 import { ref } from 'vue'
 
 const props = defineProps({ selected: { type: Object, required: true }, types: { type: Array, required: true }, attachments: { type: Array, default: () => [] }, cameraHistory: { type: Array, default: () => [] }, tasks: { type: Array, default: () => [] }, accessRecord: { type: Object, default: null }, evidenceDraft: { type: Object, default: null }, uploading: Boolean, saving: Boolean, api: { type: String, required: true }, activeTool: { type: String, default: 'select' } })
@@ -19,6 +20,16 @@ const cameraFov = defineModel('cameraFov', { type: Number })
 const cameraRange = defineModel('cameraRange', { type: Number })
 const attachmentCaption = defineModel('attachmentCaption', { type: String })
 const taskEditorOpen = ref(false)
+const mediaOpen = ref(false)
+const exportingMedia = ref(false)
+async function exportMedia() {
+  if (!props.attachments.length) return
+  if (!confirm(`Export ${props.attachments.length} media items linked to this ${props.selected.object_type}? Private contact details are excluded.`)) return
+  exportingMedia.value = true
+  try { await downloadMediaBundle(props.api, props.attachments.map(item => item.id)) }
+  catch (cause) { emit('mediaError', cause.message) }
+  finally { exportingMedia.value = false }
+}
 </script>
 
 <template>
@@ -32,19 +43,10 @@ const taskEditorOpen = ref(false)
     <EvidenceEditor v-if="selected.object_type === 'evidence'" :object="selected" :saving="saving" :initial-form="evidenceDraft" @save="emit('saveEvidence', $event)" />
     <ChecklistEditor v-if="selected.object_type === 'note'" :object="selected" @save="emit('saveChecklist', $event)" @followup="emit('createTask', { title: $event.text, task_type: 'other', priority: 'normal', map_object_id: selected.id })" />
     <section class="inspector-followups"><div class="inspector-section-heading"><h3>Follow-ups</h3><button type="button" class="secondary-button" @click="taskEditorOpen=true">＋ Follow-up</button></div><article v-for="task in tasks" :key="task.id" class="inspector-task"><label><input type="checkbox" :checked="task.status === 'completed'" :disabled="task.status === 'dismissed'" @change="emit('updateTask', task, $event.target.checked ? 'completed' : 'open')" /><span>{{ task.title }}</span></label><small>{{ task.priority }} · {{ task.due_at ? new Date(task.due_at).toLocaleString() : 'No due date' }}</small></article><p v-if="!tasks.length" class="inspector-meta">No follow-ups recorded.</p></section>
-    <section class="attachment-list"><h3>Evidence attachments</h3>
-      <article v-for="attachment in attachments" :key="attachment.id" class="evidence-attachment">
-        <img v-if="attachment.attachment_type === 'image'" :src="`${api}${attachment.media_url}`" :alt="attachment.caption || 'Evidence photo'" />
-        <audio v-else-if="attachment.attachment_type === 'audio'" :src="`${api}${attachment.media_url}`" controls preload="none"></audio>
-        <a v-else :href="`${api}${attachment.media_url}`" target="_blank" rel="noreferrer">Open file</a>
-        <p>{{ attachment.caption || attachment.source }}</p>
-        <small>{{ attachment.observed_at ? new Date(attachment.observed_at).toLocaleString() : new Date(attachment.created_at).toLocaleString() }}</small>
-        <button type="button" class="danger-button" @click="emit('deleteAttachment', attachment)">Delete</button>
-      </article>
-      <input v-model="attachmentCaption" class="attachment-caption" placeholder="Caption for next attachment (optional)" />
-      <PhotoCapture @select="emit('upload', $event)" />
-      <AudioRecorder @select="emit('upload', $event)" @error="emit('mediaError', $event)" />
-      <label class="attachment-upload">{{ uploading ? 'Uploading…' : '＋ Add file' }}<input type="file" accept="application/pdf,text/plain,audio/*,image/*" :disabled="uploading" @change="emit('upload', $event)" /></label>
+    <section class="attachment-list"><div class="inspector-section-heading"><h3>Media · {{ attachments.length }}</h3><button v-if="attachments.length" type="button" class="secondary-button" :disabled="exportingMedia" @click="exportMedia">{{ exportingMedia ? 'Preparing…' : `Export ${selected.object_type === 'trail_camera' ? 'camera' : selected.object_type === 'evidence' ? 'evidence' : 'media'} bundle` }}</button></div><MediaGallery :items="attachments" :api="api" title="" @delete="emit('deleteAttachment', $event)" />
+      <input v-model="attachmentCaption" class="attachment-caption" placeholder="Caption for next media (optional)" />
+      <button type="button" class="secondary-button" :disabled="uploading" @click="mediaOpen=!mediaOpen">{{ uploading ? 'Uploading…' : '＋ Media' }}</button>
+      <MediaCaptureSheet v-if="mediaOpen" :api="api" @select="emit('upload', $event); mediaOpen=false" @cancel="mediaOpen=false" @error="emit('mediaError', $event)" />
     </section>
     <div v-if="['Polygon','LineString'].includes(selected.geometry.type) && activeTool !== 'edit'" class="inspector-buttons"><button class="secondary-button" @click="emit('editGeometry')">Edit geometry</button></div>
     <div v-if="selected.geometry.type === 'Point' && selected.object_type !== 'trail_camera'" class="inspector-buttons"><button class="secondary-button" @click="emit('move')">Move on map</button></div>

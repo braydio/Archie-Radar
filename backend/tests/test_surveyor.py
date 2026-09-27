@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 from fastapi.testclient import TestClient
 from io import BytesIO
 from pathlib import Path
@@ -7,7 +8,7 @@ from PIL import Image
 from fastapi import HTTPException
 
 from app import main
-from app.surveyor_media import contained_path
+from app.surveyor_media import PublicMediaFiles, contained_path, delete_attachment_files
 
 
 def create_pin(client: TestClient, coordinates: list[float], name: str = "Field marker") -> dict:
@@ -166,6 +167,7 @@ def test_image_upload_preserves_original_and_serves_separate_derivative(client: 
     assert attachment["mime_type"] == "image/png"
     assert attachment["width"] == 64
     assert attachment["height"] == 48
+    assert attachment["aspect_ratio"] == pytest.approx(4 / 3, abs=1e-5)
     assert attachment["file_size_bytes"] == len(original_bytes)
 
     download = client.get(f"/api/surveyor/attachments/{attachment['id']}/download")
@@ -175,6 +177,9 @@ def test_image_upload_preserves_original_and_serves_separate_derivative(client: 
     assert preview.status_code == 200
     assert preview.headers["content-type"].startswith("image/jpeg")
     assert preview.content != original_bytes
+    assert client.delete(f"/api/surveyor/attachments/{attachment['id']}").status_code == 204
+    assert not list((tmp_path / "surveyor" / "original").glob("*"))
+    assert not list((tmp_path / "surveyor" / "derived").glob("*"))
 
 
 def test_media_export_contains_original_and_context_manifests(client: TestClient, tmp_path: Path, monkeypatch) -> None:
@@ -186,6 +191,10 @@ def test_media_export_contains_original_and_context_manifests(client: TestClient
     }, data={"caption": "Two calls at the creek"})
     assert uploaded.status_code == 201, uploaded.text
     attachment = uploaded.json()
+    library = client.get("/api/surveyor/media?limit=20")
+    assert library.status_code == 200
+    assert library.json()[0]["map_object_name"] == "East Creek"
+    assert client.get("/api/surveyor/media/config").json()["max_video_mb"] == main.settings.surveyor_max_video_mb
 
     exported = client.post("/api/surveyor/media/export", json={"attachment_ids": [attachment["id"]]})
     assert exported.status_code == 200, exported.text
@@ -203,10 +212,50 @@ def test_media_export_contains_original_and_context_manifests(client: TestClient
         assert f"{root}/context/map_objects.json" in names
 
 
+def test_video_upload_keeps_supplied_media_metadata(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "media_dir", tmp_path)
+    obj = create_pin(client, [-79.1, 35.8])
+    uploaded = client.post(f"/api/surveyor/objects/{obj['id']}/attachments", files={
+        "file": ("short-clip.mp4", b"small test video bytes", "video/mp4"),
+    }, data={"duration_seconds": "12.5", "width": "1920", "height": "1080"})
+    assert uploaded.status_code == 201, uploaded.text
+    item = uploaded.json()
+    assert item["attachment_type"] == "video"
+    assert item["duration_seconds"] == pytest.approx(12.5)
+    assert item["width"] == 1920
+    assert item["height"] == 1080
+
+
 def test_attachment_paths_cannot_escape_media_root(tmp_path: Path) -> None:
     with pytest.raises(HTTPException) as error:
         contained_path(tmp_path, "../outside.txt")
     assert error.value.status_code == 400
+
+
+def test_public_media_mount_hides_surveyor_files(tmp_path: Path) -> None:
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    static = PublicMediaFiles(directory=str(tmp_path))
+    with pytest.raises(StarletteHTTPException) as error:
+        asyncio.run(static.get_response("surveyor/original/private.jpg", {"type": "http"}))
+    assert error.value.status_code == 404
+
+
+def test_delete_attachment_rejects_malicious_derivative_before_deleting_original(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    import json
+
+    original = tmp_path / "surveyor" / "original" / "safe.jpg"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"original")
+    outside = tmp_path.parent / "outside.jpg"
+    outside.write_bytes(b"outside")
+    row = SimpleNamespace(storage_path="surveyor/original/safe.jpg",
+        metadata_json=json.dumps({"derivatives": {"preview": "../../../../outside.jpg"}}))
+    with pytest.raises(HTTPException):
+        delete_attachment_files(row, tmp_path)
+    assert original.read_bytes() == b"original"
+    assert outside.read_bytes() == b"outside"
 
 
 def test_session_route_coverage_buffers_in_meters(client: TestClient) -> None:

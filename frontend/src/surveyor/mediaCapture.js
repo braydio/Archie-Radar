@@ -22,11 +22,19 @@ export function stopMediaTracks(stream) {
   stream?.getTracks().forEach(track => track.stop())
 }
 
-export function uploadMedia(api, target, file, { caption = '', observedAt = new Date().toISOString() } = {}) {
+export function uploadMedia(api, target, file, {
+  caption = '', notes = '', observedAt = new Date().toISOString(), source = 'user capture',
+  latitude, longitude, durationSeconds = file?.duration_seconds, width = file?.media_width, height = file?.media_height,
+} = {}) {
   const form = new FormData()
   form.append('file', file, file.name || 'field-media')
   form.append('caption', caption)
   form.append('observed_at', observedAt)
+  form.append('notes', notes)
+  form.append('source', source)
+  if (latitude != null && longitude != null) { form.append('latitude', String(latitude)); form.append('longitude', String(longitude)) }
+  if (durationSeconds != null) form.append('duration_seconds', String(durationSeconds))
+  if (width != null && height != null) { form.append('width', String(width)); form.append('height', String(height)) }
   const path = target.mapObjectId
     ? `/api/surveyor/objects/${target.mapObjectId}/attachments`
     : `/api/surveyor/sessions/${target.searchSessionId}/attachments`
@@ -35,4 +43,19 @@ export function uploadMedia(api, target, file, { caption = '', observedAt = new 
     if (!response.ok) throw new Error(body.detail || 'Could not save field media')
     return body
   })
+}
+
+export async function downloadMediaBundle(api, attachmentIds, options = {}) {
+  if (!attachmentIds.length) throw new Error('No media was selected for export')
+  const response = await fetch(`${api}/api/surveyor/media/export`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ attachment_ids: attachmentIds, include_originals: true, include_manifest_json: true,
+      include_manifest_csv: true, include_context: true, include_exact_coordinates: true, ...options }),
+  })
+  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || 'Media export failed') }
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a'); link.href = url
+  link.download = `archie-radar-export-${new Date().toISOString().slice(0, 10)}.zip`
+  link.click(); URL.revokeObjectURL(url)
 }
