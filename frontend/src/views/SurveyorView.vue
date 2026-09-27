@@ -1234,7 +1234,7 @@ onMounted(() => {
         'circle-stroke-color': ['case', ['>', ['get', 'overdue_count'], 0], '#a73c31', ['>', ['get', 'urgent_count'], 0], '#bf704d', '#728174'],
         'circle-stroke-width': 2 } })
     map.addLayer({ id: 'surveyor-task-counts', type: 'symbol', source: 'surveyor-task-badges', minzoom: 13,
-      filter: ['>', ['get', 'task_count'], 0], layout: { 'text-field': ['to-string', ['get', 'task_count']], 'text-size': 9, 'text-allow-overlap': true, 'text-translate': [13, -13] },
+      filter: ['>', ['get', 'task_count'], 0], layout: { 'text-field': ['to-string', ['get', 'task_count']], 'text-size': 9, 'text-allow-overlap': true, 'text-offset': [1.3, -1.3] },
       paint: { 'text-color': '#293c30' } })
     map.on('click', 'surveyor-points', chooseObject)
     map.on('click', 'surveyor-zones-fill', chooseObject)
