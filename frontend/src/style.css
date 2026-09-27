@@ -678,6 +678,9 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
 .candidate-case-open:hover { text-decoration: underline; }
 .candidate-case-page { width: min(1120px, calc(100% - 24px)); margin: 18px auto 60px; }
 .case-back-link { display: inline-flex; min-height: 44px; align-items: center; color: var(--ink); font-weight: 750; }
+.case-navigation { display: flex; justify-content: space-between; align-items: center; }
+.case-back-link { border: 0; background: transparent; font: inherit; cursor: pointer; }
+.case-neighbor-controls { display: flex; gap: 14px; }
 .candidate-case-hero { display: grid; grid-template-columns: minmax(280px, 42%) minmax(0, 1fr); gap: 22px; align-items: start; background: var(--paper); border: 1px solid var(--line-strong); border-radius: 18px; padding: 16px; }
 .candidate-case-hero > .candidate-media { align-self: start; }
 .candidate-case-facts { min-width: 0; }

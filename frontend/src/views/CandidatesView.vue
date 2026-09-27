@@ -1,11 +1,13 @@
 <script>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import CandidateCard from '../components/CandidateCard.vue'
 import FilterSection from '../components/FilterSection.vue'
 import SearchMap from '../components/SearchMap.vue'
 import { sourceLabel, statusLabel } from '../lib/format.js'
 
 const FILTER_STORAGE = 'archie-radar-v09-filters'
+const CASE_RETURN_STORAGE = 'archie-radar-case-return'
 const DEFAULT_NOT_BEFORE = '2026-06-01'
 const DEFAULT_FILTERS = Object.freeze({
   source: '',
@@ -467,9 +469,35 @@ export default {
       filtersOpen.value = false
     }
 
+    onBeforeRouteLeave((to) => {
+      if (!to.path.startsWith('/candidates/')) return
+      try {
+        sessionStorage.setItem(CASE_RETURN_STORAGE, JSON.stringify({ state: state.value, sort: sort.value,
+          filters: appliedFilters.value, scrollY: window.scrollY, caseIds: posts.value.map(item => item.case_id || item.id) }))
+      } catch {}
+    })
+
     onMounted(async () => {
       document.addEventListener('pointerdown', handleOutside)
-      try { await loadConfig(); await Promise.all([load(), loadReferencePhotos(), loadQueueStats(), loadFilterOptions()]) }
+      let returnState = null
+      try {
+        returnState = JSON.parse(sessionStorage.getItem(CASE_RETURN_STORAGE) || 'null')
+        if (returnState) {
+          sessionStorage.removeItem(CASE_RETURN_STORAGE)
+          state.value = returnState.state || state.value
+          sort.value = returnState.sort || sort.value
+          appliedFilters.value = { ...DEFAULT_FILTERS, ...(returnState.filters || {}) }
+          loadDraft(appliedFilters.value)
+        }
+      } catch { returnState = null }
+      try {
+        await loadConfig()
+        await Promise.all([load(), loadReferencePhotos(), loadQueueStats(), loadFilterOptions()])
+        if (returnState) {
+          await nextTick()
+          requestAnimationFrame(() => window.scrollTo(0, Number(returnState.scrollY || 0)))
+        }
+      }
       catch (e) { error.value = e?.message || String(e) }
     })
     onBeforeUnmount(() => document.removeEventListener('pointerdown', handleOutside))

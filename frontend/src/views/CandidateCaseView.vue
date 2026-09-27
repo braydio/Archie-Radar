@@ -23,6 +23,14 @@ const error = ref('')
 const saving = ref(false)
 const hero = computed(() => item.value?.primary_image || item.value?.case_images?.[0] || null)
 const tabs = ['overview', 'activity', 'media', 'sources']
+const queueNeighbors = computed(() => {
+  try {
+    const state = JSON.parse(sessionStorage.getItem('archie-radar-case-return') || 'null')
+    const ids = state?.caseIds || []
+    const index = ids.indexOf(Number(route.params.caseId))
+    return index < 0 ? { previous: null, next: null } : { previous: ids[index - 1] || null, next: ids[index + 1] || null }
+  } catch { return { previous: null, next: null } }
+})
 function openCurrentLocation() {
   const location = item.value?.current_location
   if (!location || location.map_latitude == null || location.map_longitude == null) return
@@ -97,7 +105,7 @@ watch(() => route.params.caseId, load)
 
 <template>
   <main class="candidate-case-page" v-if="item">
-    <RouterLink class="case-back-link" to="/">← Candidates</RouterLink>
+    <div class="case-navigation"><button class="case-back-link" type="button" @click="router.back()">← Candidates</button><span class="case-neighbor-controls"><RouterLink v-if="queueNeighbors.previous" :to="`/candidates/${queueNeighbors.previous}`">Previous</RouterLink><RouterLink v-if="queueNeighbors.next" :to="`/candidates/${queueNeighbors.next}`">Next</RouterLink></span></div>
     <header class="candidate-case-hero">
       <CandidateMedia v-if="hero" :image="hero" :other-images="item.case_images?.filter(image => image.url !== hero.url) || []" :alt="`Candidate case ${item.case_id} photo`" :case-id="item.case_id" />
       <div class="candidate-case-facts">
@@ -157,5 +165,5 @@ watch(() => route.params.caseId, load)
       </article>
     </section>
   </main>
-  <main v-else class="candidate-case-loading"><RouterLink to="/">← Candidates</RouterLink><p>{{ error || 'Loading candidate case…' }}</p></main>
+  <main v-else class="candidate-case-loading"><button class="case-back-link" type="button" @click="router.back()">← Candidates</button><p>{{ error || 'Loading candidate case…' }}</p></main>
 </template>
