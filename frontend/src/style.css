@@ -696,6 +696,11 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
 .candidate-case-tabs button[aria-current="page"] { border-bottom-color: var(--accent); }
 .candidate-case-content { padding: 18px 4px; }
 .candidate-case-content h2 { margin-top: 0; }
+.candidate-case-map { width: 100%; height: 320px; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.case-source-media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; margin: 12px 0 24px; }
+.case-source-media-grid figure { margin: 0; min-width: 0; padding: 8px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; }
+.case-source-media-grid img { display: block; width: 100%; height: 220px; object-fit: contain; background: #242924; }
+.case-source-media-grid figcaption { padding: 7px 2px 2px; color: var(--muted); font-size: .82rem; }
 .case-note-form { display: grid; gap: 9px; margin: 12px 0 20px; }
 .case-note-form textarea { width: 100%; min-height: 80px; padding: 10px; border: 1px solid var(--line-strong); border-radius: 10px; font: inherit; }
 .case-note-form button { min-height: 44px; justify-self: start; }

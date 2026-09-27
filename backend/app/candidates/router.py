@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import (CandidateCase, CandidateCaseMerge, CandidateCaseNote, CandidateCasePost,
                       CandidateIdentifier, CandidateIdentityExclusion, PetPost, SurveyorAttachment,
-                      SurveyorAttachmentLink, SurveyorEvent, SurveyorMapObject)
+                      SurveyorAttachmentLink, SurveyorEvent, SurveyorMapObject, SurveyorTask)
 from ..surveyor_media import attachment_metadata, contained_path
 from ..settings import get_settings
 from .identity import case_output, choose_primary_post, extract_identifiers, merge_candidate_cases, reverse_case_merge
@@ -60,7 +60,17 @@ def _sort_time(item: dict) -> float:
 @router.get("/{case_id}")
 def get_candidate_case(case_id: int, db: Session = Depends(get_db)):
     case = _case_or_404(db, case_id)
-    return case_output(db, case)
+    output = case_output(db, case)
+    field_objects = []
+    for obj in db.scalars(select(SurveyorMapObject)):
+        properties = _properties(obj.id, db)
+        if properties.get("candidate_case_id") != case_id:
+            continue
+        field_objects.append({"id": obj.id, "object_type": obj.object_type, "subtype": obj.subtype,
+            "name": obj.name, "geometry": json.loads(obj.geometry_json), "status": obj.status,
+            "occurred_at": obj.occurred_at, "created_at": obj.created_at})
+    output["field_objects"] = field_objects
+    return output
 
 
 @router.get("/{case_id}/notes")
@@ -97,6 +107,39 @@ def candidate_case_timeline(case_id: int, db: Session = Depends(get_db)):
               "occurred_at": row.occurred_at, "notes": row.notes} for row in events]
     items.extend({"kind": "note", "id": row.id, "label": "Case note", "body": row.body,
                   "occurred_at": row.created_at} for row in notes)
+    objects = list(db.scalars(select(SurveyorMapObject)))
+    case_object_ids = set()
+    for obj in objects:
+        if _properties(obj.id, db).get("candidate_case_id") == case_id:
+            case_object_ids.add(obj.id)
+    case_objects = [obj for obj in objects if obj.id in case_object_ids]
+    for obj in case_objects:
+        items.append({"kind": "field_object", "id": obj.id,
+            "label": obj.name or f"{obj.subtype or obj.object_type.replace('_', ' ')} recorded",
+            "event_type": obj.subtype or obj.object_type,
+            "occurred_at": obj.occurred_at or obj.created_at})
+    if case_object_ids:
+        linked_events = db.scalars(select(SurveyorEvent).where(
+            SurveyorEvent.entity_type == "map_object",
+            SurveyorEvent.entity_id.in_([str(value) for value in case_object_ids])))
+        items.extend({"kind": "event", "id": row.id, "label": row.action,
+            "event_type": row.event_type, "occurred_at": row.occurred_at, "notes": row.notes}
+            for row in linked_events)
+        tasks = db.scalars(select(SurveyorTask).where(SurveyorTask.map_object_id.in_(case_object_ids)))
+        items.extend({"kind": "task", "id": task.id,
+            "label": f"Follow-up {task.status}", "body": task.title,
+            "priority": task.priority, "occurred_at": task.completed_at or task.created_at}
+            for task in tasks)
+    attachment_ids = {row.attachment_id for row in db.scalars(select(SurveyorAttachmentLink).where(
+        SurveyorAttachmentLink.entity_type == "candidate_case", SurveyorAttachmentLink.entity_id == str(case_id)))}
+    if case_object_ids:
+        attachment_ids.update(row.id for row in db.scalars(select(SurveyorAttachment).where(
+            SurveyorAttachment.map_object_id.in_(case_object_ids))))
+    for attachment in db.scalars(select(SurveyorAttachment).where(SurveyorAttachment.id.in_(attachment_ids))) if attachment_ids else []:
+        items.append({"kind": "media", "id": attachment.id,
+            "label": f"{attachment.attachment_type.title()} added",
+            "body": attachment.caption,
+            "occurred_at": attachment.observed_at or attachment.created_at})
     items.extend({"kind": "source_record", "id": record["post_id"],
                   "label": f'{record.get("custody_label") or record.get("status") or "Source record"} · {record.get("source_label")}',
                   "occurred_at": record.get("last_seen_at") or record.get("first_seen_at"),

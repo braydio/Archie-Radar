@@ -4,6 +4,7 @@ import { RouterLink, useRoute } from 'vue-router'
 import { useRouter } from 'vue-router'
 import CandidateMedia from '../components/candidates/CandidateMedia.vue'
 import MediaGallery from '../components/media/MediaGallery.vue'
+import CandidateCaseMap from '../components/candidates/CandidateCaseMap.vue'
 import { setLocationFocus } from '../surveyor/locationFocus.js'
 
 const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
@@ -13,6 +14,7 @@ const item = ref(null)
 const notes = ref([])
 const timeline = ref([])
 const media = ref([])
+const home = ref(null)
 const draft = ref('')
 const selectedSourceIds = ref([])
 const mergeTarget = ref('')
@@ -52,16 +54,17 @@ async function load() {
   error.value = ''
   try {
     const id = Number(route.params.caseId)
-    const [caseData, caseNotes, events, attachments, mergeHistory] = await Promise.all([
+    const [caseData, caseNotes, events, attachments, mergeHistory, searchConfig] = await Promise.all([
       request(`/api/candidate-cases/${id}`), request(`/api/candidate-cases/${id}/notes`),
       request(`/api/candidate-cases/${id}/timeline`), request(`/api/surveyor/media?candidate_case_id=${id}&limit=2000`),
-      request(`/api/candidate-cases/${id}/merges`)
+      request(`/api/candidate-cases/${id}/merges`), request('/api/search-config').catch(() => null)
     ])
     item.value = caseData
     notes.value = caseNotes
     timeline.value = events
     media.value = attachments
     merges.value = mergeHistory
+    home.value = searchConfig ? { latitude: searchConfig.home_latitude, longitude: searchConfig.home_longitude } : null
     selectedSourceIds.value = []
   } catch (cause) { error.value = cause.message || 'Candidate case could not be loaded' }
 }
@@ -164,6 +167,8 @@ watch(() => route.params.caseId, load)
       <h2>Case overview</h2>
       <p>{{ item.description || 'No description is available from the current source record.' }}</p>
       <p v-if="item.current_location?.record_id" class="inspector-meta">Location from source record #{{ item.current_location.record_id }} · {{ item.current_location.precision || 'precision unknown' }}</p>
+      <h3>Case map</h3>
+      <CandidateCaseMap :case-data="item" :home="home" :key="item.case_id" />
       <h3>Case notes</h3>
       <form class="case-note-form" @submit.prevent="saveNote"><textarea v-model="draft" rows="3" placeholder="Add a case note"></textarea><button type="submit" :disabled="saving || !draft.trim()">{{ saving ? 'Saving…' : 'Add note' }}</button></form>
       <article v-for="note in notes" :key="note.id" class="case-note"><time>{{ new Date(note.created_at).toLocaleString() }}</time><p>{{ note.body }}</p></article>
@@ -173,7 +178,11 @@ watch(() => route.params.caseId, load)
       <article v-for="entry in timeline" :key="`${entry.kind}-${entry.id}`" class="case-timeline-row"><time>{{ entry.occurred_at ? new Date(entry.occurred_at).toLocaleString() : 'Date unknown' }}</time><strong>{{ entry.label }}</strong><p v-if="entry.body">{{ entry.body }}</p><small v-if="entry.kind === 'source_record'">{{ entry.source_record?.holding_entity || entry.source_record?.source_label }} · {{ entry.source_record?.listing_state || 'status unknown' }}</small></article>
     </section>
     <section v-else-if="tab === 'media'" class="candidate-case-content">
-      <h2>Field media</h2><MediaGallery :items="media" :api="API" title="Linked field media" />
+      <h2>Case media</h2>
+      <h3>Source media · remotely hosted by the reporting source</h3>
+      <div v-if="item.case_images?.length" class="case-source-media-grid"><figure v-for="image in item.case_images" :key="image.url"><img :src="image.url" :alt="`Source image from ${image.holding_entity || image.source_platform || 'source record'}`" loading="lazy" /><figcaption>{{ image.holding_entity || image.source_platform }}<template v-if="image.holding_entity && image.source_platform"> · via {{ image.source_platform }}</template></figcaption></figure></div>
+      <p v-else>No source photos are available.</p>
+      <h3>Field media · locally stored originals</h3><MediaGallery :items="media" :api="API" title="Linked field media" />
     </section>
     <section v-else class="candidate-case-content">
       <h2>Source records</h2>
