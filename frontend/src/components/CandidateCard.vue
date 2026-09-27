@@ -54,19 +54,22 @@ export default {
     const title = computed(() => props.post.name || `${statusLabel(props.post.status) || 'Found'} cat`)
     const usefulTitle = computed(() => !/^(found\s+)?cat$|^unknown$/i.test(String(title.value || '').trim()))
     const detailsAvailable = computed(() => Boolean(props.post.nearest_landmark || props.post.finder_message || props.post.contact_info || props.post.contact_url))
-    const candidateHeading = computed(() => props.post.holding_entity || props.post.custody_label || statusLabel(props.post.status) || 'Found report')
-    const candidateSubheading = computed(() => [props.post.custody_label && props.post.holding_entity ? props.post.custody_label : null,
-      props.post.source_platform ? `via ${props.post.source_platform}` : sourceLabel(props.post.source)].filter(Boolean).join(' · '))
+    const candidateHeading = computed(() => props.post.current_custody?.holding_entity || props.post.holding_entity || props.post.current_custody?.custody_label || props.post.custody_label || statusLabel(props.post.status) || 'Found report')
+    const candidateSubheading = computed(() => [props.post.current_custody?.custody_label || props.post.custody_label,
+      (props.post.current_custody || props.post.source_platform) ? `via ${props.post.source_platform || sourceLabel(props.post.source)}` : sourceLabel(props.post.source)].filter(Boolean).join(' · '))
+    const currentLocation = computed(() => props.post.current_location || null)
+    const locationText = computed(() => currentLocation.value?.location_text ?? props.post.location_text)
+    const locationDistance = computed(() => currentLocation.value?.distance_from_home_miles ?? props.post.distance_from_home_miles)
     const identityIds = computed(() => props.post.external_ids || [])
     const mapHref = computed(() => {
-      const lat = props.post.map_latitude
-      const lon = props.post.map_longitude
+      const lat = currentLocation.value?.map_latitude ?? props.post.map_latitude
+      const lon = currentLocation.value?.map_longitude ?? props.post.map_longitude
       return lat == null || lon == null ? null : `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=14/${lat}/${lon}`
     })
     const distanceText = computed(() => {
-      if (props.post.distance_from_home_miles == null) return ''
-      const prefix = props.post.distance_is_approximate ? '~' : ''
-      return `${prefix}${Number(props.post.distance_from_home_miles).toFixed(1)} mi from home`
+      if (locationDistance.value == null) return ''
+      const prefix = (currentLocation.value?.distance_is_approximate ?? props.post.distance_is_approximate) ? '~' : ''
+      return `${prefix}${Number(locationDistance.value).toFixed(1)} mi from home`
     })
 
     const traitTokens = computed(() => {
@@ -128,7 +131,7 @@ export default {
       imageUnavailable, candidateImage, displayedImage, selectedImage, caseImages, priorityClass, photoPct, hasPhoto, sourceAccent, candidateHeading, candidateSubheading, identityIds,
       sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText,
       traitTokens, primaryTraitTokens, reasonSummary, colorClass,
-      sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review, locate
+      sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review, locate, locationText, currentLocation
     }
   }
 }
@@ -171,14 +174,15 @@ export default {
           <span>· {{ dateOnly(sourcePostedAt) }}</span>
         </template>
       </div>
-      <div v-if="post.location_text || distanceText" class="address-row">
+      <div v-if="locationText || distanceText" class="address-row">
         <div>
-          <strong v-if="post.location_text">{{ post.location_text }}</strong>
+          <strong v-if="locationText">{{ locationText }}</strong>
           <span v-if="distanceText" :class="{ approximate: post.distance_is_approximate }">{{ distanceText }}</span>
+          <small v-if="currentLocation?.record_id">Current location · source record #{{ currentLocation.record_id }}</small>
         </div>
         <a v-if="mapHref" :href="mapHref" target="_blank" rel="noopener">Map ↗</a>
       </div>
-      <button v-if="post.location_text || post.map_latitude != null" type="button" class="candidate-locate-link" @click="locate">Locate relative to home</button>
+      <button v-if="locationText || post.map_latitude != null" type="button" class="candidate-locate-link" @click="locate">Locate relative to home</button>
 
       <div v-if="primaryTraitTokens.length" class="trait-row" aria-label="Most relevant traits parsed from listing text">
         <span v-for="token in primaryTraitTokens" :key="`${token.label}-${token.state}`" :class="['trait-chip', token.state]">{{ token.label }}</span>

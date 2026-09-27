@@ -1,11 +1,14 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
+import { useRouter } from 'vue-router'
 import CandidateMedia from '../components/candidates/CandidateMedia.vue'
 import MediaGallery from '../components/media/MediaGallery.vue'
+import { setLocationFocus } from '../surveyor/locationFocus.js'
 
 const API = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`
 const route = useRoute()
+const router = useRouter()
 const item = ref(null)
 const notes = ref([])
 const timeline = ref([])
@@ -16,6 +19,15 @@ const error = ref('')
 const saving = ref(false)
 const hero = computed(() => item.value?.primary_image || item.value?.case_images?.[0] || null)
 const tabs = ['overview', 'activity', 'media', 'sources']
+function openCurrentLocation() {
+  const location = item.value?.current_location
+  if (!location || location.map_latitude == null || location.map_longitude == null) return
+  setLocationFocus({ latitude: location.map_latitude, longitude: location.map_longitude,
+    displayName: location.location_text || 'Candidate location', precision: location.precision || 'approximate',
+    distanceMiles: location.distance_from_home_miles, caseId: item.value.case_id,
+    externalIds: item.value.external_ids })
+  router.push('/surveyor').then(() => window.dispatchEvent(new Event('archie:location-focus')))
+}
 
 async function request(path, options) {
   const response = await fetch(`${API}${path}`, options)
@@ -69,7 +81,8 @@ watch(() => route.params.caseId, load)
           <strong v-for="identifier in item.external_ids" :key="identifier.namespace + identifier.value">{{ identifier.label }} {{ identifier.value }}</strong>
           <span>Radar case #{{ item.case_id }} · {{ item.record_count }} source {{ item.record_count === 1 ? 'record' : 'records' }}</span>
         </div>
-        <p v-if="item.current_location?.location_text">{{ item.current_location.location_text }}<template v-if="item.current_location.distance_from_home_miles != null"> · {{ item.current_location.distance_is_approximate ? '~' : '' }}{{ Number(item.current_location.distance_from_home_miles).toFixed(1) }} mi from home</template></p>
+        <p v-if="item.current_location?.location_text">{{ item.current_location.location_text }}<template v-if="item.current_location.distance_from_home_miles != null"> · {{ item.current_location.distance_is_approximate ? '~' : '' }}{{ Number(item.current_location.distance_from_home_miles).toFixed(1) }} mi from home</template><small v-if="item.current_location.record_id"> · source record #{{ item.current_location.record_id }}</small></p>
+        <button v-if="item.current_location?.map_latitude != null" type="button" class="secondary-button" @click="openCurrentLocation">Open location in Surveyor</button>
         <div class="review-actions case-review-actions">
           <button class="possible" @click="review('possible')">Possible Archie</button>
           <button class="hold" @click="review('needs_review')">Hold</button>
