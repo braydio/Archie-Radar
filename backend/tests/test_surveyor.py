@@ -306,6 +306,10 @@ def test_case_export_contains_linked_field_media_and_case_history(client: TestCl
         summary = __import__("json").loads(archive.read(f"{root}/case.json"))
         manifest = __import__("json").loads(archive.read(f"{root}/media-manifest.json"))
         assert summary["case_id"] == case_id
+        field_objects = __import__("json").loads(archive.read(f"{root}/field-objects.json"))
+        assert field_objects[0]["id"] == obj["id"]
+        assert f"{root}/tasks.json" in names
+        assert f"{root}/sessions.json" in names
         assert manifest[0]["attachment_id"] == attachment["id"]
         assert archive.read(f"{root}/media/{manifest[0]['export_filename']}") == b"original case evidence"
 def test_attachment_paths_cannot_escape_media_root(tmp_path: Path) -> None:

@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import (CandidateCase, CandidateCaseMerge, CandidateCaseNote, CandidateCasePost,
                       CandidateIdentifier, CandidateIdentityExclusion, PetPost, SurveyorAttachment,
-                      SurveyorAttachmentLink, SurveyorEvent, SurveyorMapObject, SurveyorTask)
+                      SurveyorAttachmentLink, SurveyorEvent, SurveyorMapObject, SurveyorSearchSession,
+                      SurveyorTask)
 from ..surveyor_media import attachment_metadata, contained_path
 from ..settings import get_settings
 from .identity import case_output, choose_primary_post, extract_identifiers, merge_candidate_cases, reverse_case_merge
@@ -67,7 +68,7 @@ def get_candidate_case(case_id: int, db: Session = Depends(get_db)):
         if properties.get("candidate_case_id") != case_id:
             continue
         field_objects.append({"id": obj.id, "object_type": obj.object_type, "subtype": obj.subtype,
-            "name": obj.name, "geometry": json.loads(obj.geometry_json), "status": obj.status,
+            "name": obj.name, "geometry": json.loads(obj.geometry_geojson), "status": obj.status,
             "occurred_at": obj.occurred_at, "created_at": obj.created_at})
     output["field_objects"] = field_objects
     return output
@@ -239,6 +240,20 @@ def export_candidate_case(case_id: int, db: Session = Depends(get_db)):
     source_records = projection.get("source_records", [])
     notes = list(db.scalars(select(CandidateCaseNote).where(CandidateCaseNote.case_id == case_id)
                             .order_by(CandidateCaseNote.created_at)))
+    case_objects = []
+    for obj in db.scalars(select(SurveyorMapObject)):
+        if _properties(obj.id, db).get("candidate_case_id") != case_id or obj.object_type == "access":
+            continue
+        case_objects.append(obj)
+    object_ids = [obj.id for obj in case_objects]
+    object_rows = [{"id": obj.id, "object_type": obj.object_type, "subtype": obj.subtype,
+        "name": obj.name, "geometry": json.loads(obj.geometry_geojson), "status": obj.status,
+        "occurred_at": obj.occurred_at, "created_at": obj.created_at,
+        "notes": obj.notes if obj.object_type in {"evidence", "note"} else ""} for obj in case_objects]
+    tasks = list(db.scalars(select(SurveyorTask).where(SurveyorTask.map_object_id.in_(object_ids)))) if object_ids else []
+    session_ids = {int(value) for obj in case_objects for value in [_properties(obj.id, db).get("search_session_id")] if str(value or "").isdigit()}
+    session_ids.update(task.search_session_id for task in tasks if task.search_session_id)
+    sessions = list(db.scalars(select(SurveyorSearchSession).where(SurveyorSearchSession.id.in_(session_ids)))) if session_ids else []
     linked_ids = {row.attachment_id for row in db.scalars(select(SurveyorAttachmentLink).where(
         SurveyorAttachmentLink.entity_type == "candidate_case",
         SurveyorAttachmentLink.entity_id == str(case_id)))}
@@ -261,6 +276,9 @@ def export_candidate_case(case_id: int, db: Session = Depends(get_db)):
         "external_ids": projection.get("external_ids", []),
         "record_count": projection.get("record_count", 0),
         "source_records": source_records,
+        "field_object_count": len(object_rows),
+        "task_count": len(tasks),
+        "search_session_ids": sorted(session_ids),
     }
     manifest = []
     archive_data = io.BytesIO()
@@ -269,6 +287,18 @@ def export_candidate_case(case_id: int, db: Session = Depends(get_db)):
         archive.writestr(f"{root}/case.json", json.dumps(summary, default=str, indent=2))
         archive.writestr(f"{root}/case-notes.json", json.dumps([
             {"id": note.id, "body": note.body, "created_at": note.created_at} for note in notes
+        ], default=str, indent=2))
+        archive.writestr(f"{root}/field-objects.json", json.dumps(object_rows, default=str, indent=2))
+        archive.writestr(f"{root}/tasks.json", json.dumps([
+            {"id": task.id, "title": task.title, "task_type": task.task_type, "status": task.status,
+             "priority": task.priority, "due_at": task.due_at, "map_object_id": task.map_object_id,
+             "search_session_id": task.search_session_id}
+            for task in tasks
+        ], default=str, indent=2))
+        archive.writestr(f"{root}/sessions.json", json.dumps([
+            {"id": session.id, "method": session.method, "started_at": session.started_at,
+             "ended_at": session.ended_at, "result_summary": session.result_summary}
+            for session in sessions
         ], default=str, indent=2))
         for index, attachment in enumerate(attachments, start=1):
             if not attachment.storage_path:
