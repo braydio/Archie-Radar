@@ -306,6 +306,7 @@ class SurveyorAttachmentOut(BaseModel):
     map_object_type: str | None = None
     map_object_id: int | None = None
     camera_id: int | None = None
+    linked_entities: list[dict] = Field(default_factory=list)
 
 
 class SurveyorMediaExportIn(BaseModel):
@@ -315,6 +316,22 @@ class SurveyorMediaExportIn(BaseModel):
     include_manifest_csv: bool = True
     include_context: bool = True
     include_exact_coordinates: bool = True
+
+
+class SurveyorAttachmentLinkIn(BaseModel):
+    entity_type: Literal["map_object", "search_session", "camera", "candidate_case"]
+    entity_id: int
+    relationship: Literal["related", "captured_during", "evidence_for", "camera_capture", "source_media"] = "related"
+
+
+class SurveyorAttachmentLinkOut(BaseModel):
+    id: int
+    attachment_id: int
+    entity_type: str
+    entity_id: int
+    relationship: str
+    label: str
+    created_at: datetime
 
 
 class SurveyorLinkIn(BaseModel):

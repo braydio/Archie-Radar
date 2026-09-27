@@ -15,6 +15,6 @@ function dateLabel(item) { const date = item.observed_at || item.created_at; ret
       <span v-if="item.duration_seconds" class="media-duration">{{ Math.floor(item.duration_seconds / 60) }}:{{ String(Math.floor(item.duration_seconds % 60)).padStart(2,'0') }}</span>
     </button>
     <label v-if="selectable" class="media-select"><input type="checkbox" :checked="selected" @change="emit('toggle', item)" /> Select</label>
-    <div class="media-tile-copy"><time>{{ dateLabel(item) }}</time><strong>{{ item.caption || item.original_filename }}</strong><small>{{ item.camera_name || item.map_object_name || item.session_label || item.attachment_type }}</small></div>
+    <div class="media-tile-copy"><time>{{ dateLabel(item) }}</time><strong>{{ item.caption || item.original_filename }}</strong><small>{{ item.camera_name || item.map_object_name || item.session_label || item.linked_entities?.[0]?.label || item.attachment_type }}</small></div>
   </article>
 </template>

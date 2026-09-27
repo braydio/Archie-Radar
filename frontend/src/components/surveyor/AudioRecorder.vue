@@ -53,7 +53,9 @@ function cancel() { cancelRequested = true; stopTracks(); if (recorder?.state ==
 function save() {
   if (!blob.value) return
   const extension = blob.value.type.includes('mp4') ? 'm4a' : blob.value.type.includes('ogg') ? 'ogg' : 'webm'
-  emit('select', new File([blob.value], `field-recording-${new Date().toISOString().replaceAll(':', '-')}.${extension}`, { type: blob.value.type }))
+  const file = new File([blob.value], `field-recording-${new Date().toISOString().replaceAll(':', '-')}.${extension}`, { type: blob.value.type })
+  file.duration_seconds = elapsed.value
+  emit('select', file)
 }
 onBeforeUnmount(() => { disposed = true; cancel(); clearPreview() })
 </script>

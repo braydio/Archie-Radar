@@ -227,6 +227,36 @@ def test_video_upload_keeps_supplied_media_metadata(client: TestClient, tmp_path
     assert item["height"] == 1080
 
 
+def test_attachment_can_link_to_session_without_copying_original(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "media_dir", tmp_path)
+    obj = create_pin(client, [-79.1, 35.8], "Coyote evidence")
+    attachment = client.post(f"/api/surveyor/objects/{obj['id']}/attachments", files={
+        "file": ("call.webm", b"recorded audio", "audio/webm"),
+    }).json()
+    session = client.post("/api/surveyor/sessions", json={"method": "walking"}).json()
+    stored_files = list((tmp_path / "surveyor" / "original").glob("*"))
+    assert len(stored_files) == 1
+
+    linked = client.post(f"/api/surveyor/attachments/{attachment['id']}/links", json={
+        "entity_type": "search_session", "entity_id": session["id"], "relationship": "captured_during",
+    })
+    assert linked.status_code == 201, linked.text
+    listed = client.get(f"/api/surveyor/attachments/{attachment['id']}/links")
+    assert listed.status_code == 200
+    assert listed.json()[0]["label"].endswith(f"#{session['id']}")
+    media = client.get(f"/api/surveyor/media?search_session_id={session['id']}")
+    assert len(media.json()) == 1
+    assert media.json()[0]["linked_entities"][0]["entity_type"] == "search_session"
+    assert client.get(f"/api/surveyor/sessions/{session['id']}/summary").json()["attachment_count"] == 1
+    exported = client.post("/api/surveyor/media/export", json={"attachment_ids": [attachment["id"]]})
+    with ZipFile(BytesIO(exported.content)) as archive:
+        root = next(name.split("/", 1)[0] for name in archive.namelist())
+        manifest = __import__("json").loads(archive.read(f"{root}/manifest.json"))
+        assert manifest["items"][0]["linked_entities"][0]["entity_id"] == session["id"]
+        assert f"{root}/context/sessions.json" in archive.namelist()
+    assert list((tmp_path / "surveyor" / "original").glob("*")) == stored_files
+
+
 def test_attachment_paths_cannot_escape_media_root(tmp_path: Path) -> None:
     with pytest.raises(HTTPException) as error:
         contained_path(tmp_path, "../outside.txt")

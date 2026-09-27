@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,7 +41,7 @@ from .candidates.identity import case_output, ensure_candidate_cases
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
-from .models import ArchieProfile, ArchieReferencePhoto, CandidateCase, CandidateCasePost, CandidateIdentifier, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorObjectLink, SurveyorTask, utcnow
+from .models import ArchieProfile, ArchieReferencePhoto, CandidateCase, CandidateCasePost, CandidateIdentifier, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorAttachmentLink, SurveyorObjectLink, SurveyorTask, utcnow
 from .schemas import (
     FacebookBridgeIn,
     PetPostIn,
@@ -66,6 +66,8 @@ from .schemas import (
     SurveyorEventOut,
     SurveyorAttachmentOut,
     SurveyorMediaExportIn,
+    SurveyorAttachmentLinkIn,
+    SurveyorAttachmentLinkOut,
     SurveyorLinkIn,
     SurveyorLinkPatch,
     SurveyorLinkOut,
@@ -79,7 +81,7 @@ from .service import (
 )
 from .settings import get_settings
 from .vision import fingerprint_image
-from .surveyor_media import PublicMediaFiles, attachment_metadata, classify_media, contained_path, delete_attachment_files, store_upload
+from .surveyor_media import PublicMediaFiles, attachment_metadata, classify_media, contained_path, delete_attachment_files, generate_video_poster, store_upload
 from .traits import ARCHIE_TRAITS, is_archie_compatible
 
 
@@ -456,6 +458,59 @@ def _attachment_output(row: SurveyorAttachment) -> SurveyorAttachmentOut:
         observed_at=row.observed_at, source=row.source, metadata=metadata, created_at=row.created_at)
 
 
+def _attachment_link_output(db: Session, row: SurveyorAttachmentLink) -> SurveyorAttachmentLinkOut:
+    label = f"{row.entity_type.replace('_', ' ')} #{row.entity_id}"
+    if row.entity_type == "map_object":
+        entity = db.get(SurveyorMapObject, row.entity_id)
+        if entity: label = entity.name or f"{entity.subtype or entity.object_type} #{entity.id}"
+    elif row.entity_type == "search_session":
+        entity = db.get(SurveyorSearchSession, row.entity_id)
+        if entity: label = f"{entity.method.replace('_', ' ').title()} search #{entity.id}"
+    elif row.entity_type == "camera":
+        entity = db.get(SurveyorTrailCamera, row.entity_id)
+        if entity: label = entity.name
+    elif row.entity_type == "candidate_case":
+        entity = db.get(CandidateCase, row.entity_id)
+        if entity: label = entity.display_name or f"Candidate case #{entity.id}"
+    return SurveyorAttachmentLinkOut(id=row.id, attachment_id=row.attachment_id, entity_type=row.entity_type,
+        entity_id=row.entity_id, relationship=row.relationship, label=label, created_at=row.created_at)
+
+
+def _attachment_link_entity(db: Session, entity_type: str, entity_id: int):
+    models = {"map_object": SurveyorMapObject, "search_session": SurveyorSearchSession,
+              "camera": SurveyorTrailCamera, "candidate_case": CandidateCase}
+    model = models[entity_type]
+    entity = db.get(model, entity_id)
+    if entity is None:
+        return None
+    if entity_type == "camera": return entity.name
+    if entity_type == "map_object": return entity.name or f"{entity.subtype or entity.object_type} #{entity.id}"
+    if entity_type == "search_session": return f"{entity.method.replace('_', ' ').title()} search #{entity.id}"
+    return entity.display_name or f"Candidate case #{entity.id}"
+
+
+def _generate_attachment_video_poster(attachment_id: int) -> None:
+    db = SessionLocal()
+    try:
+        row = db.get(SurveyorAttachment, attachment_id)
+        if not row or not row.storage_path or row.attachment_type != "video":
+            return
+        metadata = attachment_metadata(row)
+        if (metadata.get("derivatives") or {}).get("poster"):
+            return
+        original = contained_path(media_dir, row.storage_path)
+        relative = generate_video_poster(original, media_dir / "surveyor" / "derived")
+        if relative:
+            metadata.setdefault("derivatives", {})["poster"] = relative
+            row.metadata_json = json.dumps(metadata)
+            db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Could not create video poster for attachment %s", attachment_id)
+    finally:
+        db.close()
+
+
 def _link_output(db: Session, row: SurveyorObjectLink) -> SurveyorLinkOut:
     source = db.get(SurveyorMapObject, row.source_object_id)
     target = db.get(SurveyorMapObject, row.target_object_id)
@@ -688,11 +743,19 @@ def surveyor_session_summary(session_id: int, db: Session = Depends(get_db)):
     object_ids = [obj.id for obj in linked]
     event_conditions = [(SurveyorEvent.entity_type == "search_session") & (SurveyorEvent.entity_id == str(session_id))]
     attachment_conditions = [SurveyorAttachment.search_session_id == session_id]
+    linked_attachment_ids = list(db.scalars(select(SurveyorAttachmentLink.attachment_id).where(
+        SurveyorAttachmentLink.entity_type == "search_session", SurveyorAttachmentLink.entity_id == session_id)))
+    if linked_attachment_ids:
+        attachment_conditions.append(SurveyorAttachment.id.in_(linked_attachment_ids))
     task_conditions = [SurveyorTask.search_session_id == session_id]
     if object_ids:
         ids = [str(item) for item in object_ids]
         event_conditions.append((SurveyorEvent.entity_type == "map_object") & SurveyorEvent.entity_id.in_(ids))
         attachment_conditions.append(SurveyorAttachment.map_object_id.in_(object_ids))
+        linked_object_attachment_ids = list(db.scalars(select(SurveyorAttachmentLink.attachment_id).where(
+            SurveyorAttachmentLink.entity_type == "map_object", SurveyorAttachmentLink.entity_id.in_(object_ids))))
+        if linked_object_attachment_ids:
+            attachment_conditions.append(SurveyorAttachment.id.in_(linked_object_attachment_ids))
         task_conditions.append(SurveyorTask.map_object_id.in_(object_ids))
     events = list(db.scalars(select(SurveyorEvent).where(or_(*event_conditions)).order_by(SurveyorEvent.occurred_at.asc())))
     attachments = list(db.scalars(select(SurveyorAttachment).where(or_(*attachment_conditions))))
@@ -761,7 +824,7 @@ def list_object_attachments(object_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/surveyor/objects/{object_id}/attachments", response_model=SurveyorAttachmentOut, status_code=201)
-async def upload_surveyor_attachment(object_id: int, file: UploadFile = File(...), caption: str = Form(""),
+async def upload_surveyor_attachment(object_id: int, background_tasks: BackgroundTasks, file: UploadFile = File(...), caption: str = Form(""),
                                     observed_at: datetime | None = Form(None), notes: str = Form(""),
                                     latitude: float | None = Form(None), longitude: float | None = Form(None),
                                     duration_seconds: float | None = Form(None), width: int | None = Form(None), height: int | None = Form(None),
@@ -780,6 +843,8 @@ async def upload_surveyor_attachment(object_id: int, file: UploadFile = File(...
     _record_surveyor_event(db, "evidence_added", "map_object", object_id, "Added evidence attachment",
         after={"attachment_id": row.id, "attachment_type": kind, "caption": caption})
     db.commit(); db.refresh(row)
+    if kind == "video":
+        background_tasks.add_task(_generate_attachment_video_poster, row.id)
     return _attachment_output(row)
 
 
@@ -792,7 +857,7 @@ def list_session_attachments(session_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/surveyor/sessions/{session_id}/attachments", response_model=SurveyorAttachmentOut, status_code=201)
-async def upload_session_attachment(session_id: int, file: UploadFile = File(...), caption: str = Form(""),
+async def upload_session_attachment(session_id: int, background_tasks: BackgroundTasks, file: UploadFile = File(...), caption: str = Form(""),
                                     observed_at: datetime | None = Form(None), notes: str = Form(""),
                                     latitude: float | None = Form(None), longitude: float | None = Form(None),
                                     duration_seconds: float | None = Form(None), width: int | None = Form(None), height: int | None = Form(None),
@@ -811,6 +876,8 @@ async def upload_session_attachment(session_id: int, file: UploadFile = File(...
     _record_surveyor_event(db, "evidence_added", "search_session", session_id, "Added session evidence attachment",
         after={"attachment_id": row.id, "attachment_type": kind, "caption": caption})
     db.commit(); db.refresh(row)
+    if kind == "video":
+        background_tasks.add_task(_generate_attachment_video_poster, row.id)
     return _attachment_output(row)
 
 
@@ -825,6 +892,50 @@ def delete_surveyor_attachment(attachment_id: int, db: Session = Depends(get_db)
     owner_id = row.map_object_id if row.map_object_id is not None else row.search_session_id
     _record_surveyor_event(db, "attachment_deleted", owner_type, owner_id, "Deleted evidence attachment",
         before={"attachment_id": row.id, "attachment_type": row.attachment_type, "caption": row.caption})
+    db.execute(delete(SurveyorAttachmentLink).where(SurveyorAttachmentLink.attachment_id == row.id))
+    db.delete(row); db.commit()
+    return None
+
+
+@app.get("/api/surveyor/attachments/{attachment_id}/links", response_model=list[SurveyorAttachmentLinkOut])
+def list_surveyor_attachment_links(attachment_id: int, db: Session = Depends(get_db)):
+    if db.get(SurveyorAttachment, attachment_id) is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    links = db.scalars(select(SurveyorAttachmentLink).where(SurveyorAttachmentLink.attachment_id == attachment_id)
+        .order_by(SurveyorAttachmentLink.created_at.asc()))
+    return [_attachment_link_output(db, row) for row in links]
+
+
+@app.post("/api/surveyor/attachments/{attachment_id}/links", response_model=SurveyorAttachmentLinkOut, status_code=201)
+def create_surveyor_attachment_link(attachment_id: int, payload: SurveyorAttachmentLinkIn, db: Session = Depends(get_db)):
+    if db.get(SurveyorAttachment, attachment_id) is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    label = _attachment_link_entity(db, payload.entity_type, payload.entity_id)
+    if label is None:
+        raise HTTPException(status_code=404, detail=f"{payload.entity_type.replace('_', ' ').title()} not found")
+    row = SurveyorAttachmentLink(attachment_id=attachment_id, entity_type=payload.entity_type,
+        entity_id=payload.entity_id, relationship=payload.relationship)
+    db.add(row)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This media link already exists") from exc
+    _record_surveyor_event(db, "attachment_link_created", "attachment", attachment_id,
+        f"Linked media to {label}", after={"entity_type": payload.entity_type, "entity_id": payload.entity_id,
+            "relationship": payload.relationship})
+    db.commit(); db.refresh(row)
+    return _attachment_link_output(db, row)
+
+
+@app.delete("/api/surveyor/attachments/{attachment_id}/links/{link_id}", status_code=204)
+def delete_surveyor_attachment_link(attachment_id: int, link_id: int, db: Session = Depends(get_db)):
+    row = db.get(SurveyorAttachmentLink, link_id)
+    if row is None or row.attachment_id != attachment_id:
+        raise HTTPException(status_code=404, detail="Media link not found")
+    before = _attachment_link_output(db, row).model_dump(mode="json")
+    _record_surveyor_event(db, "attachment_link_deleted", "attachment", attachment_id,
+        f"Unlinked media from {before['label']}", before=before)
     db.delete(row); db.commit()
     return None
 
@@ -902,44 +1013,60 @@ def list_surveyor_media(
     for row in rows:
         metadata = attachment_metadata(row)
         kind = metadata.get("media_type") or ("document" if row.attachment_type == "file" else row.attachment_type)
+        links = list(db.scalars(select(SurveyorAttachmentLink).where(SurveyorAttachmentLink.attachment_id == row.id)))
+        linked_keys = {(link.entity_type, link.entity_id) for link in links}
         if media_type and kind != media_type:
             continue
-        if search_session_id is not None and row.search_session_id != search_session_id:
+        if search_session_id is not None and row.search_session_id != search_session_id and ("search_session", search_session_id) not in linked_keys:
             continue
-        if map_object_id is not None and row.map_object_id != map_object_id:
+        if map_object_id is not None and row.map_object_id != map_object_id and ("map_object", map_object_id) not in linked_keys:
             continue
+        obj = db.get(SurveyorMapObject, row.map_object_id) if row.map_object_id else None
+        if obj is None:
+            linked_object = next((link for link in links if link.entity_type == "map_object"), None)
+            obj = db.get(SurveyorMapObject, linked_object.entity_id) if linked_object else None
+        camera = db.scalar(select(SurveyorTrailCamera).where(SurveyorTrailCamera.map_object_id == obj.id)) if obj else None
         if camera_id is not None:
             camera = db.get(SurveyorTrailCamera, camera_id)
-            if not camera or row.map_object_id != camera.map_object_id:
+            if not camera or (row.map_object_id != camera.map_object_id and ("camera", camera_id) not in linked_keys):
                 continue
             metadata["camera_id"] = camera.id
             metadata["camera_name"] = camera.name
+        elif not camera:
+            linked_camera = next((link for link in links if link.entity_type == "camera"), None)
+            camera = db.get(SurveyorTrailCamera, linked_camera.entity_id) if linked_camera else None
         if candidate_case_id is not None:
-            obj = db.get(SurveyorMapObject, row.map_object_id) if row.map_object_id else None
             props = json.loads(obj.properties_json or "{}") if obj else {}
-            if props.get("candidate_case_id") != candidate_case_id:
+            if props.get("candidate_case_id") != candidate_case_id and ("candidate_case", candidate_case_id) not in linked_keys:
                 continue
+        if map_object_id is not None and row.map_object_id is None:
+            obj = db.get(SurveyorMapObject, map_object_id)
+        session = db.get(SurveyorSearchSession, row.search_session_id) if row.search_session_id else None
+        if session is None:
+            linked_session = next((link for link in links if link.entity_type == "search_session"), None)
+            session = db.get(SurveyorSearchSession, linked_session.entity_id) if linked_session else None
         moment = row.observed_at or row.created_at
         if observed_from and moment < observed_from:
             continue
         if observed_to and moment > observed_to:
             continue
         output = _attachment_output(row)
-        obj = db.get(SurveyorMapObject, row.map_object_id) if row.map_object_id else None
-        session = db.get(SurveyorSearchSession, row.search_session_id) if row.search_session_id else None
-        camera = db.scalar(select(SurveyorTrailCamera).where(SurveyorTrailCamera.map_object_id == obj.id)) if obj else None
-        candidate_case_id = None
+        output_case_id = None
         if obj:
             object_properties = json.loads(obj.properties_json or "{}")
-            candidate_case_id = object_properties.get("candidate_case_id")
+            output_case_id = object_properties.get("candidate_case_id")
+        if output_case_id is None:
+            linked_case = next((link for link in links if link.entity_type == "candidate_case"), None)
+            output_case_id = linked_case.entity_id if linked_case else None
         output = output.model_copy(update={
             "map_object_name": obj.name if obj else None,
             "camera_name": camera.name if camera else None,
             "session_label": f"Search #{session.id}" if session else None,
-            "candidate_case_id": candidate_case_id,
+            "candidate_case_id": output_case_id,
             "map_object_type": obj.object_type if obj else None,
             "map_object_id": obj.id if obj else None,
             "camera_id": camera.id if camera else None,
+            "linked_entities": [_attachment_link_output(db, link).model_dump(mode="json") for link in links],
         })
         result.append(output)
         if len(result) >= limit:
@@ -989,6 +1116,8 @@ def export_surveyor_media(payload: SurveyorMediaExportIn, db: Session = Depends(
 
     for row in rows:
         metadata = attachment_metadata(row)
+        attachment_links = list(db.scalars(select(SurveyorAttachmentLink).where(SurveyorAttachmentLink.attachment_id == row.id)))
+        linked_entities = [_attachment_link_output(db, link).model_dump(mode="json") for link in attachment_links]
         moment = _export_timestamp(row.observed_at or row.created_at)
         media_type = metadata.get("media_type") or ("document" if row.attachment_type == "file" else row.attachment_type)
         object_row = db.get(SurveyorMapObject, row.map_object_id) if row.map_object_id else None
@@ -1023,6 +1152,7 @@ def export_surveyor_media(payload: SurveyorMediaExportIn, db: Session = Depends(
             "caption": row.caption,
             "notes": metadata.get("notes", ""),
             "source": row.source,
+            "linked_entities": linked_entities,
         }
         if metadata.get("duration_seconds") is not None:
             item["duration_seconds"] = metadata["duration_seconds"]
@@ -1064,6 +1194,41 @@ def export_surveyor_media(payload: SurveyorMediaExportIn, db: Session = Depends(
                  "removed_at": place.removed_at.isoformat() if place.removed_at else None,
                  "heading_degrees": place.heading_degrees, "fov_degrees": place.fov_degrees,
                  "range_meters": place.range_meters} for place in placements]}
+        for link in attachment_links:
+            if link.entity_type == "map_object":
+                linked_object = db.get(SurveyorMapObject, link.entity_id)
+                if linked_object:
+                    linked_context = {"id": linked_object.id, "type": linked_object.object_type,
+                        "subtype": linked_object.subtype, "name": linked_object.name}
+                    if payload.include_exact_coordinates and linked_object.centroid_lat is not None and linked_object.centroid_lon is not None:
+                        linked_context["centroid"] = {"latitude": linked_object.centroid_lat, "longitude": linked_object.centroid_lon}
+                    context_objects[linked_object.id] = linked_context
+                    if linked_object.object_type == "evidence":
+                        linked_props = json.loads(linked_object.properties_json or "{}")
+                        context_evidence[linked_object.id] = {**linked_context, "occurred_at": linked_object.occurred_at.isoformat() if linked_object.occurred_at else None,
+                            "confidence": linked_object.confidence, "epistemic_state": linked_object.epistemic_state,
+                            "notes": linked_object.notes, "properties": {key: value for key, value in linked_props.items()
+                                if key not in {"contact_name", "contact_method", "contact_notes", "phone", "email"}}}
+            elif link.entity_type == "search_session":
+                linked_session = db.get(SurveyorSearchSession, link.entity_id)
+                if linked_session:
+                    context_sessions[linked_session.id] = {"id": linked_session.id, "method": linked_session.method,
+                        "started_at": linked_session.started_at.isoformat(),
+                        "ended_at": linked_session.ended_at.isoformat() if linked_session.ended_at else None}
+            elif link.entity_type == "camera":
+                linked_camera = db.get(SurveyorTrailCamera, link.entity_id)
+                if linked_camera:
+                    item.setdefault("linked_cameras", []).append({"id": linked_camera.id, "name": linked_camera.name})
+                    placements = list(db.scalars(select(SurveyorCameraPlacement).where(SurveyorCameraPlacement.camera_id == linked_camera.id)
+                        .order_by(SurveyorCameraPlacement.installed_at.desc())))
+                    item.setdefault("camera_history", []).append({"id": linked_camera.id, "name": linked_camera.name, "placements": [
+                        {"id": place.id, "installed_at": place.installed_at.isoformat(),
+                         "removed_at": place.removed_at.isoformat() if place.removed_at else None,
+                         "heading_degrees": place.heading_degrees, "fov_degrees": place.fov_degrees,
+                         "range_meters": place.range_meters} for place in placements]})
+            elif link.entity_type == "candidate_case":
+                item.setdefault("candidate_cases", []).append({"id": link.entity_id,
+                    "label": _attachment_link_output(db, link).label})
         manifest_items.append(item)
         csv_rows.append({
             "attachment_id": row.id, "export_filename": export_filename,

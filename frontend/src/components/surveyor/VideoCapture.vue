@@ -17,7 +17,10 @@ function choose(event) {
   if (!file) return
   release(); selected.value = file; previewUrl.value = URL.createObjectURL(file)
 }
-function setDuration(event) { if (Number.isFinite(event.target.duration)) duration.value = Math.round(event.target.duration) }
+function setDuration(event) {
+  if (Number.isFinite(event.target.duration)) duration.value = Math.round(event.target.duration)
+  if (selected.value) { selected.value.media_width = event.target.videoWidth || undefined; selected.value.media_height = event.target.videoHeight || undefined }
+}
 function formatDuration(value) { return value == null ? 'Duration unavailable' : `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}` }
 function retake() { selected.value = null; release(); cameraInput.value?.click() }
 function cancel() { selected.value = null; release(); emit('cancel') }

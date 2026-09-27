@@ -223,6 +223,18 @@ class SurveyorAttachment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class SurveyorAttachmentLink(Base):
+    __tablename__ = "surveyor_attachment_links"
+    __table_args__ = (UniqueConstraint("attachment_id", "entity_type", "entity_id", "relationship", name="uq_surveyor_attachment_link"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    attachment_id: Mapped[int] = mapped_column(ForeignKey("surveyor_attachments.id", ondelete="CASCADE"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(40), index=True)
+    entity_id: Mapped[int] = mapped_column(Integer, index=True)
+    relationship: Mapped[str] = mapped_column(String(40), default="related")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class SurveyorObjectLink(Base):
     __tablename__ = "surveyor_object_links"
     __table_args__ = (UniqueConstraint("source_object_id", "target_object_id", "link_type", name="uq_surveyor_object_link"),)

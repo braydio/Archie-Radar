@@ -132,17 +132,22 @@ def _video_details(original: Path, derived: Path, stem: str) -> dict[str, Any]:
                 result.update(width=int(dimensions["width"]), height=int(dimensions["height"]))
         except Exception:
             pass
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg:
-        poster = derived / f"{stem}_poster.jpg"
-        try:
-            poster.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run([ffmpeg, "-y", "-ss", "1", "-i", str(original), "-frames:v", "1", "-vf", "scale='min(640,iw)':-2", str(poster)],
-                           capture_output=True, timeout=25, check=True)
-            result.setdefault("derivatives", {})["poster"] = str(poster.relative_to(original.parents[1]))
-        except Exception:
-            poster.unlink(missing_ok=True)
     return result
+
+
+def generate_video_poster(original: Path, derived: Path) -> str | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not original.is_file():
+        return None
+    poster = derived / f"{original.stem}_poster.jpg"
+    try:
+        poster.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([ffmpeg, "-y", "-ss", "1", "-i", str(original), "-frames:v", "1", "-vf", "scale='min(640,iw)':-2", str(poster)],
+                       capture_output=True, timeout=25, check=True)
+        return str(poster.relative_to(original.parents[1]))
+    except Exception:
+        poster.unlink(missing_ok=True)
+        return None
 
 
 async def store_upload(
