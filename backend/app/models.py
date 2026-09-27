@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -113,6 +113,87 @@ class CandidateIdentifier(Base):
     display_label: Mapped[str] = mapped_column(String(100), default="Identifier")
     source_post_id: Mapped[int | None] = mapped_column(ForeignKey("pet_posts.id", ondelete="SET NULL"), nullable=True)
     is_identity_key: Mapped[bool] = mapped_column(default=False, index=True)
+
+
+class FacebookGroupSubscription(Base):
+    __tablename__ = "facebook_group_subscriptions"
+    __table_args__ = (UniqueConstraint("group_url", name="uq_facebook_group_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_url: Mapped[str] = mapped_column(Text)
+    facebook_group_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    group_name: Mapped[str] = mapped_column(String(240), default="Facebook group")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    initial_sync_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime(2026, 6, 1, tzinfo=timezone.utc))
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    newest_seen_post_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    newest_seen_post_id: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    watermark_json: Mapped[str] = mapped_column(Text, default="[]")
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    parser_warning: Mapped[str] = mapped_column(Text, default="")
+
+
+class FacebookBridgeToken(Base):
+    __tablename__ = "facebook_bridge_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    device_name: Mapped[str] = mapped_column(String(180), default="Browser extension")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FacebookGroupSyncRun(Base):
+    __tablename__ = "facebook_group_sync_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    requested_group_count: Mapped[int] = mapped_column(Integer, default=0)
+    successful_group_count: Mapped[int] = mapped_column(Integer, default=0)
+    posts_seen: Mapped[int] = mapped_column(Integer, default=0)
+    posts_new: Mapped[int] = mapped_column(Integer, default=0)
+    posts_updated: Mapped[int] = mapped_column(Integer, default=0)
+    posts_filtered: Mapped[int] = mapped_column(Integer, default=0)
+    exact_duplicates: Mapped[int] = mapped_column(Integer, default=0)
+    crossposts_combined: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    error_summary: Mapped[str] = mapped_column(Text, default="")
+
+
+class FacebookGroupSyncReceipt(Base):
+    __tablename__ = "facebook_group_sync_receipts"
+    __table_args__ = (UniqueConstraint("sync_run_id", "group_subscription_id", name="uq_facebook_sync_group"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sync_run_id: Mapped[int] = mapped_column(ForeignKey("facebook_group_sync_runs.id", ondelete="CASCADE"), index=True)
+    group_subscription_id: Mapped[int] = mapped_column(ForeignKey("facebook_group_subscriptions.id", ondelete="CASCADE"), index=True)
+    scanned: Mapped[int] = mapped_column(Integer, default=0)
+    cat_related: Mapped[int] = mapped_column(Integer, default=0)
+    posts_new: Mapped[int] = mapped_column(Integer, default=0)
+    already_known: Mapped[int] = mapped_column(Integer, default=0)
+    crossposts_combined: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="queued")
+    parser_warning: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FacebookPostFingerprint(Base):
+    __tablename__ = "facebook_post_fingerprints"
+    __table_args__ = (UniqueConstraint("post_id", name="uq_facebook_fingerprint_post"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    post_id: Mapped[int] = mapped_column(ForeignKey("pet_posts.id", ondelete="CASCADE"), index=True)
+    image_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    normalized_text_hash: Mapped[str] = mapped_column(String(64), index=True)
+    normalized_text: Mapped[str] = mapped_column(Text, default="")
+    group_subscription_id: Mapped[int | None] = mapped_column(ForeignKey("facebook_group_subscriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 class ArchieProfile(Base):

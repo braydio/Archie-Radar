@@ -31,7 +31,7 @@ def normalize_external_id(source: str, source_id: str, raw: dict | None = None):
         return "wake_county.animal_id", value.casefold(), "animal_id", "Wake ID", True
     if source in {"pawboost", "pet911", "petkey"}:
         return f"{source}.listing_id", value, "listing_id", f"{source.title()} ID", False
-    if source == "facebook_bridge":
+    if source in {"facebook_bridge", "facebook_group"}:
         return "facebook.post_id", value, "report_id", "Facebook post ID", False
     animal_id = raw.get("animal_id") or raw.get("shelter_animal_id")
     shelter = raw.get("shelter_namespace") or raw.get("shelter_name")
@@ -255,7 +255,8 @@ def _identifier_snapshot(row: CandidateIdentifier) -> dict:
             "is_identity_key": row.is_identity_key}
 
 
-def merge_candidate_cases(db: Session, survivor_id: int, absorbed_id: int, reason: str = "") -> CandidateCaseMerge:
+def merge_candidate_cases(db: Session, survivor_id: int, absorbed_id: int, reason: str = "",
+                          match_method: str = "manual") -> CandidateCaseMerge:
     if survivor_id == absorbed_id:
         raise ValueError("A case cannot be merged into itself")
     survivor, absorbed = db.get(CandidateCase, survivor_id), db.get(CandidateCase, absorbed_id)
@@ -268,7 +269,7 @@ def merge_candidate_cases(db: Session, survivor_id: int, absorbed_id: int, reaso
     survivor.review_state = next((state for state in REVIEW_PRECEDENCE if state in states), "new")
     for member in members:
         member.case_id = survivor_id
-        member.match_method = "manual"
+        member.match_method = match_method
     for identifier in identifiers:
         duplicate = db.scalar(select(CandidateIdentifier).where(
             CandidateIdentifier.case_id == survivor_id,
@@ -422,8 +423,9 @@ def case_output(db: Session, case: CandidateCase, profile=None, *, posts=None, v
     for post in sorted(posts, key=lambda item: item.last_seen_at, reverse=True):
         raw = _raw(post)
         meta = raw.get("image_meta") if isinstance(raw.get("image_meta"), dict) else {}
+        facebook_appearances = raw.get("facebook_group_appearances") if isinstance(raw.get("facebook_group_appearances"), list) else []
         records.append({"post_id": post.id, "source": post.source,
-            "source_label": "24PetConnect" if post.source in P24_SOURCES else post.source.replace("_", " ").title(),
+            "source_label": "Facebook" if post.source == "facebook_group" else "24PetConnect" if post.source in P24_SOURCES else post.source.replace("_", " ").title(),
             "source_id": post.source_id, "status": post.status, "source_url": post.source_url,
             "first_seen_at": post.first_seen_at, "last_seen_at": post.last_seen_at,
             "location_text": post.location_text, "latitude": post.latitude, "longitude": post.longitude,
@@ -436,6 +438,7 @@ def case_output(db: Session, case: CandidateCase, profile=None, *, posts=None, v
             "listing_state": _lifecycle_state(post),
             "listing_state_reason": _raw(post).get("listing_state_reason"),
             "listing_state_checked_at": _raw(post).get("listing_state_checked_at"),
+            "facebook_group_appearances": facebook_appearances,
             "identifier_label": next((item[3] for item in extract_identifiers(post)), "Record ID")})
     if identifiers is None:
         identifiers = list(db.scalars(select(CandidateIdentifier).where(

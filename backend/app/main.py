@@ -87,6 +87,7 @@ from .settings import get_settings
 from .vision import fingerprint_image
 from .surveyor_media import PublicMediaFiles, attachment_metadata, classify_media, contained_path, delete_attachment_files, generate_video_poster, store_upload
 from .traits import ARCHIE_TRAITS, is_archie_compatible
+from .facebook.router import router as facebook_router
 
 
 settings = get_settings()
@@ -348,6 +349,7 @@ app.include_router(surveyor_access_router)
 app.include_router(surveyor_tasks_router)
 app.include_router(places_router)
 app.include_router(candidates_detail_router)
+app.include_router(facebook_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"] if "*" in settings.cors_origin_list else settings.cors_origin_list,
