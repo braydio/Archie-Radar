@@ -1,11 +1,13 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { downloadMediaBundle } from '../../surveyor/mediaCapture.js'
 import MediaLinkEditor from './MediaLinkEditor.vue'
 const props = defineProps({ item: { type: Object, required: true }, api: { type: String, required: true } })
 const emit = defineEmits(['close', 'delete', 'useLocation'])
 const error = ref('')
+const previewFailed = ref(false)
 const url = computed(() => `${props.api}${props.item.preview_url || props.item.download_url}`)
+watch(() => props.item.id, () => { previewFailed.value = false; error.value = '' })
 function dateLabel(value) { return value ? new Date(value).toLocaleString() : 'Unknown' }
 async function exportItem() {
   error.value = ''
@@ -29,8 +31,9 @@ async function exportBundle() {
     <section class="media-viewer">
       <header><strong>{{ item.caption || item.original_filename }}</strong><button type="button" aria-label="Close media viewer" @click="emit('close')">×</button></header>
       <div class="media-viewer-stage">
-        <img v-if="item.attachment_type === 'image'" :src="url" :alt="item.caption || item.original_filename" />
-        <video v-else-if="item.attachment_type === 'video'" :src="`${api}${item.download_url}`" :poster="item.thumbnail_url ? `${api}${item.thumbnail_url}` : undefined" controls playsinline preload="metadata" />
+        <img v-if="item.attachment_type === 'image' && !previewFailed" :src="url" :alt="item.caption || item.original_filename" @error="previewFailed=true" />
+        <video v-else-if="item.attachment_type === 'video' && !previewFailed" :src="`${api}${item.download_url}`" :poster="item.thumbnail_url ? `${api}${item.thumbnail_url}` : undefined" controls playsinline preload="metadata" @error="previewFailed=true" />
+        <div v-else-if="['image','video'].includes(item.attachment_type)" class="media-preview-unavailable">Preview unavailable <a :href="`${api}${item.download_url}`">Download original</a></div>
         <audio v-else-if="item.attachment_type === 'audio'" :src="`${api}${item.download_url}`" controls preload="metadata" />
         <div v-else class="media-preview-unavailable">Preview unavailable <a :href="`${api}${item.download_url}`">Download original</a></div>
       </div>
