@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +32,9 @@ class Settings(BaseSettings):
 
     analyze_images: bool = True
     max_image_bytes: int = 8_000_000
+    surveyor_max_audio_mb: int = 100
+    surveyor_max_video_mb: int = Field(default=500, validation_alias=AliasChoices("SURVEYOR_MAX_VIDEO_MB", "ARCHIE_SURVEYOR_MAX_VIDEO_MB"))
+    surveyor_max_document_mb: int = 50
 
     # Home search anchor. Unit does not change the parcel-level coordinate.
     home_address: str = "30 Dollar Road #A, Chapel Hill, NC 27516"

@@ -279,12 +279,34 @@ class SurveyorAttachmentOut(BaseModel):
     map_object_id: int | None
     search_session_id: int | None
     attachment_type: str
+    original_filename: str
+    mime_type: str
+    duration_seconds: float | None
+    width: int | None
+    height: int | None
+    file_size_bytes: int
+    latitude: float | None
+    longitude: float | None
     media_url: str | None
+    preview_url: str | None
+    thumbnail_url: str | None
+    download_url: str | None
     external_url: str | None
     caption: str
+    notes: str
     observed_at: datetime | None
     source: str
+    metadata: dict
     created_at: datetime
+
+
+class SurveyorMediaExportIn(BaseModel):
+    attachment_ids: list[int] = Field(min_length=1, max_length=500)
+    include_originals: bool = True
+    include_manifest_json: bool = True
+    include_manifest_csv: bool = True
+    include_context: bool = True
+    include_exact_coordinates: bool = True
 
 
 class SurveyorLinkIn(BaseModel):

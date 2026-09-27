@@ -1,5 +1,13 @@
 import pytest
 from fastapi.testclient import TestClient
+from io import BytesIO
+from pathlib import Path
+from zipfile import ZipFile
+from PIL import Image
+from fastapi import HTTPException
+
+from app import main
+from app.surveyor_media import contained_path
 
 
 def create_pin(client: TestClient, coordinates: list[float], name: str = "Field marker") -> dict:
@@ -140,6 +148,65 @@ def test_browser_audio_mime_is_accepted_and_attachment_can_be_deleted(client: Te
     assert attachment["attachment_type"] == "audio"
     deleted = client.delete(f"/api/surveyor/attachments/{attachment['id']}")
     assert deleted.status_code == 204
+
+
+def test_image_upload_preserves_original_and_serves_separate_derivative(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "media_dir", tmp_path)
+    obj = create_pin(client, [-79.1, 35.8])
+    original = BytesIO()
+    Image.new("RGB", (64, 48), (240, 120, 20)).save(original, format="PNG")
+    original_bytes = original.getvalue()
+
+    uploaded = client.post(f"/api/surveyor/objects/{obj['id']}/attachments", files={
+        "file": ("../field photo.png", original_bytes, "image/png"),
+    }, data={"caption": "Orange cat near creek"})
+    assert uploaded.status_code == 201, uploaded.text
+    attachment = uploaded.json()
+    assert attachment["original_filename"] == "field_photo.png"
+    assert attachment["mime_type"] == "image/png"
+    assert attachment["width"] == 64
+    assert attachment["height"] == 48
+    assert attachment["file_size_bytes"] == len(original_bytes)
+
+    download = client.get(f"/api/surveyor/attachments/{attachment['id']}/download")
+    preview = client.get(f"/api/surveyor/attachments/{attachment['id']}/preview")
+    assert download.status_code == 200
+    assert download.content == original_bytes
+    assert preview.status_code == 200
+    assert preview.headers["content-type"].startswith("image/jpeg")
+    assert preview.content != original_bytes
+
+
+def test_media_export_contains_original_and_context_manifests(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "media_dir", tmp_path)
+    obj = create_pin(client, [-79.1, 35.8], "East Creek")
+    original = b"original audio bytes"
+    uploaded = client.post(f"/api/surveyor/objects/{obj['id']}/attachments", files={
+        "file": ("creek-call.webm", original, "audio/webm"),
+    }, data={"caption": "Two calls at the creek"})
+    assert uploaded.status_code == 201, uploaded.text
+    attachment = uploaded.json()
+
+    exported = client.post("/api/surveyor/media/export", json={"attachment_ids": [attachment["id"]]})
+    assert exported.status_code == 200, exported.text
+    with ZipFile(BytesIO(exported.content)) as archive:
+        names = archive.namelist()
+        root = next(name.split("/", 1)[0] for name in names)
+        assert f"{root}/README.txt" in names
+        manifest = __import__("json").loads(archive.read(f"{root}/manifest.json"))
+        item = manifest["items"][0]
+        assert item["caption"] == "Two calls at the creek"
+        assert item["map_object"]["name"] == "East Creek"
+        media_name = f"{root}/media/{item['export_filename']}"
+        assert archive.read(media_name) == original
+        assert f"{root}/manifest.csv" in names
+        assert f"{root}/context/map_objects.json" in names
+
+
+def test_attachment_paths_cannot_escape_media_root(tmp_path: Path) -> None:
+    with pytest.raises(HTTPException) as error:
+        contained_path(tmp_path, "../outside.txt")
+    assert error.value.status_code == 400
 
 
 def test_session_route_coverage_buffers_in_meters(client: TestClient) -> None:

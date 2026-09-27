@@ -3,16 +3,22 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import csv
 import io
 import json
 import logging
+import os
 import re
+import tempfile
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete, desc, func, or_, select
@@ -59,6 +65,7 @@ from .schemas import (
     SurveyorCoverageIn,
     SurveyorEventOut,
     SurveyorAttachmentOut,
+    SurveyorMediaExportIn,
     SurveyorLinkIn,
     SurveyorLinkPatch,
     SurveyorLinkOut,
@@ -72,6 +79,7 @@ from .service import (
 )
 from .settings import get_settings
 from .vision import fingerprint_image
+from .surveyor_media import attachment_metadata, classify_media, contained_path, safe_original_name, store_upload
 from .traits import ARCHIE_TRAITS, is_archie_compatible
 
 
@@ -431,10 +439,20 @@ def _session_output(row: SurveyorSearchSession) -> SurveyorSessionOut:
 
 
 def _attachment_output(row: SurveyorAttachment) -> SurveyorAttachmentOut:
-    url = f"/media/{row.storage_path}" if row.storage_path else None
+    metadata = attachment_metadata(row)
+    kind = metadata.get("media_type") or ("document" if row.attachment_type == "file" else row.attachment_type)
+    preview = f"/api/surveyor/attachments/{row.id}/preview" if row.storage_path else None
+    thumbnail = f"/api/surveyor/attachments/{row.id}/thumbnail" if row.storage_path else None
     return SurveyorAttachmentOut(id=row.id, map_object_id=row.map_object_id, search_session_id=row.search_session_id,
-        attachment_type=row.attachment_type, media_url=url, external_url=row.external_url, caption=row.caption,
-        observed_at=row.observed_at, source=row.source, created_at=row.created_at)
+        attachment_type=kind, original_filename=metadata.get("original_filename") or metadata.get("source_filename") or Path(row.storage_path or "field-media").name,
+        mime_type=metadata.get("mime_type") or metadata.get("content_type") or "application/octet-stream",
+        duration_seconds=metadata.get("duration_seconds"), width=metadata.get("width"), height=metadata.get("height"),
+        file_size_bytes=int(metadata.get("file_size_bytes") or metadata.get("size_bytes") or 0),
+        latitude=metadata.get("latitude"), longitude=metadata.get("longitude"),
+        media_url=preview, preview_url=preview, thumbnail_url=thumbnail,
+        download_url=f"/api/surveyor/attachments/{row.id}/download" if row.storage_path else None,
+        external_url=row.external_url, caption=row.caption or metadata.get("caption", ""), notes=metadata.get("notes", ""),
+        observed_at=row.observed_at, source=row.source, metadata=metadata, created_at=row.created_at)
 
 
 def _link_output(db: Session, row: SurveyorObjectLink) -> SurveyorLinkOut:
@@ -743,44 +761,23 @@ def list_object_attachments(object_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/surveyor/objects/{object_id}/attachments", response_model=SurveyorAttachmentOut, status_code=201)
 async def upload_surveyor_attachment(object_id: int, file: UploadFile = File(...), caption: str = Form(""),
-                                    observed_at: datetime | None = Form(None), db: Session = Depends(get_db)):
+                                    observed_at: datetime | None = Form(None), notes: str = Form(""),
+                                    latitude: float | None = Form(None), longitude: float | None = Form(None),
+                                    duration_seconds: float | None = Form(None), width: int | None = Form(None), height: int | None = Form(None),
+                                    source: str = Form("user capture"), db: Session = Depends(get_db)):
     map_object = db.get(SurveyorMapObject, object_id)
     if map_object is None:
         raise HTTPException(status_code=404, detail="Surveyor object not found")
-    file_types = {
-        "image/jpeg": ("image", ".jpg"), "image/png": ("image", ".png"), "image/webp": ("image", ".webp"),
-        "audio/mpeg": ("audio", ".mp3"), "audio/wav": ("audio", ".wav"), "audio/x-wav": ("audio", ".wav"),
-        "audio/webm": ("audio", ".webm"), "audio/ogg": ("audio", ".ogg"), "audio/mp4": ("audio", ".m4a"),
-        "application/pdf": ("file", ".pdf"), "text/plain": ("file", ".txt"),
-    }
-    spec = file_types.get((file.content_type or "").split(";", 1)[0].strip().lower())
-    if spec is None:
-        raise HTTPException(status_code=415, detail="Supported uploads are JPG, PNG, WebP, MP3, WAV, PDF, and plain text")
-    data = await file.read(settings.max_image_bytes + 1)
-    if not data or len(data) > settings.max_image_bytes:
-        raise HTTPException(status_code=413, detail="Attachment is empty or exceeds the upload limit")
-    attachment_type, extension = spec
-    if attachment_type == "image":
-        try:
-            image = Image.open(io.BytesIO(data))
-            image.verify()
-            image = Image.open(io.BytesIO(data))
-            output = io.BytesIO()
-            image.save(output, format={".jpg": "JPEG", ".png": "PNG", ".webp": "WEBP"}[extension])
-            data = output.getvalue()
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail="The selected file is not a valid image") from exc
-    subdirectory = "images" if attachment_type == "image" else "audio" if attachment_type == "audio" else "files"
-    filename = f"{uuid.uuid4().hex}{extension}"
-    target_dir = media_dir / "surveyor" / subdirectory
-    target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / filename).write_bytes(data)
-    row = SurveyorAttachment(map_object_id=object_id, attachment_type=attachment_type,
-        storage_path=f"surveyor/{subdirectory}/{filename}", caption=caption, observed_at=observed_at,
-        metadata_json=json.dumps({"content_type": file.content_type, "source_filename": Path(file.filename or "upload").name, "size_bytes": len(data)}))
+    kind, _ = classify_media(file.content_type, file.filename)
+    limit = settings.max_image_bytes if kind == "image" else settings.surveyor_max_video_mb * 1024 * 1024 if kind == "video" else settings.surveyor_max_audio_mb * 1024 * 1024 if kind == "audio" else settings.surveyor_max_document_mb * 1024 * 1024
+    storage_path, metadata = await store_upload(file, media_dir, caption=caption, notes=notes, observed_at=observed_at,
+        latitude=latitude, longitude=longitude, duration_seconds=duration_seconds, width=width, height=height, max_bytes=limit)
+    metadata.pop("caption", None)
+    row = SurveyorAttachment(map_object_id=object_id, attachment_type=kind, storage_path=storage_path,
+        caption=caption, observed_at=observed_at, source=source[:120], metadata_json=json.dumps(metadata))
     db.add(row); db.flush()
     _record_surveyor_event(db, "evidence_added", "map_object", object_id, "Added evidence attachment",
-        after={"attachment_id": row.id, "attachment_type": attachment_type, "caption": caption})
+        after={"attachment_id": row.id, "attachment_type": kind, "caption": caption})
     db.commit(); db.refresh(row)
     return _attachment_output(row)
 
@@ -795,40 +792,23 @@ def list_session_attachments(session_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/surveyor/sessions/{session_id}/attachments", response_model=SurveyorAttachmentOut, status_code=201)
 async def upload_session_attachment(session_id: int, file: UploadFile = File(...), caption: str = Form(""),
-                                    observed_at: datetime | None = Form(None), db: Session = Depends(get_db)):
+                                    observed_at: datetime | None = Form(None), notes: str = Form(""),
+                                    latitude: float | None = Form(None), longitude: float | None = Form(None),
+                                    duration_seconds: float | None = Form(None), width: int | None = Form(None), height: int | None = Form(None),
+                                    source: str = Form("user capture"), db: Session = Depends(get_db)):
     session = db.get(SurveyorSearchSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Search session not found")
-    file_types = {
-        "image/jpeg": ("image", ".jpg"), "image/png": ("image", ".png"), "image/webp": ("image", ".webp"),
-        "audio/mpeg": ("audio", ".mp3"), "audio/wav": ("audio", ".wav"), "audio/x-wav": ("audio", ".wav"),
-        "audio/webm": ("audio", ".webm"), "audio/ogg": ("audio", ".ogg"), "audio/mp4": ("audio", ".m4a"),
-        "application/pdf": ("file", ".pdf"), "text/plain": ("file", ".txt"),
-    }
-    spec = file_types.get((file.content_type or "").split(";", 1)[0].strip().lower())
-    if spec is None:
-        raise HTTPException(status_code=415, detail="Supported uploads are JPG, PNG, WebP, MP3, WAV, WebM, OGG, M4A, PDF, and plain text")
-    data = await file.read(settings.max_image_bytes + 1)
-    if not data or len(data) > settings.max_image_bytes:
-        raise HTTPException(status_code=413, detail="Attachment is empty or exceeds the upload limit")
-    attachment_type, extension = spec
-    if attachment_type == "image":
-        try:
-            image = Image.open(io.BytesIO(data)); image.verify()
-            image = Image.open(io.BytesIO(data)); output = io.BytesIO()
-            image.save(output, format={".jpg": "JPEG", ".png": "PNG", ".webp": "WEBP"}[extension]); data = output.getvalue()
-        except Exception as exc:
-            raise HTTPException(status_code=422, detail="The selected file is not a valid image") from exc
-    subdirectory = "images" if attachment_type == "image" else "audio" if attachment_type == "audio" else "files"
-    filename = f"{uuid.uuid4().hex}{extension}"
-    target_dir = media_dir / "surveyor" / subdirectory
-    target_dir.mkdir(parents=True, exist_ok=True); (target_dir / filename).write_bytes(data)
-    row = SurveyorAttachment(search_session_id=session_id, attachment_type=attachment_type,
-        storage_path=f"surveyor/{subdirectory}/{filename}", caption=caption, observed_at=observed_at,
-        metadata_json=json.dumps({"content_type": file.content_type, "source_filename": Path(file.filename or "upload").name, "size_bytes": len(data)}))
+    kind, _ = classify_media(file.content_type, file.filename)
+    limit = settings.max_image_bytes if kind == "image" else settings.surveyor_max_video_mb * 1024 * 1024 if kind == "video" else settings.surveyor_max_audio_mb * 1024 * 1024 if kind == "audio" else settings.surveyor_max_document_mb * 1024 * 1024
+    storage_path, metadata = await store_upload(file, media_dir, caption=caption, notes=notes, observed_at=observed_at,
+        latitude=latitude, longitude=longitude, duration_seconds=duration_seconds, width=width, height=height, max_bytes=limit)
+    metadata.pop("caption", None)
+    row = SurveyorAttachment(search_session_id=session_id, attachment_type=kind, storage_path=storage_path,
+        caption=caption, observed_at=observed_at, source=source[:120], metadata_json=json.dumps(metadata))
     db.add(row); db.flush()
     _record_surveyor_event(db, "evidence_added", "search_session", session_id, "Added session evidence attachment",
-        after={"attachment_id": row.id, "attachment_type": attachment_type, "caption": caption})
+        after={"attachment_id": row.id, "attachment_type": kind, "caption": caption})
     db.commit(); db.refresh(row)
     return _attachment_output(row)
 
@@ -851,6 +831,268 @@ def delete_surveyor_attachment(attachment_id: int, db: Session = Depends(get_db)
         before={"attachment_id": row.id, "attachment_type": row.attachment_type, "caption": row.caption})
     db.delete(row); db.commit()
     return None
+
+
+def _attachment_original_path(row: SurveyorAttachment) -> Path:
+    if not row.storage_path:
+        raise HTTPException(status_code=404, detail="This attachment has no stored original")
+    path = contained_path(media_dir, row.storage_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Stored media file is missing")
+    return path
+
+
+def _attachment_derivative_path(row: SurveyorAttachment, key: str) -> Path | None:
+    metadata = attachment_metadata(row)
+    relative = (metadata.get("derivatives") or {}).get(key)
+    if not relative:
+        return None
+    path = contained_path(media_dir, (Path("surveyor") / relative).as_posix())
+    return path if path.is_file() else None
+
+
+@app.get("/api/surveyor/attachments/{attachment_id}/download")
+def download_surveyor_attachment(attachment_id: int, db: Session = Depends(get_db)):
+    row = db.get(SurveyorAttachment, attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    metadata = attachment_metadata(row)
+    return FileResponse(_attachment_original_path(row), media_type=metadata.get("mime_type", "application/octet-stream"),
+        filename=metadata.get("original_filename") or Path(row.storage_path or "field-media").name)
+
+
+@app.get("/api/surveyor/attachments/{attachment_id}/preview")
+def preview_surveyor_attachment(attachment_id: int, db: Session = Depends(get_db)):
+    row = db.get(SurveyorAttachment, attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    metadata = attachment_metadata(row)
+    preview = _attachment_derivative_path(row, "preview")
+    path = preview or _attachment_original_path(row)
+    mime_type = "image/jpeg" if preview else metadata.get("mime_type", "application/octet-stream")
+    return FileResponse(path, media_type=mime_type, headers={"Cache-Control": "private, max-age=3600"})
+
+
+@app.get("/api/surveyor/attachments/{attachment_id}/thumbnail")
+def thumbnail_surveyor_attachment(attachment_id: int, db: Session = Depends(get_db)):
+    row = db.get(SurveyorAttachment, attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    metadata = attachment_metadata(row)
+    key = "poster" if metadata.get("media_type") == "video" or row.attachment_type == "video" else "thumbnail"
+    path = _attachment_derivative_path(row, key)
+    if path is None:
+        if metadata.get("media_type") == "image" or row.attachment_type == "image":
+            path = _attachment_original_path(row)
+        else:
+            raise HTTPException(status_code=404, detail="No thumbnail is available")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+@app.get("/api/surveyor/media", response_model=list[SurveyorAttachmentOut])
+def list_surveyor_media(
+    media_type: str | None = Query(None, pattern="^(image|video|audio|document)$"),
+    observed_from: datetime | None = None,
+    observed_to: datetime | None = None,
+    search_session_id: int | None = None,
+    map_object_id: int | None = None,
+    camera_id: int | None = None,
+    candidate_case_id: int | None = None,
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    rows = list(db.scalars(select(SurveyorAttachment).order_by(desc(SurveyorAttachment.observed_at), desc(SurveyorAttachment.created_at))))
+    result = []
+    for row in rows:
+        metadata = attachment_metadata(row)
+        kind = metadata.get("media_type") or ("document" if row.attachment_type == "file" else row.attachment_type)
+        if media_type and kind != media_type:
+            continue
+        if search_session_id is not None and row.search_session_id != search_session_id:
+            continue
+        if map_object_id is not None and row.map_object_id != map_object_id:
+            continue
+        if camera_id is not None:
+            camera = db.get(SurveyorTrailCamera, camera_id)
+            if not camera or row.map_object_id != camera.map_object_id:
+                continue
+            metadata["camera_id"] = camera.id
+            metadata["camera_name"] = camera.name
+        if candidate_case_id is not None:
+            obj = db.get(SurveyorMapObject, row.map_object_id) if row.map_object_id else None
+            props = json.loads(obj.properties_json or "{}") if obj else {}
+            if props.get("candidate_case_id") != candidate_case_id:
+                continue
+        moment = row.observed_at or row.created_at
+        if observed_from and moment < observed_from:
+            continue
+        if observed_to and moment > observed_to:
+            continue
+        result.append(_attachment_output(row))
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _slug(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9]+", "-", (value or "field-media")).strip("-").lower()
+    return (value[:48] or "field-media")
+
+
+def _export_timestamp(value: datetime | None) -> datetime:
+    value = value or utcnow()
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _remove_temp_export(path: str):
+    Path(path).unlink(missing_ok=True)
+
+
+@app.post("/api/surveyor/media/export")
+def export_surveyor_media(payload: SurveyorMediaExportIn, db: Session = Depends(get_db)):
+    requested_ids = list(dict.fromkeys(payload.attachment_ids))
+    rows = list(db.scalars(select(SurveyorAttachment).where(SurveyorAttachment.id.in_(requested_ids))))
+    by_id = {row.id: row for row in rows}
+    if len(by_id) != len(requested_ids):
+        raise HTTPException(status_code=404, detail="One or more selected media items were not found")
+    rows.sort(key=lambda row: _export_timestamp(row.observed_at or row.created_at))
+
+    created_at = utcnow()
+    manifest_items = []
+    context_objects: dict[int, dict] = {}
+    context_sessions: dict[int, dict] = {}
+    context_evidence: dict[int, dict] = {}
+    csv_rows = []
+    sequences: dict[tuple[str, str, str], int] = {}
+    files: list[tuple[Path, str]] = []
+
+    for row in rows:
+        metadata = attachment_metadata(row)
+        moment = _export_timestamp(row.observed_at or row.created_at)
+        media_type = metadata.get("media_type") or ("document" if row.attachment_type == "file" else row.attachment_type)
+        object_row = db.get(SurveyorMapObject, row.map_object_id) if row.map_object_id else None
+        session = db.get(SurveyorSearchSession, row.search_session_id) if row.search_session_id else None
+        object_props = json.loads(object_row.properties_json or "{}") if object_row else {}
+        camera = db.scalar(select(SurveyorTrailCamera).where(SurveyorTrailCamera.map_object_id == object_row.id)) if object_row else None
+        if camera:
+            context_name = camera.name
+        elif object_row and object_row.name:
+            context_name = object_row.name
+        elif session:
+            context_name = f"session-{session.id}"
+        else:
+            context_name = "field-media"
+        timestamp_slug = moment.strftime("%Y-%m-%d_%H%M%S")
+        extension = Path(metadata.get("original_filename") or row.storage_path or "media.bin").suffix.lower()
+        if not re.fullmatch(r"\.[a-z0-9]{1,10}", extension):
+            extension = ".bin"
+        sequence_key = (timestamp_slug, _slug(context_name), media_type)
+        sequences[sequence_key] = sequences.get(sequence_key, 0) + 1
+        export_filename = f"{timestamp_slug}_{sequence_key[1]}_{media_type}_{sequences[sequence_key]:03d}{extension}"
+
+        item = {
+            "attachment_id": row.id,
+            "export_filename": export_filename,
+            "original_filename": metadata.get("original_filename") or Path(row.storage_path or "field-media").name,
+            "media_type": media_type,
+            "mime_type": metadata.get("mime_type", "application/octet-stream"),
+            "file_size_bytes": metadata.get("file_size_bytes", 0),
+            "observed_at": row.observed_at.isoformat() if row.observed_at else None,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "caption": row.caption,
+            "notes": metadata.get("notes", ""),
+            "source": row.source,
+        }
+        if metadata.get("duration_seconds") is not None:
+            item["duration_seconds"] = metadata["duration_seconds"]
+        if metadata.get("width") and metadata.get("height"):
+            item["width"], item["height"] = metadata["width"], metadata["height"]
+        if payload.include_exact_coordinates:
+            if metadata.get("latitude") is not None and metadata.get("longitude") is not None:
+                item["latitude"], item["longitude"] = metadata["latitude"], metadata["longitude"]
+        if object_row:
+            object_context = {"id": object_row.id, "type": object_row.object_type, "subtype": object_row.subtype,
+                              "name": object_row.name}
+            if payload.include_exact_coordinates and object_row.centroid_lat is not None and object_row.centroid_lon is not None:
+                object_context["centroid"] = {"latitude": object_row.centroid_lat, "longitude": object_row.centroid_lon}
+            item["map_object"] = object_context
+            context_objects[object_row.id] = object_context
+            if object_row.object_type == "evidence":
+                evidence = {**object_context, "occurred_at": object_row.occurred_at.isoformat() if object_row.occurred_at else None,
+                            "confidence": object_row.confidence, "epistemic_state": object_row.epistemic_state,
+                            "notes": object_row.notes, "properties": {key: value for key, value in object_props.items()
+                                if key not in {"contact_name", "contact_method", "contact_notes", "phone", "email"}}}
+                context_evidence[object_row.id] = evidence
+        if session:
+            item["search_session"] = {"id": session.id, "method": session.method,
+                                       "started_at": session.started_at.isoformat(),
+                                       "ended_at": session.ended_at.isoformat() if session.ended_at else None}
+            context_sessions[session.id] = item["search_session"]
+        case_id = object_props.get("candidate_case_id")
+        if case_id is not None:
+            item["candidate_case_id"] = case_id
+            candidate_case = db.get(CandidateCase, int(case_id))
+            if candidate_case:
+                item["candidate_case"] = {"id": candidate_case.id, "display_name": candidate_case.display_name,
+                                           "holding_entity": candidate_case.holding_entity, "review_state": candidate_case.review_state}
+        if camera:
+            placements = list(db.scalars(select(SurveyorCameraPlacement).where(SurveyorCameraPlacement.camera_id == camera.id)
+                .order_by(SurveyorCameraPlacement.installed_at.desc())))
+            item["camera"] = {"id": camera.id, "name": camera.name, "placements": [
+                {"id": place.id, "installed_at": place.installed_at.isoformat(),
+                 "removed_at": place.removed_at.isoformat() if place.removed_at else None,
+                 "heading_degrees": place.heading_degrees, "fov_degrees": place.fov_degrees,
+                 "range_meters": place.range_meters} for place in placements]}
+        manifest_items.append(item)
+        csv_rows.append({
+            "attachment_id": row.id, "export_filename": export_filename,
+            "original_filename": item["original_filename"], "media_type": media_type, "mime_type": item["mime_type"],
+            "observed_at": item["observed_at"] or item["created_at"], "caption": row.caption,
+            "latitude": item.get("latitude"), "longitude": item.get("longitude"),
+            "object_id": object_row.id if object_row else None,
+            "object_type": object_row.object_type if object_row else None,
+            "object_name": object_row.name if object_row else None,
+            "session_id": session.id if session else None,
+            "candidate_case_id": case_id,
+            "evidence_resolution": object_props.get("resolution") if object_row and object_row.object_type == "evidence" else None,
+        })
+        if payload.include_originals:
+            files.append((_attachment_original_path(row), f"media/{export_filename}"))
+
+    export_name = f"archie-radar-export-{created_at.strftime('%Y-%m-%d')}"
+    manifest = {"export_created_at": created_at.isoformat(), "file_count": len(rows), "originals_included": payload.include_originals,
+                "items": manifest_items}
+    descriptor, temp_name = tempfile.mkstemp(prefix="archie-radar-export-", suffix=".zip")
+    os.close(descriptor)
+    try:
+        with zipfile.ZipFile(temp_name, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            archive.writestr(f"{export_name}/README.txt",
+                f"Archie Radar media export\nCreated: {created_at.isoformat()}\nFiles: {len(rows)}\n"
+                f"Originals included: {'yes' if payload.include_originals else 'no'}\n"
+                "manifest.json contains full media and field context.\nmanifest.csv is a flat review summary.\n")
+            if payload.include_manifest_json:
+                archive.writestr(f"{export_name}/manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
+            if payload.include_manifest_csv:
+                stream = io.StringIO(newline="")
+                fields = ["attachment_id", "export_filename", "original_filename", "media_type", "mime_type", "observed_at",
+                          "caption", "latitude", "longitude", "object_id", "object_type", "object_name", "session_id",
+                          "candidate_case_id", "evidence_resolution"]
+                writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+                writer.writeheader(); writer.writerows(csv_rows)
+                archive.writestr(f"{export_name}/manifest.csv", stream.getvalue())
+            if payload.include_context:
+                archive.writestr(f"{export_name}/context/map_objects.json", json.dumps(list(context_objects.values()), indent=2))
+                archive.writestr(f"{export_name}/context/sessions.json", json.dumps(list(context_sessions.values()), indent=2))
+                archive.writestr(f"{export_name}/context/evidence.json", json.dumps(list(context_evidence.values()), indent=2))
+            for source_path, archive_path in files:
+                archive.write(source_path, f"{export_name}/{archive_path}")
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return FileResponse(temp_name, media_type="application/zip", filename=f"{export_name}.zip",
+                        background=BackgroundTask(_remove_temp_export, temp_name))
 
 
 @app.get("/api/surveyor/links", response_model=list[SurveyorLinkOut])
