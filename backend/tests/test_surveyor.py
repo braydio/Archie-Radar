@@ -257,6 +257,25 @@ def test_attachment_can_link_to_session_without_copying_original(client: TestCli
     assert list((tmp_path / "surveyor" / "original").glob("*")) == stored_files
 
 
+def test_duplicate_media_upload_reuses_original_until_last_attachment_deleted(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "media_dir", tmp_path)
+    first = create_pin(client, [-79.1, 35.8], "First observation")
+    second = create_pin(client, [-79.2, 35.8], "Related observation")
+    image = BytesIO()
+    Image.new("RGB", (48, 32), (40, 120, 220)).save(image, format="PNG")
+    content = image.getvalue()
+
+    one = client.post(f"/api/surveyor/objects/{first['id']}/attachments", files={"file": ("first.png", content, "image/png")})
+    two = client.post(f"/api/surveyor/objects/{second['id']}/attachments", files={"file": ("copy.png", content, "image/png")})
+
+    assert one.status_code == two.status_code == 201
+    assert one.json()["metadata"]["sha256"] == two.json()["metadata"]["sha256"]
+    assert len(list((tmp_path / "surveyor" / "original").glob("*"))) == 1
+    assert one.json()["id"] != two.json()["id"]
+    assert client.delete(f"/api/surveyor/attachments/{one.json()['id']}").status_code == 204
+    assert client.get(f"/api/surveyor/attachments/{two.json()['id']}/download").content == content
+    assert client.delete(f"/api/surveyor/attachments/{two.json()['id']}").status_code == 204
+    assert not list((tmp_path / "surveyor" / "original").glob("*"))
 def test_attachment_paths_cannot_escape_media_root(tmp_path: Path) -> None:
     with pytest.raises(HTTPException) as error:
         contained_path(tmp_path, "../outside.txt")

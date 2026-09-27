@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import re
@@ -61,7 +62,9 @@ class PublicMediaFiles(StaticFiles):
         return await super().get_response(path, scope)
 
 
-def delete_attachment_files(row, media_dir: Path) -> None:
+def delete_attachment_files(row, media_dir: Path, *, shared: bool = False) -> None:
+    if shared:
+        return
     paths = []
     if row.storage_path:
         paths.append(row.storage_path)
@@ -178,12 +181,14 @@ async def store_upload(
     destination = media_dir / relative
     destination.parent.mkdir(parents=True, exist_ok=True)
     size = 0
+    digest = hashlib.sha256()
     try:
         with destination.open("wb") as output:
             while chunk := await upload.read(CHUNK_SIZE):
                 size += len(chunk)
                 if size > max_bytes:
                     raise HTTPException(status_code=413, detail="Media exceeds the upload size limit")
+                digest.update(chunk)
                 output.write(chunk)
         if size == 0:
             raise HTTPException(status_code=422, detail="Selected media file is empty")
@@ -204,6 +209,7 @@ async def store_upload(
             "mime_type": mime_type,
             "original_filename": original_filename,
             "file_size_bytes": size,
+            "sha256": digest.hexdigest(),
             "notes": notes,
         }
         if latitude is not None and longitude is not None and -90 <= latitude <= 90 and -180 <= longitude <= 180:

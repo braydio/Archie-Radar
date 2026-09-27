@@ -15,6 +15,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
@@ -460,6 +461,28 @@ def _attachment_output(row: SurveyorAttachment) -> SurveyorAttachmentOut:
         observed_at=row.observed_at, source=row.source, metadata=metadata, created_at=row.created_at)
 
 
+def _reuse_duplicate_upload(db: Session, storage_path: str, metadata: dict) -> tuple[str, dict]:
+    digest = metadata.get("sha256")
+    if not digest:
+        return storage_path, metadata
+    for existing in db.scalars(select(SurveyorAttachment).where(SurveyorAttachment.storage_path.is_not(None))):
+        existing_metadata = attachment_metadata(existing)
+        if existing_metadata.get("sha256") != digest or not existing.storage_path:
+            continue
+        try:
+            original = contained_path(media_dir, existing.storage_path)
+        except HTTPException:
+            continue
+        if not original.is_file():
+            continue
+        temporary = SimpleNamespace(storage_path=storage_path, metadata_json=json.dumps(metadata))
+        delete_attachment_files(temporary, media_dir)
+        reused_metadata = {**existing_metadata, **metadata}
+        reused_metadata["derivatives"] = existing_metadata.get("derivatives", {})
+        return existing.storage_path, reused_metadata
+    return storage_path, metadata
+
+
 def _attachment_link_output(db: Session, row: SurveyorAttachmentLink) -> SurveyorAttachmentLinkOut:
     label = f"{row.entity_type.replace('_', ' ')} #{row.entity_id}"
     if row.entity_type == "map_object":
@@ -838,6 +861,7 @@ async def upload_surveyor_attachment(object_id: int, background_tasks: Backgroun
     limit = settings.max_image_bytes if kind == "image" else settings.surveyor_max_video_mb * 1024 * 1024 if kind == "video" else settings.surveyor_max_audio_mb * 1024 * 1024 if kind == "audio" else settings.surveyor_max_document_mb * 1024 * 1024
     storage_path, metadata = await store_upload(file, media_dir, caption=caption, notes=notes, observed_at=observed_at,
         latitude=latitude, longitude=longitude, duration_seconds=duration_seconds, width=width, height=height, max_bytes=limit)
+    storage_path, metadata = _reuse_duplicate_upload(db, storage_path, metadata)
     metadata.pop("caption", None)
     row = SurveyorAttachment(map_object_id=object_id, attachment_type=kind, storage_path=storage_path,
         caption=caption, observed_at=observed_at, source=source[:120], metadata_json=json.dumps(metadata))
@@ -871,6 +895,7 @@ async def upload_session_attachment(session_id: int, background_tasks: Backgroun
     limit = settings.max_image_bytes if kind == "image" else settings.surveyor_max_video_mb * 1024 * 1024 if kind == "video" else settings.surveyor_max_audio_mb * 1024 * 1024 if kind == "audio" else settings.surveyor_max_document_mb * 1024 * 1024
     storage_path, metadata = await store_upload(file, media_dir, caption=caption, notes=notes, observed_at=observed_at,
         latitude=latitude, longitude=longitude, duration_seconds=duration_seconds, width=width, height=height, max_bytes=limit)
+    storage_path, metadata = _reuse_duplicate_upload(db, storage_path, metadata)
     metadata.pop("caption", None)
     row = SurveyorAttachment(search_session_id=session_id, attachment_type=kind, storage_path=storage_path,
         caption=caption, observed_at=observed_at, source=source[:120], metadata_json=json.dumps(metadata))
@@ -889,7 +914,9 @@ def delete_surveyor_attachment(attachment_id: int, db: Session = Depends(get_db)
     if row is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
     if row.storage_path:
-        delete_attachment_files(row, media_dir)
+        shared = db.scalar(select(func.count(SurveyorAttachment.id)).where(
+            SurveyorAttachment.storage_path == row.storage_path)) > 1
+        delete_attachment_files(row, media_dir, shared=shared)
     owner_type = "map_object" if row.map_object_id is not None else "search_session"
     owner_id = row.map_object_id if row.map_object_id is not None else row.search_session_id
     _record_surveyor_event(db, "attachment_deleted", owner_type, owner_id, "Deleted evidence attachment",
