@@ -21,6 +21,8 @@ const merges = ref([])
 const tab = ref('overview')
 const error = ref('')
 const saving = ref(false)
+const exporting = ref(false)
+const copied = ref('')
 const hero = computed(() => item.value?.primary_image || item.value?.case_images?.[0] || null)
 const tabs = ['overview', 'activity', 'media', 'sources']
 const queueNeighbors = computed(() => {
@@ -99,13 +101,37 @@ async function reverseMerge(mergeId) {
     await load()
   } catch (cause) { error.value = cause.message || 'Merge could not be reversed' }
 }
+async function exportCase() {
+  if (exporting.value) return
+  exporting.value = true
+  error.value = ''
+  try {
+    const response = await fetch(`${API}/api/candidate-cases/${item.value.case_id}/export`, { method: 'POST' })
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || 'Case export failed')
+    const blob = await response.blob()
+    const href = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = href
+    link.download = `archie-radar-case-${item.value.case_id}.zip`
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(href), 1000)
+  } catch (cause) { error.value = cause.message || 'Case export failed' }
+  finally { exporting.value = false }
+}
+async function copyIdentifier(value, label = '') {
+  try {
+    await navigator.clipboard.writeText(value)
+    copied.value = `${label} copied`
+    setTimeout(() => { copied.value = '' }, 1800)
+  } catch { error.value = 'Clipboard access is unavailable' }
+}
 onMounted(load)
 watch(() => route.params.caseId, load)
 </script>
 
 <template>
   <main class="candidate-case-page" v-if="item">
-    <div class="case-navigation"><button class="case-back-link" type="button" @click="router.back()">← Candidates</button><span class="case-neighbor-controls"><RouterLink v-if="queueNeighbors.previous" :to="`/candidates/${queueNeighbors.previous}`">Previous</RouterLink><RouterLink v-if="queueNeighbors.next" :to="`/candidates/${queueNeighbors.next}`">Next</RouterLink></span></div>
+        <div class="case-navigation"><button class="case-back-link" type="button" @click="router.back()">← Candidates</button><span class="case-neighbor-controls"><RouterLink v-if="queueNeighbors.previous" :to="`/candidates/${queueNeighbors.previous}`">Previous</RouterLink><RouterLink v-if="queueNeighbors.next" :to="`/candidates/${queueNeighbors.next}`">Next</RouterLink><button type="button" class="secondary-button" :disabled="exporting" @click="exportCase">{{ exporting ? 'Preparing…' : 'Export case' }}</button></span></div>
     <header class="candidate-case-hero">
       <CandidateMedia v-if="hero" :image="hero" :other-images="item.case_images?.filter(image => image.url !== hero.url) || []" :alt="`Candidate case ${item.case_id} photo`" :case-id="item.case_id" />
       <div class="candidate-case-facts">
@@ -113,8 +139,10 @@ watch(() => route.params.caseId, load)
         <h1>{{ item.current_custody?.holding_entity || item.current_custody?.custody_label || 'Status unknown' }}</h1>
         <p>{{ item.current_custody?.custody_label || item.custody_label || 'Status unknown' }}<template v-if="item.source_platform"> · via {{ item.source_platform }}</template></p>
         <div class="candidate-case-ids">
-          <strong v-for="identifier in item.external_ids" :key="identifier.namespace + identifier.value">{{ identifier.label }} {{ identifier.value }}</strong>
+          <strong v-for="identifier in item.external_ids" :key="identifier.namespace + identifier.value">{{ identifier.label }} {{ identifier.value }} <button type="button" class="copy-id-button" @click="copyIdentifier(identifier.value, identifier.label)">Copy</button></strong>
           <span>Radar case #{{ item.case_id }} · {{ item.record_count }} source {{ item.record_count === 1 ? 'record' : 'records' }}</span>
+          <button v-if="item.external_ids?.length > 1" type="button" class="copy-id-button copy-all-ids" @click="copyIdentifier(item.external_ids.map(identifier => `${identifier.label} ${identifier.value}`).join('\n'), 'All IDs')">Copy all IDs</button>
+          <small v-if="copied">{{ copied }}</small>
         </div>
         <p v-if="item.current_location?.location_text">{{ item.current_location.location_text }}<template v-if="item.current_location.distance_from_home_miles != null"> · {{ item.current_location.distance_is_approximate ? '~' : '' }}{{ Number(item.current_location.distance_from_home_miles).toFixed(1) }} mi from home</template><small v-if="item.current_location.record_id"> · source record #{{ item.current_location.record_id }}</small></p>
         <button v-if="item.current_location?.map_latitude != null" type="button" class="secondary-button" @click="openCurrentLocation">Open location in Surveyor</button>
@@ -122,6 +150,7 @@ watch(() => route.params.caseId, load)
           <button class="possible" @click="review('possible')">Possible Archie</button>
           <button class="hold" @click="review('needs_review')">Hold</button>
           <button class="dismiss" @click="review('dismissed')">Not Archie</button>
+          <button class="confirm" @click="review('confirmed')">Confirmed Archie</button>
         </div>
       </div>
     </header>

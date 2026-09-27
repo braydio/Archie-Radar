@@ -155,6 +155,10 @@ def _lifecycle_state(post: PetPost) -> str:
     return value if value in {"active", "inactive"} else "unknown"
 
 
+def _lifecycle_priority(post: PetPost) -> int:
+    return {"active": 2, "unknown": 1, "inactive": 0}[_lifecycle_state(post)]
+
+
 def _timestamp(post: PetPost):
     from datetime import timezone
     values = [value for value in (post.reported_at, post.last_seen_at, post.first_seen_at) if value is not None]
@@ -180,7 +184,8 @@ def case_is_inactive(posts: list[PetPost]) -> bool:
 def choose_current_location_record(posts: list[PetPost], outputs: dict[int, dict]) -> PetPost | None:
     candidates = [post for post in posts if _lifecycle_state(post) != "inactive" and
                   (outputs[post.id].get("map_latitude") is not None or post.location_text)]
-    return max(candidates, key=lambda post: (_timestamp(post), bool(post.latitude is not None and post.longitude is not None)), default=None)
+    return max(candidates, key=lambda post: (_lifecycle_priority(post), _timestamp(post),
+        bool(post.latitude is not None and post.longitude is not None)), default=None)
 
 
 def choose_current_custody_record(posts: list[PetPost]) -> PetPost | None:
@@ -191,7 +196,7 @@ def choose_current_custody_record(posts: list[PetPost]) -> PetPost | None:
         raw = _raw(post)
         if raw.get("holding_entity") or raw.get("custody_type") or raw.get("custody_label"):
             candidates.append(post)
-    return max(candidates, key=_timestamp, default=None)
+    return max(candidates, key=lambda post: (_lifecycle_priority(post), _timestamp(post)), default=None)
 
 
 def choose_best_match_record(posts: list[PetPost]) -> PetPost | None:

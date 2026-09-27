@@ -688,6 +688,9 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
 .candidate-case-facts p { color: var(--muted); }
 .candidate-case-ids { display: grid; gap: 5px; margin: 18px 0; }
 .candidate-case-ids strong { font-size: 1.05rem; }
+.copy-id-button { min-height: 34px; margin-left: 5px; padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: 7px; background: transparent; font: inherit; font-size: .78rem; }
+.case-review-actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 620px) { .case-review-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .candidate-case-tabs { display: flex; gap: 6px; overflow-x: auto; margin: 18px 0 0; border-bottom: 1px solid var(--line-strong); }
 .candidate-case-tabs button { min-height: 46px; padding: 0 16px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--ink); text-transform: capitalize; font-weight: 750; white-space: nowrap; }
 .candidate-case-tabs button[aria-current="page"] { border-bottom-color: var(--accent); }

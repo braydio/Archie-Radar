@@ -276,6 +276,38 @@ def test_duplicate_media_upload_reuses_original_until_last_attachment_deleted(cl
     assert client.get(f"/api/surveyor/attachments/{two.json()['id']}/download").content == content
     assert client.delete(f"/api/surveyor/attachments/{two.json()['id']}").status_code == 204
     assert not list((tmp_path / "surveyor" / "original").glob("*"))
+
+
+def test_case_export_contains_linked_field_media_and_case_history(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "media_dir", tmp_path)
+    from app.candidates import router as candidates_router_module
+    monkeypatch.setattr(candidates_router_module, "media_root", tmp_path)
+    report = client.post("/api/bridge/facebook", json={
+        "source_id": "case-export-media", "status": "found", "name": "Milo",
+        "description": "Orange tabby", "location_text": "Pittsboro", "latitude": 35.8, "longitude": -79.1,
+    })
+    assert report.status_code in (200, 201), report.text
+    case_id = client.get("/api/candidate-cases").json()[0]["case_id"]
+    obj = client.post("/api/surveyor/objects", json={
+        "object_type": "evidence", "subtype": "photo", "name": "Field photo",
+        "geometry": {"type": "Point", "coordinates": [-79.1, 35.8]},
+        "properties": {"candidate_case_id": case_id, "resolution": "unresolved"},
+    }).json()
+    attachment = client.post(f"/api/surveyor/objects/{obj['id']}/attachments", files={
+        "file": ("evidence.jpg", b"original case evidence", "image/jpeg"),
+    }).json()
+
+    exported = client.post(f"/api/candidate-cases/{case_id}/export")
+
+    assert exported.status_code == 200, exported.text
+    with ZipFile(BytesIO(exported.content)) as archive:
+        names = archive.namelist()
+        root = next(name.split("/", 1)[0] for name in names)
+        summary = __import__("json").loads(archive.read(f"{root}/case.json"))
+        manifest = __import__("json").loads(archive.read(f"{root}/media-manifest.json"))
+        assert summary["case_id"] == case_id
+        assert manifest[0]["attachment_id"] == attachment["id"]
+        assert archive.read(f"{root}/media/{manifest[0]['export_filename']}") == b"original case evidence"
 def test_attachment_paths_cannot_escape_media_root(tmp_path: Path) -> None:
     with pytest.raises(HTTPException) as error:
         contained_path(tmp_path, "../outside.txt")

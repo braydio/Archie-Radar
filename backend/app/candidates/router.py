@@ -1,18 +1,30 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
+import re
+import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import (CandidateCase, CandidateCaseMerge, CandidateCaseNote, CandidateCasePost,
-                      CandidateIdentifier, CandidateIdentityExclusion, PetPost, SurveyorEvent)
+                      CandidateIdentifier, CandidateIdentityExclusion, PetPost, SurveyorAttachment,
+                      SurveyorAttachmentLink, SurveyorEvent, SurveyorMapObject)
+from ..surveyor_media import attachment_metadata, contained_path
+from ..settings import get_settings
 from .identity import case_output, choose_primary_post, extract_identifiers, merge_candidate_cases, reverse_case_merge
 
 router = APIRouter(prefix="/api/candidate-cases", tags=["candidate-cases"])
+settings = get_settings()
+media_root = Path(settings.media_dir).resolve()
 
 
 class CandidateCaseNoteIn(BaseModel):
@@ -175,6 +187,90 @@ def list_case_merges(case_id: int, db: Session = Depends(get_db)):
     return [{"id": row.id, "survivor_case_id": row.survivor_case_id,
              "absorbed_case_id": row.absorbed_case_id, "reason": row.reason,
              "created_at": row.created_at, "reversed_at": row.reversed_at} for row in rows]
+
+
+@router.post("/{case_id}/export")
+def export_candidate_case(case_id: int, db: Session = Depends(get_db)):
+    case = _case_or_404(db, case_id)
+    projection = case_output(db, case)
+    source_records = projection.get("source_records", [])
+    notes = list(db.scalars(select(CandidateCaseNote).where(CandidateCaseNote.case_id == case_id)
+                            .order_by(CandidateCaseNote.created_at)))
+    linked_ids = {row.attachment_id for row in db.scalars(select(SurveyorAttachmentLink).where(
+        SurveyorAttachmentLink.entity_type == "candidate_case",
+        SurveyorAttachmentLink.entity_id == str(case_id)))}
+    linked_ids.update(row.id for row in db.scalars(select(SurveyorAttachment).join(
+        SurveyorMapObject, SurveyorMapObject.id == SurveyorAttachment.map_object_id))
+        if (properties := _properties(row.map_object_id, db)).get("candidate_case_id") == case_id)
+
+    attachments = [db.get(SurveyorAttachment, attachment_id) for attachment_id in linked_ids]
+    attachments = [row for row in attachments if row]
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    safe = re.sub(r"[^A-Za-z0-9]+", "-", projection.get("display_name") or f"case-{case_id}").strip("-").lower()
+    root = f"archie-radar-case-{case_id}-{safe[:40]}-{stamp}"
+    summary = {
+        "case_id": case_id,
+        "review_state": projection.get("review_state"),
+        "display_name": projection.get("display_name"),
+        "current_record_id": projection.get("current_record_id"),
+        "current_location": projection.get("current_location"),
+        "current_custody": projection.get("current_custody"),
+        "external_ids": projection.get("external_ids", []),
+        "record_count": projection.get("record_count", 0),
+        "source_records": source_records,
+    }
+    manifest = []
+    archive_data = io.BytesIO()
+    with zipfile.ZipFile(archive_data, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{root}/README.txt", f"Archie Radar case export created {stamp}.\nLocal originals included: {len(attachments)}.\ncase.json is the structured case summary; manifest.csv lists included local media.\n")
+        archive.writestr(f"{root}/case.json", json.dumps(summary, default=str, indent=2))
+        archive.writestr(f"{root}/case-notes.json", json.dumps([
+            {"id": note.id, "body": note.body, "created_at": note.created_at} for note in notes
+        ], default=str, indent=2))
+        for index, attachment in enumerate(attachments, start=1):
+            if not attachment.storage_path:
+                continue
+            try:
+                path = contained_path(media_root, attachment.storage_path)
+            except HTTPException:
+                continue
+            if not path.is_file():
+                continue
+            metadata = attachment_metadata(attachment)
+            observed = attachment.observed_at or attachment.created_at
+            timestamp = observed.astimezone(timezone.utc).strftime("%Y-%m-%d_%H%M%S") if observed.tzinfo else observed.strftime("%Y-%m-%d_%H%M%S")
+            original_name = Path(metadata.get("original_filename") or path.name).name
+            extension = Path(original_name).suffix[:12]
+            media_type = metadata.get("media_type") or attachment.attachment_type
+            slug = re.sub(r"[^A-Za-z0-9]+", "-", (attachment.caption or Path(original_name).stem)).strip("-").lower()[:40] or "field-media"
+            export_name = f"{timestamp}_{slug}_{media_type}_{index:03d}{extension}"
+            archive.writestr(f"{root}/media/{export_name}", path.read_bytes())
+            manifest.append({"attachment_id": attachment.id, "export_filename": export_name,
+                "original_filename": original_name, "media_type": media_type,
+                "mime_type": metadata.get("mime_type"), "file_size_bytes": metadata.get("file_size_bytes"),
+                "observed_at": attachment.observed_at, "created_at": attachment.created_at,
+                "caption": attachment.caption, "latitude": metadata.get("latitude"), "longitude": metadata.get("longitude")})
+        archive.writestr(f"{root}/media-manifest.json", json.dumps(manifest, default=str, indent=2))
+        table = io.StringIO(newline="")
+        writer = csv.DictWriter(table, fieldnames=["attachment_id", "export_filename", "original_filename", "media_type", "mime_type", "observed_at", "caption"], extrasaction="ignore")
+        writer.writeheader()
+        for row in manifest:
+            writer.writerow(row)
+        archive.writestr(f"{root}/manifest.csv", table.getvalue())
+    archive_data.seek(0)
+    return StreamingResponse(archive_data, media_type="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="{root}.zip"'})
+
+
+def _properties(object_id: int | None, db: Session) -> dict:
+    if object_id is None:
+        return {}
+    obj = db.get(SurveyorMapObject, object_id)
+    try:
+        value = json.loads(obj.properties_json or "{}") if obj else {}
+        return value if isinstance(value, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
 
 
 @router.post("/{case_id}/merges/{merge_id}/reverse")
