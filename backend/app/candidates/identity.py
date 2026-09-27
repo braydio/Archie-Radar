@@ -168,8 +168,12 @@ def _timestamp(post: PetPost):
 def choose_current_record(posts: list[PetPost]) -> PetPost | None:
     """Choose the freshest source record, preferring records explicitly still active."""
     active = [post for post in posts if _lifecycle_state(post) == "active"]
-    pool = active or [post for post in posts if _lifecycle_state(post) != "inactive"] or posts
+    pool = active or [post for post in posts if _lifecycle_state(post) == "unknown"]
     return max(pool, key=lambda post: (_timestamp(post), bool(post.description), bool(post.location_text)), default=None)
+
+
+def case_is_inactive(posts: list[PetPost]) -> bool:
+    return bool(posts) and all(_lifecycle_state(post) == "inactive" for post in posts)
 
 
 def choose_current_location_record(posts: list[PetPost], outputs: dict[int, dict]) -> PetPost | None:
@@ -304,6 +308,8 @@ def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
             "image_width": meta.get("width"), "image_height": meta.get("height"),
             "image_aspect_ratio": meta.get("aspect_ratio"),
             "listing_state": _lifecycle_state(post),
+            "listing_state_reason": _raw(post).get("listing_state_reason"),
+            "listing_state_checked_at": _raw(post).get("listing_state_checked_at"),
             "identifier_label": next((item[3] for item in extract_identifiers(post)), "Record ID")})
     identifiers = list(db.scalars(select(CandidateIdentifier).where(
         CandidateIdentifier.case_id == case.id, CandidateIdentifier.is_identity_key.is_(True)).order_by(CandidateIdentifier.identifier_kind, CandidateIdentifier.id)))

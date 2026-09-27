@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.candidates.identity import case_output
+from app.candidates.identity import case_is_inactive, case_output
 from app.db import Base
 from app.models import ArchieProfile, CandidateCase, CandidateCasePost, PetPost
 
@@ -52,5 +52,34 @@ def test_case_projection_keeps_current_location_and_distance_with_same_record():
             assert result["current_custody"]["record_id"] == newer.id
             assert result["custody_label"] == "With finder"
             assert result["match_record_id"] == newer.id
+    finally:
+        engine.dispose()
+
+
+def test_inactive_source_remains_in_case_history_but_has_no_current_custody():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine) as db:
+            post = PetPost(source="regional_24petconnect", source_id="A124", status="shelter_intake",
+                name="Found cat", location_text="Old shelter", latitude=35.95, longitude=-79.0,
+                raw_json=json.dumps({"listing_state": "inactive", "listing_state_reason": "reunited",
+                                     "holding_entity": "Old Shelter", "custody_label": "At shelter"}))
+            case = CandidateCase(review_state="new")
+            db.add_all([post, case])
+            db.flush()
+            case.primary_post_id = post.id
+            db.add(CandidateCasePost(case_id=case.id, post_id=post.id))
+            db.commit()
+
+            result = case_output(db, case)
+
+            assert case_is_inactive([post])
+            assert result["record_count"] == 1
+            assert result["current_record_id"] is None
+            assert result["current_location"] is None
+            assert result["current_custody"] is None
+            assert result["custody_label"] == "Status unknown"
+            assert result["source_records"][0]["listing_state"] == "inactive"
     finally:
         engine.dispose()

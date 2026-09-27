@@ -37,7 +37,7 @@ from .connectors.aps_durham import APSDurhamFoundPetsConnector
 from .connectors.wake_county import WakeCountyLostFoundConnector
 from .connectors.pet911 import Pet911Connector
 from .connectors.petkey import PetkeyConnector
-from .candidates.identity import case_output, ensure_candidate_cases
+from .candidates.identity import case_is_inactive, case_output, ensure_candidate_cases
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
@@ -1658,6 +1658,7 @@ def list_candidate_cases(
     reported_within_days: int | None = Query(None, ge=1, le=3650),
     not_before: datetime | None = None,
     include_duplicates: bool = True,
+    include_inactive: bool = False,
     max_distance_miles: float | None = Query(None, ge=0, le=500),
     sort: str = Query("smart", pattern="^(smart|newest|closest|score)$"),
     limit: int = Query(100, ge=1, le=2000),
@@ -1678,6 +1679,10 @@ def list_candidate_cases(
     results = []
     for case in cases:
         memberships = list(db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)))
+        case_posts = [db.get(PetPost, membership.post_id) for membership in memberships]
+        case_posts = [row for row in case_posts if row]
+        if not include_inactive and case_is_inactive(case_posts):
+            continue
         members = []
         for membership in memberships:
             row = db.get(PetPost, membership.post_id)

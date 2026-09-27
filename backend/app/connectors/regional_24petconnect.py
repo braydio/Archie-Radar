@@ -68,18 +68,28 @@ class Regional24PetConnectConnector(Connector):
 
             async def active(row: PetPostIn) -> PetPostIn | None:
                 if not row.source_url or row.source_url == str(response.url):
-                    return row
+                    return row.model_copy(update={"raw": {**row.raw, "listing_state": "active",
+                        "listing_state_checked_at": datetime.now(timezone.utc).isoformat()}})
                 try:
                     detail = await client.get(row.source_url, timeout=12)
                     detail.raise_for_status()
                     text = BeautifulSoup(detail.text, "html.parser").get_text(" ", strip=True).lower()
-                    inactive = bool(re.search(r"\b(?:inactive|reunited|adopted)\b|no longer (?:active|available)|listing (?:is )?closed|animal (?:is )?no longer available", text, re.I))
-                    if inactive:
-                        return None
+                    reason_match = re.search(
+                        r"\b(reunited|adopted|inactive)\b|listing (?:is )?closed|no longer (?:active|available)|animal (?:is )?no longer available",
+                        text, re.I,
+                    )
+                    reason = reason_match.group(1).lower() if reason_match and reason_match.lastindex else (
+                        "closed" if reason_match else None
+                    )
+                    state = "inactive" if reason else "active"
+                    return row.model_copy(update={"raw": {**row.raw, "listing_state": state,
+                        "listing_state_reason": reason,
+                        "listing_state_checked_at": datetime.now(timezone.utc).isoformat()}})
                 except Exception:
                     # A failed detail check must not erase a valid search-result row.
                     pass
-                return row
+                return row.model_copy(update={"raw": {**row.raw, "listing_state": "active",
+                    "listing_state_checked_at": datetime.now(timezone.utc).isoformat()}})
 
             checked = await asyncio.gather(*(active(row) for row in rows))
             return [row for row in checked if row is not None]
