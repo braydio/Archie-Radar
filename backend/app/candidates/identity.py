@@ -181,6 +181,10 @@ def case_is_inactive(posts: list[PetPost]) -> bool:
     return bool(posts) and all(_lifecycle_state(post) == "inactive" for post in posts)
 
 
+def is_source_inactive(post: PetPost) -> bool:
+    return _lifecycle_state(post) == "inactive"
+
+
 def choose_current_location_record(posts: list[PetPost], outputs: dict[int, dict]) -> PetPost | None:
     candidates = [post for post in posts if _lifecycle_state(post) != "inactive" and
                   (outputs[post.id].get("map_latitude") is not None or post.location_text)]

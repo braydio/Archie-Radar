@@ -38,7 +38,7 @@ from .connectors.aps_durham import APSDurhamFoundPetsConnector
 from .connectors.wake_county import WakeCountyLostFoundConnector
 from .connectors.pet911 import Pet911Connector
 from .connectors.petkey import PetkeyConnector
-from .candidates.identity import case_is_inactive, case_output, ensure_candidate_cases
+from .candidates.identity import case_is_inactive, case_output, ensure_candidate_cases, is_source_inactive
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
@@ -1717,6 +1717,8 @@ def list_candidate_cases(
             row = db.get(PetPost, membership.post_id)
             if not row:
                 continue
+            if is_source_inactive(row) and not include_inactive:
+                continue
             vision = db.scalar(select(PostVision).where(PostVision.post_id == row.id))
             output = post_output(row, vision, profile)
             if row.match_score < min_score:
@@ -1834,9 +1836,9 @@ def queue_stats(
     for case in db.scalars(select(CandidateCase)):
         members = list(db.scalars(select(PetPost).join(CandidateCasePost, CandidateCasePost.post_id == PetPost.id)
                                    .where(CandidateCasePost.case_id == case.id)))
-        recent = [row for row in members if not cutoff or (
+        recent = [row for row in members if not is_source_inactive(row) and (not cutoff or (
             (event_time := _candidate_event_timestamp(row)) is not None and event_time >= cutoff
-        )]
+        ))]
         if not recent:
             continue
         grouped[case.review_state] = grouped.get(case.review_state, 0) + 1
