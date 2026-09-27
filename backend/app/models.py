@@ -75,6 +75,32 @@ class CandidateCaseNote(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class CandidateCaseMerge(Base):
+    __tablename__ = "candidate_case_merges"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    survivor_case_id: Mapped[int] = mapped_column(ForeignKey("candidate_cases.id"), index=True)
+    absorbed_case_id: Mapped[int] = mapped_column(ForeignKey("candidate_cases.id"), index=True)
+    moved_post_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    identifiers_json: Mapped[str] = mapped_column(Text, default="[]")
+    previous_review_state: Mapped[str] = mapped_column(String(30), default="new")
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CandidateIdentityExclusion(Base):
+    __tablename__ = "candidate_identity_exclusions"
+    __table_args__ = (UniqueConstraint("post_id", "namespace", "value", name="uq_candidate_identity_exclusion"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    post_id: Mapped[int] = mapped_column(ForeignKey("pet_posts.id", ondelete="CASCADE"), index=True)
+    namespace: Mapped[str] = mapped_column(String(120), index=True)
+    value: Mapped[str] = mapped_column(String(240))
+    reason: Mapped[str] = mapped_column(Text, default="Manual case split")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class CandidateIdentifier(Base):
     __tablename__ = "candidate_identifiers"
     __table_args__ = (UniqueConstraint("namespace", "value", name="uq_candidate_identifiers_namespace_value"),)

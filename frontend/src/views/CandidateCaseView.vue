@@ -14,6 +14,10 @@ const notes = ref([])
 const timeline = ref([])
 const media = ref([])
 const draft = ref('')
+const selectedSourceIds = ref([])
+const mergeTarget = ref('')
+const mergeReason = ref('')
+const merges = ref([])
 const tab = ref('overview')
 const error = ref('')
 const saving = ref(false)
@@ -38,14 +42,17 @@ async function load() {
   error.value = ''
   try {
     const id = Number(route.params.caseId)
-    const [caseData, caseNotes, events, attachments] = await Promise.all([
+    const [caseData, caseNotes, events, attachments, mergeHistory] = await Promise.all([
       request(`/api/candidate-cases/${id}`), request(`/api/candidate-cases/${id}/notes`),
-      request(`/api/candidate-cases/${id}/timeline`), request(`/api/surveyor/media?candidate_case_id=${id}&limit=2000`)
+      request(`/api/candidate-cases/${id}/timeline`), request(`/api/surveyor/media?candidate_case_id=${id}&limit=2000`),
+      request(`/api/candidate-cases/${id}/merges`)
     ])
     item.value = caseData
     notes.value = caseNotes
     timeline.value = events
     media.value = attachments
+    merges.value = mergeHistory
+    selectedSourceIds.value = []
   } catch (cause) { error.value = cause.message || 'Candidate case could not be loaded' }
 }
 async function saveNote() {
@@ -63,6 +70,26 @@ async function review(review_state) {
     await request(`/api/candidate-cases/${item.value.case_id}/review`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ review_state }) })
     await load()
   } catch (cause) { error.value = cause.message || 'Review could not be saved' }
+}
+async function splitSources() {
+  try {
+    await request(`/api/candidate-cases/${item.value.case_id}/split`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ post_ids: selectedSourceIds.value, reason: mergeReason.value }) })
+    await load()
+  } catch (cause) { error.value = cause.message || 'Source records could not be split' }
+}
+async function mergeCase() {
+  if (!Number(mergeTarget.value)) return
+  try {
+    await request(`/api/candidate-cases/${item.value.case_id}/merge`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ other_case_id: Number(mergeTarget.value), reason: mergeReason.value }) })
+    mergeTarget.value = ''
+    await load()
+  } catch (cause) { error.value = cause.message || 'Cases could not be merged' }
+}
+async function reverseMerge(mergeId) {
+  try {
+    await request(`/api/candidate-cases/${item.value.case_id}/merges/${mergeId}/reverse`, { method: 'POST' })
+    await load()
+  } catch (cause) { error.value = cause.message || 'Merge could not be reversed' }
 }
 onMounted(load)
 watch(() => route.params.caseId, load)
@@ -113,6 +140,17 @@ watch(() => route.params.caseId, load)
     </section>
     <section v-else class="candidate-case-content">
       <h2>Source records</h2>
+      <details class="case-identity-actions"><summary>Correct case identity</summary>
+        <p>Select source records that are actually different cats to split them into a new case.</p>
+        <label v-for="record in item.source_records" :key="`select-${record.post_id}`" class="case-source-select"><input v-model="selectedSourceIds" type="checkbox" :value="record.post_id" /> {{ record.holding_entity || record.custody_label || record.source_label }} · {{ record.identifier_label }} {{ record.source_id }}</label>
+        <label>Reason <input v-model="mergeReason" maxlength="2000" placeholder="Optional explanation" /></label>
+        <button type="button" class="secondary-button" :disabled="!selectedSourceIds.length || selectedSourceIds.length >= item.source_records.length" @click="splitSources">These are different cats · split selected records</button>
+        <hr />
+        <label>Merge into this case from Radar case # <input v-model="mergeTarget" type="number" min="1" /></label>
+        <button type="button" class="secondary-button" :disabled="!Number(mergeTarget)" @click="mergeCase">Confirm same cat · merge</button>
+        <h3>Merge history</h3>
+        <article v-for="merge in merges" :key="merge.id" class="case-merge-row"><span>Case #{{ merge.absorbed_case_id }} merged {{ new Date(merge.created_at).toLocaleString() }}<template v-if="merge.reason"> · {{ merge.reason }}</template></span><button v-if="!merge.reversed_at" type="button" @click="reverseMerge(merge.id)">Undo merge</button><span v-else>Reversed</span></article>
+      </details>
       <article v-for="record in item.source_records" :key="record.post_id" class="case-source-row">
         <div><strong>{{ record.holding_entity || record.custody_label || record.source_label }}</strong><span>{{ record.custody_label || record.status }} · via {{ record.source_platform || record.source_label }}</span><small>{{ record.identifier_label }} {{ record.source_id }} · {{ record.listing_state || 'status unknown' }}<template v-if="record.listing_state_reason"> ({{ record.listing_state_reason }})</template></small></div>
         <a v-if="record.source_url" :href="record.source_url" target="_blank" rel="noopener">Open source ↗</a>

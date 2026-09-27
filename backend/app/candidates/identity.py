@@ -6,7 +6,8 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import CandidateCase, CandidateCasePost, CandidateIdentifier, PetPost, PostVision
+from ..models import (CandidateCase, CandidateCaseMerge, CandidateCasePost, CandidateIdentifier,
+                      CandidateIdentityExclusion, PetPost, PostVision)
 from ..service import get_or_create_profile, post_output
 from ..vision import compare_fingerprints
 
@@ -207,11 +208,14 @@ def _merge_case_ids(db: Session, case_ids: set[int]) -> int:
     for case in cases:
         if case.id == keep.id:
             continue
-        for member in db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)):
+        members = list(db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == case.id)))
+        identifiers = list(db.scalars(select(CandidateIdentifier).where(CandidateIdentifier.case_id == case.id)))
+        identifier_snapshots = [_identifier_snapshot(row) for row in identifiers]
+        for member in members:
             member.case_id = keep.id
             member.match_method = "stable_animal_id"
         duplicates = []
-        for identifier in db.scalars(select(CandidateIdentifier).where(CandidateIdentifier.case_id == case.id)):
+        for identifier in identifiers:
             existing = db.scalar(select(CandidateIdentifier).where(
                 CandidateIdentifier.case_id == keep.id,
                 CandidateIdentifier.namespace == identifier.namespace,
@@ -224,16 +228,99 @@ def _merge_case_ids(db: Session, case_ids: set[int]) -> int:
         for duplicate in duplicates:
             db.delete(duplicate)
         db.flush()
-        db.delete(case)
+        db.add(CandidateCaseMerge(
+            survivor_case_id=keep.id,
+            absorbed_case_id=case.id,
+            moved_post_ids_json=json.dumps([member.post_id for member in members]),
+            identifiers_json=json.dumps(identifier_snapshots),
+            previous_review_state=case.review_state,
+            reason="Same stable identity key",
+        ))
     db.flush()
     return keep.id
+
+
+def _identifier_snapshot(row: CandidateIdentifier) -> dict:
+    return {"namespace": row.namespace, "value": row.value, "identifier_kind": row.identifier_kind,
+            "display_label": row.display_label, "source_post_id": row.source_post_id,
+            "is_identity_key": row.is_identity_key}
+
+
+def merge_candidate_cases(db: Session, survivor_id: int, absorbed_id: int, reason: str = "") -> CandidateCaseMerge:
+    if survivor_id == absorbed_id:
+        raise ValueError("A case cannot be merged into itself")
+    survivor, absorbed = db.get(CandidateCase, survivor_id), db.get(CandidateCase, absorbed_id)
+    if survivor is None or absorbed is None:
+        raise ValueError("Candidate case not found")
+    members = list(db.scalars(select(CandidateCasePost).where(CandidateCasePost.case_id == absorbed_id)))
+    identifiers = list(db.scalars(select(CandidateIdentifier).where(CandidateIdentifier.case_id == absorbed_id)))
+    snapshots = [_identifier_snapshot(row) for row in identifiers]
+    states = {survivor.review_state, absorbed.review_state}
+    survivor.review_state = next((state for state in REVIEW_PRECEDENCE if state in states), "new")
+    for member in members:
+        member.case_id = survivor_id
+        member.match_method = "manual"
+    for identifier in identifiers:
+        duplicate = db.scalar(select(CandidateIdentifier).where(
+            CandidateIdentifier.case_id == survivor_id,
+            CandidateIdentifier.namespace == identifier.namespace,
+            CandidateIdentifier.value == identifier.value,
+        ))
+        if duplicate:
+            db.delete(identifier)
+        else:
+            identifier.case_id = survivor_id
+    merge = CandidateCaseMerge(survivor_case_id=survivor_id, absorbed_case_id=absorbed_id,
+        moved_post_ids_json=json.dumps([member.post_id for member in members]),
+        identifiers_json=json.dumps(snapshots), previous_review_state=absorbed.review_state,
+        reason=reason or "Manual case merge")
+    db.add(merge)
+    db.flush()
+    return merge
+
+
+def reverse_case_merge(db: Session, merge: CandidateCaseMerge) -> None:
+    absorbed = db.get(CandidateCase, merge.absorbed_case_id)
+    survivor = db.get(CandidateCase, merge.survivor_case_id)
+    if absorbed is None or survivor is None:
+        raise ValueError("Merged case history is incomplete")
+    post_ids = set(json.loads(merge.moved_post_ids_json or "[]"))
+    for member in db.scalars(select(CandidateCasePost).where(CandidateCasePost.post_id.in_(post_ids))):
+        member.case_id = absorbed.id
+    absorbed.review_state = merge.previous_review_state
+    snapshots = json.loads(merge.identifiers_json or "[]")
+    for snapshot in snapshots:
+        existing = db.scalar(select(CandidateIdentifier).where(
+            CandidateIdentifier.namespace == snapshot["namespace"],
+            CandidateIdentifier.value == snapshot["value"],
+        ))
+        if existing:
+            # If this key is shared by records on both sides, keep its canonical row
+            # and explicitly prevent the split records from being auto-merged again.
+            for post_id in post_ids:
+                exclusion = db.scalar(select(CandidateIdentityExclusion).where(
+                    CandidateIdentityExclusion.post_id == post_id,
+                    CandidateIdentityExclusion.namespace == snapshot["namespace"],
+                    CandidateIdentityExclusion.value == snapshot["value"],
+                ))
+                if exclusion is None:
+                    db.add(CandidateIdentityExclusion(post_id=post_id, namespace=snapshot["namespace"],
+                        value=snapshot["value"], reason="Reversed case merge"))
+        else:
+            db.add(CandidateIdentifier(case_id=absorbed.id, **snapshot))
+    from datetime import datetime, timezone
+    merge.reversed_at = datetime.now(timezone.utc)
 
 
 def find_or_create_case(db: Session, post: PetPost) -> CandidateCase:
     member = db.scalar(select(CandidateCasePost).where(CandidateCasePost.post_id == post.id))
     keys = extract_identifiers(post)
+    excluded_keys = {(row.namespace, row.value) for row in db.scalars(
+        select(CandidateIdentityExclusion).where(CandidateIdentityExclusion.post_id == post.id))}
     case_ids = {member.case_id} if member else set()
     for namespace, value, *_ in keys:
+        if (namespace, value) in excluded_keys:
+            continue
         identifier = db.scalar(select(CandidateIdentifier).where(
             CandidateIdentifier.namespace == namespace, CandidateIdentifier.value == value))
         if identifier:
@@ -252,6 +339,8 @@ def find_or_create_case(db: Session, post: PetPost) -> CandidateCase:
         db.add(CandidateCasePost(case_id=case.id, post_id=post.id,
             match_method="stable_animal_id" if any(item[4] for item in keys) else "source_record"))
     for namespace, value, kind, label, identity in keys:
+        if (namespace, value) in excluded_keys:
+            continue
         identifier = db.scalar(select(CandidateIdentifier).where(
             CandidateIdentifier.namespace == namespace, CandidateIdentifier.value == value))
         if identifier:
@@ -313,6 +402,15 @@ def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
             "identifier_label": next((item[3] for item in extract_identifiers(post)), "Record ID")})
     identifiers = list(db.scalars(select(CandidateIdentifier).where(
         CandidateIdentifier.case_id == case.id, CandidateIdentifier.is_identity_key.is_(True)).order_by(CandidateIdentifier.identifier_kind, CandidateIdentifier.id)))
+    known_ids = {(row.namespace, row.value) for row in identifiers}
+    external_ids = [{"kind": row.identifier_kind, "label": row.display_label,
+                     "value": row.value, "namespace": row.namespace} for row in identifiers]
+    for post in posts:
+        for identifier in extract_identifiers(post):
+            if identifier[4] and (identifier[0], identifier[1]) not in known_ids:
+                external_ids.append({"kind": identifier[2], "label": identifier[3],
+                    "value": identifier[1], "namespace": identifier[0]})
+                known_ids.add((identifier[0], identifier[1]))
     case_images = _case_images(posts, visions)
     image_post = choose_primary_case_image(posts, visions, primary.id)
     primary_image = next((image for image in case_images if image["source_post_id"] == image_post.id), None) if image_post else None
@@ -360,7 +458,7 @@ def case_output(db: Session, case: CandidateCase, profile=None) -> dict:
         "current_location": current_location,
         "current_custody": current_custody,
         "primary_post_id": primary.id, "primary": primary_output,
-        "external_ids": [{"kind": row.identifier_kind, "label": row.display_label, "value": row.value, "namespace": row.namespace} for row in identifiers],
+        "external_ids": external_ids,
         "record_count": len(posts), "source_records": records, "match_score": float(match_record.match_score or 0) if match_record else 0,
         "match_record_id": match_record.id if match_record else None,
         "photo_similarity": output_by_id[photo_score_record.id]["photo_similarity"] if photo_score_record else None,

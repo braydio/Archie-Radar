@@ -67,3 +67,40 @@ def test_candidate_case_workspace_exposes_detail_notes_and_activity(client: Test
     assert notes.json()[0]["body"] == "Asked finder for a side photo."
     assert any(item["kind"] == "note" for item in timeline.json())
     assert any(item["kind"] == "source_record" for item in timeline.json())
+
+
+def test_manual_case_merge_keeps_absorbed_identity_and_can_be_reversed(client: TestClient):
+    first = create_report(client, "case-merge-a")
+    second = create_report(client, "case-merge-b")
+    first_case, second_case = [item["case_id"] for item in client.get("/api/candidate-cases").json()]
+
+    merged = client.post(f"/api/candidate-cases/{first_case}/merge", json={
+        "other_case_id": second_case, "reason": "Same cat confirmed by shelter"
+    })
+
+    assert merged.status_code == 201, merged.text
+    merge_id = merged.json()["merge_id"]
+    assert client.get(f"/api/candidate-cases/{second_case}").status_code == 200
+    assert client.get(f"/api/candidate-cases/{first_case}").json()["record_count"] == 2
+
+    reversed_merge = client.post(f"/api/candidate-cases/{first_case}/merges/{merge_id}/reverse")
+    assert reversed_merge.status_code == 200, reversed_merge.text
+    assert client.get(f"/api/candidate-cases/{first_case}").json()["record_count"] == 1
+    assert client.get(f"/api/candidate-cases/{second_case}").json()["record_count"] == 1
+
+
+def test_manual_case_split_preserves_source_record_membership(client: TestClient):
+    create_report(client, "case-split-a")
+    create_report(client, "case-split-b")
+    case_ids = [item["case_id"] for item in client.get("/api/candidate-cases").json()]
+    case_id = case_ids[0]
+    merged = client.post(f"/api/candidate-cases/{case_id}/merge", json={"other_case_id": case_ids[1]})
+    assert merged.status_code == 201, merged.text
+    detail = client.get(f"/api/candidate-cases/{case_id}").json()
+    moved_post_id = detail["source_records"][1]["post_id"]
+
+    split = client.post(f"/api/candidate-cases/{case_id}/split", json={"post_ids": [moved_post_id]})
+
+    assert split.status_code == 201, split.text
+    assert client.get(f"/api/candidate-cases/{case_id}").json()["record_count"] == 1
+    assert client.get(f"/api/candidate-cases/{split.json()['new_case_id']}").json()["record_count"] == 1
