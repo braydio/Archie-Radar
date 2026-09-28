@@ -1,1258 +1,1360 @@
 # NEXT SLICE IMPLEMENTATION
 
 ## Archie Radar v1 · Slice 7 of 9
-### Correctness Rollup + External Environmental Intelligence
+### Field Readiness + Review/Map Correctness
 
-**Reviewed baseline:** `main` at `e224bce96275bc4fc555584d2becc149fe071a88`
+**Reviewed application baseline:** `main` at `0c91cea316e6a14d59c1bea8bb335b2a000f6095`  
+**Instruction baseline:** `main` at `797ee832138fa898ace63e1bbdada459c1ed6530`
 
-This file is the active implementation brief for the next repository-changing run.
+This packet supersedes the previous Slice 7 brief.
 
-The repository already contains the major CandidateCase, Case Workspace, Media Vault, Surveyor field-operations, candidate performance, and server-side selected-group Facebook collector work. Do not rebuild those systems from scratch.
+The previous packet bundled too much work into one slice: queue correctness, 24PetConnect correctness, Surveyor layer-control defects, and a full external environmental provider stack. That was technically coherent but operationally too broad.
 
-The next slice has two jobs:
+The current user-facing friction is more immediate:
 
-1. close the correctness and UX defects still present in latest `main`;
-2. implement the first real external environmental/context layer stack for Surveyor.
+- before leaving, it is hard to answer **"is everything prepped?"**
+- it is hard to answer **"do I have everything?"**
+- it is hard to answer **"what specifically am I doing?"**
+- once outside, it should be obvious **what is next** without reopening or mentally reconciling several systems.
 
-Do not implement Radar/LLM functionality in this slice.
+Therefore the roadmap is intentionally re-sequenced:
+
+- **Slice 7:** Field Readiness + Review/Map Correctness
+- **Slice 8:** External Environmental Intelligence
+- **Slice 9:** Final hardening / release polish
+
+Progress remains **6/9 slices complete (67%)** before this slice.
+
+The already-landed server-side Facebook selected-group collector remains in place. Do not redesign it in this slice unless an actual regression is discovered.
 
 ---
 
-# 0. CURRENT-MAIN REVIEW
+# 1. CURRENT-MAIN REVIEW
 
-The following are already present and should be preserved:
+Latest application code already includes:
 
-- CandidateCase and stable external identifiers;
-- coherent case projection helpers;
-- case workspace route;
-- review history / case notes / merge-split support;
-- lean `/api/candidate-cases/map`;
+- CandidateCase and stable case/source-record separation;
+- Case Workspace;
+- case notes, merges/splits, projection provenance, evidence export;
+- lean candidate map endpoint and batched candidate reads;
 - candidate request cancellation/version guard;
-- incremental case reconciliation after ingestion;
-- Surveyor field objects, cameras, links, access, evidence, tasks, search sessions, coverage, undo, media;
-- Media Vault / batch export / local media handling;
-- server-side Facebook selected-group collector with Playwright session state;
-- root `AGENTS.md` deployment instructions.
+- Surveyor map objects, links, trail cameras, access records, evidence, tasks, search sessions and route coverage;
+- Media Vault and local media handling;
+- server-side selected-group Facebook collection;
+- Docker deployment workflow instructions in `AGENTS.md`.
 
-The following defects are still visible in latest `main` and MUST be rolled into this slice before declaring it complete:
+The following issues are still present and are mandatory corrections in this slice:
 
-1. `CandidatesView.clientPrioritize()` still sorts trait boost ahead of match score and can materially distort smart review order.
-2. `CandidatesView.locateCandidate()` still uses top-level `post.latitude/post.longitude`, hardcodes precision to `address`, and can disagree with `current_location`.
-3. Candidate cards still expose source-record provenance in the collapsed view and still label any `source_url` as `Original`.
-4. 24PetConnect parsing still falls back to the saved `/ViewAnimals/<request-id>` URL when no animal-specific detail link is found.
-5. The saved 24PetConnect search page's `Your request is currently Inactive` state must not be treated as the state of every animal in the results.
-6. The Surveyor `Layers` button is still hidden by mobile CSS because it lives inside `.surveyor-actions`.
-7. Surveyor still requests Annual NLCD directly from the browser against the MRLC WMS.
-8. Wildlife / hydrography / wetlands external providers are not implemented yet.
-9. The MapLibre console warning `Expected value to be of type number, but found null instead` still needs a defensive source/style cleanup.
-10. `backend/app/main.py` is already very large. New external-provider code must not be added there beyond router registration.
+1. `CandidatesView.clientPrioritize()` still lets client trait boost outrank meaningful score differences.
+2. `CandidatesView.locateCandidate()` still uses top-level `post.latitude/post.longitude` rather than the coherent `current_location` projection and hardcodes location precision to `address`.
+3. Candidate cards still expose internal source-record provenance in the collapsed card.
+4. Candidate cards still label every `source_url` as `Original`.
+5. The 24PetConnect connector still falls back to a saved `/ViewAnimals/<request-id>` URL when no animal detail URL is found.
+6. Request-level `Your request is currently Inactive` text from 24PetConnect must not be interpreted as every animal being inactive.
+7. Surveyor's only direct `Layers` button still lives inside `.surveyor-actions`, where mobile CSS hides it.
+8. Surveyor still has the MapLibre numeric-null warning risk.
+9. There is no outing-level Prep / Packing / Gameplan model.
+10. `Start search` currently jumps directly into a search session with no preflight.
+
+The full external environmental provider stack from the prior packet is deferred to Slice 8. Do not implement iNaturalist, NWI, NC OneMap hydrography, or the MRLC backend proxy in this slice.
 
 ---
 
-# 1. PHASE A · REVIEW QUEUE CORRECTNESS
+# 2. PRODUCT RULE FOR THIS SLICE
 
-## A1. Smart ordering
+The field-readiness system should obey one rule:
 
-The backend `sort=smart` order is the authoritative base order.
+> **Before leaving, show what is unresolved. Once outside, show what is next.**
 
-The backend match score already incorporates normal Archie traits, recency, distance, and photo signals. Do not apply the same default traits again as a dominant client-side sort.
+Do not turn this into generic project management software.
 
-Change `clientPrioritize(list, filters)` as follows:
+No Gantt charts.
+No dependency graph editor.
+No mandatory scheduling.
+No route optimizer.
+No AI-generated outing plan.
+No forced completion gate before leaving.
 
-- if sort is not `smart`, return server order;
-- if trait mode is not `prioritize`, return server order;
-- if the applied trait selections equal the Archie default trait set, return server order unchanged;
-- if the user has intentionally changed prioritization traits, custom trait boost may only act as a tie-breaker inside a narrow match-score band.
+---
 
-Recommended comparator for custom prioritization:
+# 3. PHASE A · FIX REVIEW QUEUE ORDERING
 
-1. score band descending: `Math.floor(match_score / 10)`;
-2. usable real source image before no-image when otherwise similar;
+## A1. Backend smart order remains authoritative
+
+For `sort=smart`, the backend result order is the authoritative base order.
+
+The backend match score already incorporates normal Archie traits, recency, distance and photo signals.
+
+Do not apply the default Archie trait set again as a dominant client-side sort.
+
+## A2. Default priorities must not double-count
+
+Change `frontend/src/views/CandidatesView.vue::clientPrioritize()`.
+
+If:
+
+- sort != `smart`, return server order;
+- traitMode != `prioritize`, return server order;
+- selected prioritization traits equal the normal Archie default selections, return server order unchanged.
+
+## A3. Custom prioritization is a tie-breaker only
+
+If the user deliberately changes prioritization traits, custom trait boost may reorder only within a narrow score neighborhood.
+
+Recommended comparator:
+
+1. `Math.floor(match_score / 10)` descending;
+2. usable source photo before no-photo when otherwise similar;
 3. custom trait boost descending;
-4. raw `match_score` descending;
+4. exact `match_score` descending;
 5. meaningful event time descending.
 
-A 68/100 candidate must never fall below a 31/100 candidate merely because the 31 matches one more selected client trait.
+A 68/100 case must not fall below a 31/100 case merely because the 31 has a larger client trait boost.
 
-Displayed queue rank must always be derived from the final visible order.
+## A4. Pure sorts
 
-## A2. Pure sorts
-
-Keep these semantics exact:
+Keep these exact:
 
 - Strongest match signals: `match_score DESC`, then meaningful event time;
 - Newest: meaningful event time DESC;
 - Closest: `current_location.distance_from_home_miles ASC`;
-- Smart: server order plus only the narrow custom-priority tie-breaking described above.
+- Smart: backend order plus the limited custom-priority tie-breaking above.
 
-## A3. Card hierarchy
+Displayed rank must match final visible order.
 
-Collapsed cards should emphasize operational information in this order:
+---
 
-1. holding entity / custody context;
-2. Animal ID or other useful external identity;
-3. small provider/source context;
+# 4. PHASE B · FIX CANDIDATE CARD HIERARCHY
+
+Collapsed candidate cards should emphasize:
+
+1. holder / custody context;
+2. external Animal ID or useful identity;
+3. small provider context;
 4. found/sighted/posted time;
-5. current location and distance/bearing from home;
+5. current location + distance/bearing;
 6. strongest trait chips;
 7. match-signal score;
 8. review actions;
 9. Open case / More details.
 
-Do not render a generic title such as `Shelter intake cat`, `Found cat`, `Unknown`, or `Cat` as a large heading when the holding/custody context is more useful.
+Do not render generic titles such as:
 
-Do not display `Current location · source record #...` in the collapsed card. Put that in expanded provenance/details.
+- `Shelter intake cat`;
+- `Found cat`;
+- `Unknown`;
+- `Cat`;
 
-Review actions MUST remain above `More details`.
+as a visually dominant H2 when holder/custody context is more useful.
+
+Move technical provenance such as:
+
+`Current location · source record #180`
+
+into expanded details.
+
+Keep review actions above `More details`.
 
 ---
 
-# 2. PHASE B · LOCATION / MAP CONSISTENCY
+# 5. PHASE C · FIX CURRENT LOCATION / MAP ACTIONS
 
-## B1. One canonical case location
+## C1. One canonical case location
 
-All candidate-level map and relationship-to-home actions must use `post.current_location`.
+Candidate-level location actions must use `post.current_location`.
 
 Use:
 
 - `current_location.map_latitude`;
 - `current_location.map_longitude`;
+- `current_location.location_text`;
 - `current_location.precision`;
 - `current_location.distance_from_home_miles`;
-- `current_location.distance_is_approximate`;
-- `current_location.location_text`.
+- `current_location.distance_is_approximate`.
 
-Do not use top-level `post.latitude/post.longitude` when a case-level current location bundle exists.
+Do not combine top-level coordinates from one source record with current-location text from another.
 
-## B2. Fix `locateCandidate()`
+## C2. Fix `locateCandidate()`
 
-Update `CandidatesView.locateCandidate()` so the coordinates, bearing, precision, displayed place name, and distance all come from the same current-location record.
+Update `CandidatesView.locateCandidate()` so:
+
+- map coordinates;
+- bearing;
+- distance;
+- precision;
+- display name
+
+all come from the same `current_location` bundle.
 
 Never hardcode precision to `address`.
 
-If `current_location` has text but no usable coordinates, fall back to the existing deterministic `/api/places/resolve` flow.
+If current location has useful text but no coordinates, use the existing `/api/places/resolve` path.
 
-## B3. Candidate map is the primary quick map
+## C3. Primary Map action stays in Archie Radar
 
-The candidate card's primary `Map` action should focus the existing Candidates map, not immediately launch an external map.
+The candidate card's primary `Map` action should:
 
-Implement a focused-case state such as `focusedCaseId` and a SearchMap prop/event that:
+1. expand the Candidates map if collapsed;
+2. focus/fly to the case's current location;
+3. highlight/open the candidate marker.
 
-1. expands the Candidates map when needed;
-2. flies to the current case location;
-3. highlights/opens the candidate marker.
+Use a small state such as `focusedCaseId` and a prop/event to `SearchMap`.
 
-Keep an external OpenStreetMap action in expanded details as a secondary link.
+Keep external OSM navigation under expanded details as a secondary action.
 
-The Case Workspace may continue to provide `Open in Surveyor`.
+## C4. Human-readable location formatting
 
-## B4. Human-readable location formatting
+Display formatting may convert:
 
-Display-only formatting may turn `Fairfax St And Waterford St` into `Fairfax St & Waterford St`.
+`Fairfax St And Waterford St`
 
-Do not mutate source text in persistence.
+to:
 
-Approximate/city/street precision must remain visible where relevant.
+`Fairfax St & Waterford St`.
+
+Do not mutate persisted source text.
 
 ---
 
-# 3. PHASE C · 24PETCONNECT LINK AND STATUS CORRECTNESS
+# 6. PHASE D · FIX 24PETCONNECT LINKS AND STATUS
 
-## C1. Separate link types
+## D1. Link kinds
 
-Introduce normalized source-link semantics for 24PetConnect:
+Normalize 24Pet link semantics:
 
 - `exact_detail`;
 - `search_results`;
 - `provider_home`;
 - `unavailable`.
 
-Persist this in raw metadata so existing schema can remain additive:
+Use additive raw metadata:
 
 - `source_link_kind`;
 - `listing_url`;
 - `detail_url`.
 
-Existing `PetPost.source_url` may remain the best exact link for compatibility, but list/case output must classify it.
+Existing `PetPost.source_url` may remain for compatibility, but output/UI must classify it.
 
-## C2. Discover actual animal detail links
+## D2. Extract actual animal-specific detail links
 
-For each animal card/result, inspect only the DOM container belonging to that Animal ID.
-
-Accept a detail link only when:
-
-- host is `24petconnect.com`;
-- path is a recognized animal detail path such as `/DetailsMain/<provider-code>/<animal-id>` or another observed official animal-detail form;
-- the final Animal ID matches the current record.
-
-Check likely link attributes:
+In `backend/app/connectors/regional_24petconnect.py`, find the DOM container for each specific Animal ID and inspect only that container for likely detail navigation:
 
 - `href`;
 - `data-href`;
 - `data-url`;
 - `onclick`.
 
-Do not search the full document in a way that can pair Animal A with Animal B's detail link.
+Accept an exact detail URL only when:
 
-Do not guess shelter/provider codes.
+- host is `24petconnect.com`;
+- path is a recognized animal-detail path;
+- the Animal ID in the target matches the current record.
 
-## C3. Search result fallback
+Do not guess provider/shelter codes.
 
-If no exact animal-specific detail URL is discoverable:
+Do not search the whole page in a way that can associate Animal A with Animal B's link.
 
-- retain the saved `ViewAnimals` URL as a search/fallback URL;
-- mark `source_link_kind = search_results`;
-- do not label that URL `Original`.
+## D3. Saved search URL is not Original
 
-Candidate UI:
+If only `/ViewAnimals/<request-id>` is known:
 
-When exact detail exists:
+- classify it as `search_results`;
+- do not label it `Original`.
+
+UI behavior:
+
+Exact detail:
 - `View on 24PetConnect ↗`.
 
-When only search/provider fallback exists:
+Search/provider fallback:
 - `Open 24PetConnect ↗`;
 - `Copy Animal ID`.
 
-Never show a saved search page under a button labeled `Original`.
+## D4. Request inactive != animal inactive
 
-## C4. Search-request inactive is not animal inactive
+The text:
 
-The text `Your request is currently Inactive` on a saved `ViewAnimals` page describes the saved search request.
+`Your request is currently Inactive`
 
-It does NOT prove that each displayed animal is inactive.
+describes the saved search request.
 
-Do not set animal lifecycle state based solely on this request-level text.
+It does not establish that each displayed animal is inactive.
 
-An animal may be marked inactive/terminal only when an animal-specific detail response or other source-supported record explicitly indicates the animal/listing state.
+Do not use request-level inactive state as animal lifecycle evidence.
 
-## C5. Detail validation
+Only mark the animal/listing inactive when an animal-specific source record or detail response supports it.
 
-If an exact detail URL is discovered, validation may check:
+## D5. Broken exact link
 
-- HTTP success;
-- final page still corresponds to the matching Animal ID.
+If a previously discovered animal-specific detail link fails:
 
-A broken detail link should downgrade `source_link_kind` to `unavailable` or fallback behavior. It must not by itself mark the animal inactive.
+- downgrade link availability;
+- keep the source record;
+- do not infer that the animal itself is inactive merely because the URL broke.
 
-## C6. Legacy rows
+## D6. Legacy rows
 
-Do not require a destructive reingest.
+Existing DB rows with `/ViewAnimals/` URLs must be classified at read/output time as `search_results`.
 
-At output time, classify existing `source_url` values whose path contains `/ViewAnimals/` as `search_results`.
+No destructive reingest required.
 
-On later source refresh, replace with a verified exact detail link when one is actually found.
+## D7. Centralize holder/custody fallback
 
-## C7. Holder/custody fallback
+Reuse one 24Pet context normalizer for ingestion and legacy output fallback.
 
-Centralize 24Pet display-context normalization and use it:
-
-- during connector ingestion;
-- during case output/backfill fallback for legacy rows.
-
-Known source-specific holder fallbacks may be used only for their matching source namespaces:
+Known namespace-specific defaults may be used:
 
 - `chatham_24petconnect` → `Chatham County · Animal Resources Center`;
 - `durham_24petconnect` → `Animal Protection Society of Durham`;
 - `wake_24petconnect` → `Wake County Animal Center`;
 - `orange_county_24petconnect` → `Orange County Animal Services`.
 
-Do not infer a holder for generic `regional_24petconnect`.
+Do not invent a holder for generic `regional_24petconnect`.
 
 ---
 
-# 4. PHASE D · SURVEYOR LAYER CONTROL HOTFIX
+# 7. PHASE E · SURVEYOR LAYER CONTROL HOTFIX
 
-## D1. Persistent map-level control
+This slice does not add new environmental providers, but it must make the existing layer system discoverable and deterministic.
 
-Do not depend on `SearchSessionBar` for map-layer access.
+## E1. Persistent map-level Layers control
 
-Add `frontend/src/components/surveyor/SurveyorMapControls.vue` or an equivalent small component inside `.surveyor-map-shell`.
+Add a persistent Layers button inside `.surveyor-map-shell`.
 
-Provide an always-visible 44x44+ `Layers` control:
+Suggested component:
 
-- desktop: top-right of map, below/clear of native MapLibre controls;
-- mobile portrait: top-right of map, always visible;
-- phone landscape: top-right of map pane.
+`frontend/src/components/surveyor/SurveyorMapControls.vue`
 
-It opens/closes `layerDrawerOpen`.
+Requirements:
 
-The existing header Layers button may remain as a desktop duplicate, but it must not be the only entry point.
+- desktop: top-right of map, clear of native MapLibre controls;
+- mobile portrait: always visible;
+- phone landscape: visible in the map pane;
+- tap target at least 44x44;
+- opens/closes `layerDrawerOpen`.
 
-## D2. Drawer backdrop
+The existing header Layers button may remain on desktop.
+
+Do not rely on `SearchSessionBar` as the only access point.
+
+## E2. Backdrop / click-away
 
 When LayerDrawer is open:
 
-- mobile: use a subtle map backdrop / click-catcher;
-- desktop: allow click-away close without blocking drawer scroll.
+- mobile: use a subtle backdrop and bottom-sheet behavior;
+- desktop: allow click-away close without preventing drawer scrolling.
 
-## D3. Capability-driven drawer
+## E3. Apply layer visibility explicitly
 
-Extend `LayerDrawer.vue` to receive capabilities and layer status.
-
-Example:
-
-```js
-{
-  landcover: true,
-  hydrography: true,
-  wetlands: true,
-  wildlife: true
-}
-```
-
-Do not render dead toggles for unavailable capabilities.
-
-Remove the placeholder sentence saying providers will appear later once the real providers land.
-
-## D4. Apply visibility explicitly
-
-Create a single `applyLayerVisibility()` function.
+Create one `applyLayerVisibility()` function.
 
 Call it:
 
-- after all custom MapLibre sources/layers are created;
+- after custom sources/layers are created;
 - whenever layer settings change.
 
-Do not rely on reactive timing tricks to make the initial state apply.
+Do not rely on assigning a shallow-copied settings object to trigger timing side-effects.
 
-## D5. Overlay status chips
+## E4. Overlay chips
 
-When a non-base contextual overlay is enabled, show compact chips over the map:
+Show compact chips for enabled contextual overlays, e.g.:
 
 - `LAND COVER · 2025 ×`;
-- `STREAMS ×`;
-- `WETLANDS ×`;
-- `COYOTE · 90D ×`.
+- future Slice 8 layers can reuse this control.
 
-Clicking × disables that layer.
+Click × disables the layer.
+
+## E5. Keep future capabilities extensible
+
+LayerDrawer should be ready to receive provider capabilities in Slice 8, but do not add dead toggles for providers that do not exist yet.
 
 ---
 
-# 5. PHASE E · MAPLIBRE NUMERIC SANITIZATION
+# 8. PHASE F · MAPLIBRE NUMERIC SANITIZATION
 
-Resolve the console warning:
+Resolve the warning class:
 
 `Expected value to be of type number, but found null instead.`
 
-Before each `setData()` / initial GeoJSON handoff, sanitize:
+Before handing GeoJSON to style expressions, ensure:
 
-- coordinates must be finite;
-- style numeric properties read by MapLibre expressions must be finite.
+- coordinates are finite;
+- numeric style properties consumed by MapLibre are finite.
 
-Examples:
+Audit especially:
 
-- camera opacity;
-- positional accuracy;
-- task counts;
-- urgency counts;
-- overdue counts;
-- heading/FOV/range when style expressions consume them.
+- task_count;
+- urgent_count;
+- overdue_count;
+- camera heading/FOV/range;
+- opacity-like properties;
+- any numeric property read by `get` in a numeric expression.
 
-For optional numeric data, omit the property when unknown or use a null-safe style expression:
+For truly optional numeric values:
 
-```js
-["coalesce", ["get", "property"], DEFAULT]
-```
+- omit property when unknown; or
+- use a null-safe MapLibre expression such as `coalesce`.
 
-Do not map an unknown value to zero when zero has a real semantic meaning.
+Do not map semantic unknown to zero when zero has a real meaning.
 
-A small development-only feature validator is acceptable. Do not spam production logs.
+Development-only feature validation is acceptable. Do not spam production logs.
 
 ---
 
-# 6. PHASE F · EXTERNAL PROVIDER BACKEND ARCHITECTURE
+# 9. PHASE G · OUTING / PREFLIGHT DATA MODEL
 
-Do not add this implementation to `main.py`.
+Do not overload `SurveyorTask` or per-object checklist properties.
+
+Create a first-class outing model using additive tables only.
+
+Do not add a new required column to the existing `surveyor_search_sessions` table because `Base.metadata.create_all()` does not migrate existing SQLite columns.
+
+Create in `backend/app/models.py`:
+
+## G1. `SurveyorOutingPlan`
+
+Recommended fields:
+
+```text
+id
+title
+objective
+status
+method
+search_session_id nullable
+notes
+created_at
+updated_at
+completed_at nullable
+```
+
+Status values:
+
+- `draft`;
+- `active`;
+- `completed`;
+- `abandoned`.
+
+**Correction from the earlier design:** do NOT persist a `ready` status. Readiness is derived from item/dependency state and would become stale if items change.
+
+`search_session_id` may be a nullable FK because the outing table is new.
+
+Method values should align with existing Surveyor search-session methods.
+
+## G2. `SurveyorOutingItem`
+
+Recommended fields:
+
+```text
+id
+plan_id
+section
+title
+note
+position
+required
+status
+time_hint nullable
+
+map_object_id nullable
+task_id nullable
+candidate_case_id nullable
+
+created_at
+updated_at
+completed_at nullable
+```
+
+Sections:
+
+- `prep`;
+- `packing`;
+- `gameplan`.
+
+Statuses:
+
+- `pending`;
+- `completed`;
+- `skipped`.
+
+UI vocabulary:
+
+- Prep completed → `Ready`;
+- Packing completed → `Packed`;
+- Gameplan completed → `Done`.
+
+`required` defaults true.
+
+Do not add Low/Normal/High/Urgent priority to outing items.
+
+## G3. `SurveyorOutingDependency`
+
+Fields:
+
+```text
+id
+prep_item_id
+dependent_item_id
+created_at
+```
+
+Unique pair constraint.
+
+Validation:
+
+- both items belong to the same plan;
+- `prep_item.section == prep`;
+- dependent item section is `packing` or `gameplan`;
+- item cannot depend on itself.
+
+Do not allow dependency chains between non-prep items.
+
+This restriction intentionally prevents the system from becoming a generic dependency graph.
+
+---
+
+# 10. PHASE H · OUTING API
 
 Create:
 
-```text
-backend/app/external/
-    __init__.py
-    router.py
-    service.py
-    schemas.py
-    models.py
-    cache.py
-    geometry.py
-    rate_limit.py
+`backend/app/surveyor/outings.py`
 
-    providers/
-        __init__.py
-        base.py
-        inaturalist.py
-        nc_onemap.py
-        nwi.py
-        mrlc.py
-```
+Register its router in `main.py`.
 
-Use existing dependencies where possible:
-
-- `httpx`;
-- `shapely`;
-- `pyproj`;
-- SQLAlchemy.
-
-Do not add a new dependency unless it clearly removes substantial complexity.
-
-Register only the external router in `main.py`.
-
-All new DB structures must be additive. Existing startup uses `Base.metadata.create_all()`, so new tables are appropriate. Do not require destructive alteration of existing tables.
-
----
-
-# 7. PHASE G · EXTERNAL CACHE / HEALTH / RATE LIMITING
-
-## G1. External fetch receipts/cache
-
-Add an additive cache/receipt model, either as `ExternalFetchReceipt` plus payload storage or an equivalent clean design.
-
-Required semantics:
-
-- provider;
-- request kind;
-- stable query hash;
-- normalized parameters JSON;
-- bbox JSON when relevant;
-- fetched/started/completed timestamps;
-- status;
-- result count;
-- error summary;
-- expires_at;
-- cached payload or linkage to normalized observations.
-
-Cache zero-result queries too.
-
-Suggested TTLs:
-
-- wildlife query results: 6 hours;
-- hydrography: 7 days;
-- wetlands: 7 days;
-- land-cover raster tiles: 30 days.
-
-If refresh fails and a previously successful cached result exists, return stale data with:
-
-- `cached: true`;
-- `stale: true`;
-- last successful fetch time.
-
-Do not make a working layer disappear because its provider is temporarily unavailable.
-
-## G2. Provider health
-
-Add:
-
-`GET /api/external/providers`
-
-Return provider status:
-
-- `ready`;
-- `degraded`;
-- `unavailable`;
-- `disabled`.
-
-Include last success/error timestamps, not private stack traces.
-
-## G3. In-flight coalescing
-
-Identical requests already in progress should share/coalesce work instead of generating duplicate upstream requests.
-
-## G4. HTTP behavior
-
-Use one reusable async HTTP client or clearly bounded clients with:
-
-- identifying User-Agent;
-- sensible connect/read timeouts;
-- bounded retry only for transient failures;
-- no infinite retries.
-
----
-
-# 8. PHASE H · ANNUAL NLCD 2025
-
-This should be the first external provider implemented because latest main already has a working direct WMS layer.
-
-## H1. Replace browser-direct WMS
-
-Current `SurveyorView.vue` directly requests MRLC WMS tiles.
-
-Remove direct browser dependency.
-
-Add backend:
-
-`GET /api/external/landcover/{z}/{x}/{y}.png`
-
-Server behavior:
-
-1. validate z/x/y;
-2. calculate XYZ tile bounds in EPSG:3857;
-3. build the configured Annual NLCD 2025 WMS GetMap request;
-4. request a 256x256 PNG;
-5. cache the tile;
-6. return PNG with appropriate content type/cache headers.
-
-Do not implement an arbitrary WMS proxy.
-
-Provider host/layer/product/year are server-controlled constants/settings.
-
-## H2. Product semantics
-
-UI:
-
-- `Annual NLCD land cover · 2025`;
-- attribution `USGS / MRLC`.
-
-Never call it `current land cover`.
-
-## H3. Frontend source
-
-MapLibre raster source tiles must point only to Archie Radar:
-
-`/api/external/landcover/{z}/{x}/{y}.png`
-
-No direct MRLC request should appear in the browser network log after this slice.
-
-Default OFF.
-
-Opacity target: roughly 0.28–0.35, with optional 15–60% slider if straightforward.
-
----
-
-# 9. PHASE I · NC ONEMAP HYDROGRAPHY
-
-Use official NC OneMap Major Hydrography as authoritative contextual geography.
-
-Implement:
-
-`GET /api/external/hydrography`
-
-Parameters:
-
-- west;
-- south;
-- east;
-- north;
-- include = streams,waterbodies.
-
-Query only the current viewport plus a modest 10–15% buffer.
-
-Request/normalize WGS84 GeoJSON.
-
-Support both:
-
-- streams/rivers;
-- waterbodies.
-
-Retain only useful normalized attributes in the browser payload:
-
-- feature/provider ID;
-- name;
-- basin/subbasin when available;
-- source-supported classification.
-
-If the upstream service indicates a transfer/record limit, subdivide the bbox with a strict recursion cap and deduplicate provider feature IDs.
-
-Do not silently truncate.
-
-Suggested frontend minimum zoom: about 11.
-
-Style:
-
-- streams: subtle contextual line;
-- waterbodies: muted low-saturation fill/outline;
-- below user search geometry and annotations.
-
-Default ON is acceptable for streams/waterbodies if performance is good because this is core field context.
-
----
-
-# 10. PHASE J · USFWS NWI WETLANDS
-
-Implement:
-
-`GET /api/external/wetlands`
-
-Query only local viewport context.
-
-Normalize to GeoJSON where practical.
-
-Expose source classification/code and provider provenance.
-
-UI label:
-
-`Mapped wetlands`
-
-Never imply:
-
-- standing water now;
-- flooded now;
-- live hydrology.
-
-Suggested minimum zoom: about 12.
-
-Default OFF.
-
-Use a restrained translucent fill/pattern so user-created searched/needs-search zones remain visually dominant.
-
----
-
-# 11. PHASE K · INATURALIST PUBLIC WILDLIFE
-
-## K1. Scope
-
-Read-only public observations only.
-
-Do not authenticate to access private coordinates.
-
-Do not request or store private/trusted-project coordinates.
-
-Implement default species:
-
-- Coyote: `Canis latrans`;
-- Red fox: `Vulpes vulpes`;
-- Gray fox: `Urocyon cinereoargenteus`;
-- Bobcat: `Lynx rufus`;
-- Raccoon: `Procyon lotor`;
-- White-tailed deer: `Odocoileus virginianus`;
-- Virginia opossum: `Didelphis virginiana`.
-
-## K2. Taxon resolution
-
-Add an additive `ExternalTaxon` model or equivalent.
-
-Resolve configured scientific names against iNaturalist and require:
-
-- returned scientific name matches;
-- rank is species.
-
-Do not trust the first fuzzy common-name match.
-
-Cache the resulting taxon IDs.
-
-## K3. Observation model
-
-Add normalized `ExternalObservation` persistence/cache with at least:
-
-- provider;
-- provider observation ID;
-- taxon key / provider taxon ID;
-- scientific/common name;
-- observed_at;
-- provider created/updated timestamps;
-- public latitude/longitude;
-- positional accuracy;
-- geoprivacy / taxon geoprivacy;
-- normalized location precision;
-- quality grade;
-- source URL;
-- raw JSON;
-- fetched_at.
-
-Unique on provider + provider observation ID.
-
-## K4. Geoprivacy
-
-Normalize public-location semantics to:
-
-- `public`;
-- `approximate`;
-- `obscured`;
-- `unknown`.
-
-Obscured iNaturalist coordinates are not exact.
-
-UI for obscured points:
-
-- `Approximate public location`;
-- `Exact location intentionally obscured by source`.
-
-Do not:
-
-- snap camera/search geometry to an obscured point;
-- draw a fake meter-accuracy circle around an obscured public coordinate;
-- treat the displayed point as exact evidence.
-
-Observations with no public coordinate are not mapped.
-
-## K5. API
-
-Add:
-
-`GET /api/external/wildlife`
-
-Parameters:
-
-- west/south/east/north;
-- from/to;
-- taxa[];
-- quality;
-- refresh=false.
-
-Validate supported taxa and bbox/date bounds.
-
-Default period: 90 days.
-
-Presets in UI:
-
-- 7 days;
-- 30 days;
-- 90 days;
-- Since Archie disappeared;
-- 1 year;
-- Custom.
-
-Use `observed_at` as the map/filter time, not upload date.
-
-## K6. Rate limits
-
-Use a conservative one-upstream-request-per-second limiter for iNaturalist.
-
-On provider 429:
-
-- back off;
-- serve stale cache if available.
-
-Do not continuously retry.
-
-## K7. Result limits
-
-Bound viewport results.
-
-If provider returns more than the supported limit, return `truncated: true` and tell the UI.
-
-Do not silently imply exhaustiveness.
-
-Suggested individual-observation minimum map zoom: 11.
-
----
-
-# 12. PHASE L · FRONTEND EXTERNAL LAYER MODULE
-
-Create:
+Recommended endpoints:
 
 ```text
-frontend/src/external/
-    api.js
-    store.js
-    layers.js
-    time.js
-    legend.js
+GET    /api/surveyor/outings
+GET    /api/surveyor/outings/current
+POST   /api/surveyor/outings
+GET    /api/surveyor/outings/{plan_id}
+PATCH  /api/surveyor/outings/{plan_id}
 
-frontend/src/components/external/
-    ExternalLayerGroup.vue
-    WildlifeLayerControls.vue
-    ExternalObservationPopup.vue
-    EnvironmentInspector.vue
-    EnvironmentLegend.vue
-    ProviderStatus.vue
+POST   /api/surveyor/outings/{plan_id}/items
+PATCH  /api/surveyor/outings/items/{item_id}
+DELETE /api/surveyor/outings/items/{item_id}
+
+POST   /api/surveyor/outings/items/{item_id}/dependencies/{prep_item_id}
+DELETE /api/surveyor/outings/items/{item_id}/dependencies/{prep_item_id}
+
+POST   /api/surveyor/outings/{plan_id}/reorder
+POST   /api/surveyor/outings/{plan_id}/reuse
+POST   /api/surveyor/outings/{plan_id}/start
+POST   /api/surveyor/outings/{plan_id}/abandon
 ```
 
-Do not let `SurveyorView.vue` absorb another large block of provider-specific logic.
+Deletion of a whole plan is not needed for ordinary UX. Prefer abandon/archive semantics.
 
-## L1. Layer defaults
+---
 
-Extend Surveyor layer settings approximately:
+# 11. PHASE I · READINESS IS DERIVED
 
-```js
-external: {
-  hydrography: true,
-  wetlands: false,
-  landcover: false,
-  wildlife: false,
-  wildlifeTaxa: {
-    coyote: false,
-    red_fox: false,
-    gray_fox: false,
-    bobcat: false,
-    raccoon: false,
-    white_tailed_deer: false,
-    virginia_opossum: false
+Every plan output should include computed readiness.
+
+Example:
+
+```json
+{
+  "readiness": {
+    "ready_to_leave": false,
+    "prep_remaining": 2,
+    "packing_remaining": 1,
+    "dependency_blockers": 2,
+    "gameplan_total": 4,
+    "gameplan_remaining": 4,
+    "blocking_prep_item_ids": [12, 14]
   }
 }
 ```
 
-Migrate existing localStorage settings defensively.
+Departure blockers are:
 
-## L2. Strict lazy fetch
+- required Prep items still pending;
+- required Packing items still pending;
+- unique unfinished Prep dependencies required by required Packing/Gameplan items.
 
-If a layer is OFF:
+Do NOT treat an unfinished Gameplan item by itself as a departure blocker. Gameplan items are work intended to happen after leaving.
 
-- no upstream request;
-- no Archie external endpoint request except optional provider-health/capability lookup.
+Optional items do not block departure.
 
-Wildlife with no taxon selected: no request.
+Avoid double-counting the same unfinished Prep item when three Gameplan items depend on it.
 
-Below minimum zoom: no request.
+Human-facing summary should say things like:
 
-Fetch on `moveend` only, debounced roughly 300 ms.
+- `2 setup blockers · 1 item not packed`;
+- `Ready to go`.
 
-Use AbortController to cancel stale browser requests.
-
-Use a 10–15% viewport buffer so tiny pans do not immediately refetch.
-
-## L3. Source organization
-
-Use one MapLibre source per external family, not one per feature:
-
-- `external-wildlife`;
-- `external-streams`;
-- `external-waterbodies`;
-- `external-wetlands`;
-- raster `external-landcover`.
-
-Local/user-created objects must win hit priority over external layers.
+Do not show a readiness percentage.
 
 ---
 
-# 13. PHASE M · VISUAL LANGUAGE
+# 12. PHASE J · PREFLIGHT UX
 
-Maintain the epistemic hierarchy.
+Create:
 
-## User observations
+```text
+frontend/src/components/surveyor/PreflightSheet.vue
+frontend/src/components/surveyor/OutingSection.vue
+frontend/src/components/surveyor/OutingItemRow.vue
+frontend/src/components/surveyor/OutingDependencyPicker.vue
+frontend/src/components/surveyor/ActiveMissionStrip.vue
+frontend/src/surveyor/outings.js
+```
 
-Existing first-hand Surveyor objects:
+One vertically scrolling sheet, in this order:
 
-- crisp;
-- strong;
-- filled.
+1. Prep / Setup
+2. Packing List
+3. Gameplan
 
-## External public wildlife
+Do not make these separate pages or tabs.
 
-- hollow/smaller marker;
-- muted external-data accent;
-- visually distinct from user wildlife observations.
+## J1. Header
 
-## Obscured public wildlife
+Show:
 
-- hollow marker;
-- larger soft/dotted uncertainty halo;
-- no implication that halo center is the true location.
+- plan title;
+- one-line objective;
+- readiness summary.
 
-## Environmental layers
+Example:
 
-- visually quiet;
-- below search objects, cameras, evidence, planning zones and interaction handles.
+`2 setup blockers · 1 item not packed`
 
-## Hypotheses/planning
+or:
 
-Keep existing dashed/dotted planning semantics.
+`Ready to go`.
 
-A saved third-party wildlife observation must remain visibly third-party after saving.
+Objective example:
 
----
+`Check creek cameras, cover abandoned-house edge, dusk pass at Coyote Island.`
 
-# 14. PHASE N · EXTERNAL OBSERVATION POPUP / SAVE AS CONTEXT
+Objective is optional but strongly surfaced because it answers "what is tonight about?"
 
-Wildlife popup should show:
+## J2. Prep / Setup
 
-- common/scientific species;
-- `Public observation`;
-- observed date;
-- quality grade;
-- public location precision;
-- positional accuracy when meaningful;
-- provider;
-- source link.
+Simple rows:
 
-Buttons:
+`○ Charge camera batteries`
 
-- `Open source`;
-- `Save as context`.
+`✓ Clear SD cards`
 
-`Save as context` explicitly creates a SurveyorMapObject:
+No priority selectors.
 
-- object_type = `context`;
-- subtype = `external_wildlife_observation`;
-- epistemic_state = `observed`;
-- confidence = `context`.
+## J3. Packing
 
-Properties must preserve:
+Rows may display dependency state:
 
-- provider;
-- provider observation ID;
-- taxon;
-- observed_at;
-- source URL;
-- location precision;
-- positional accuracy;
-- geoprivacy;
-- `third_party = true`.
+```text
+○ Camera bag
+  ⚠ Needs setup: Charge camera batteries
+```
 
-Do not call saved public observations `evidence of Archie`.
+If several dependencies:
 
-Do not automatically persist every external feature.
+`⚠ 2 setup items unfinished`
 
----
+## J4. Gameplan
 
-# 15. PHASE O · PUBLIC OBSERVATION CONCENTRATION
+Ordered items:
 
-Optional but included in Slice 7 if core providers are stable.
+```text
+1. Raccoon Creek camera
+   Pull card + swap battery
+   ✓ Setup ready
 
-Add:
+2. Blue Lagoon camera
+   Re-aim toward creek crossing
+   ⚠ Needs setup: Clear SD card
+```
 
-`Public observation concentration`
+If linked to a map object/candidate/task, show a compact source/link label, not database IDs.
 
-Only enable when at least 5 observations are available.
+## J5. Dependencies
 
-Use deterministic grid/bin counts, not opaque KDE.
+On Packing and Gameplan rows provide:
 
-Suggested base cell size: about 500 m, adjusted modestly by zoom if needed.
+`+ Needs setup`
 
-Correct labels:
+Picker shows existing Prep items first.
 
-- `Public coyote observation concentration`;
-- `12 public observations · Jul 1–Sep 27`.
+Also provide:
 
-Never label:
+`+ Add new setup item`
 
-- predator hotspot;
-- coyote density;
-- population estimate.
+Creating a new Prep item from this picker must both:
 
-Display:
+1. create the Prep item;
+2. attach the dependency;
 
-`Public-report concentration does not estimate animal population.`
+in one action.
 
-No absence inference. A lack of public observations does not mean the animal is absent.
+Shared Prep should be reused rather than duplicated.
+
+If multiple items depend on one Prep item, the Prep row may show:
+
+`Used by 3 items`.
+
+Do not build a node graph.
 
 ---
 
-# 16. PHASE P · ENVIRONMENT INSPECTOR
+# 13. PHASE K · AUTO-SAVE
 
-Add a Surveyor tool/action:
+Preflight must not have a general `Save checklist` button.
 
-`Inspect area`
+Actions persist immediately:
 
-Endpoint:
+- check/uncheck;
+- add item;
+- edit title/note;
+- reorder;
+- add/remove dependency;
+- required/optional;
+- skip;
+- objective edit.
 
-`GET /api/external/context?lat=...&lon=...&radius_m=500`
+Use optimistic UI.
 
-Return when available:
+Text editing may debounce briefly, e.g. 300–500 ms.
 
-- Annual NLCD class/year at point;
-- nearest stream and metric distance;
-- nearest waterbody and metric distance;
-- mapped-wetland intersection/context;
-- public wildlife observation counts in selected/default recent window;
-- provider/cached/stale status.
+If persistence fails:
 
-Use a local metric CRS through pyproj for nearest-distance calculations. Do not calculate meter distances directly on raw lat/lon geometry.
+- restore last confirmed value;
+- show a compact actionable error;
+- do not silently lose edits.
 
-If a provider is unavailable, return that section as unavailable rather than inventing data.
-
-## P1. Camera context
-
-Trail-camera inspector gets:
-
-`Environmental context`
-
-Use the active camera placement coordinate.
-
-Display context only. Do not automatically recommend moving the camera.
-
-## P2. Candidate context
-
-Candidate Case Workspace gets:
-
-`Environmental context`
-
-Use `current_location`.
-
-If the candidate location is approximate/city-level, say:
-
-`Context is based on an approximate candidate location.`
-
-Do not imply precision beyond the source.
+This system exists to reduce "did I remember to save the thing that helps me remember?" friction.
 
 ---
 
-# 17. PHASE Q · PROVIDER PRIVACY BOUNDARY
+# 14. PHASE L · COMPLETED-NOISE REDUCTION
 
-External provider requests may contain only geographic/provider query information:
+Completed Prep/Packing sections should collapse automatically when all required items are complete.
 
-- bbox;
-- coordinates needed for the query;
-- taxa;
-- dates;
-- product/layer parameters.
+Example:
 
-Never send:
+`✓ Prep / Setup · 5 ready`
 
-- textual home address;
-- Archie profile/name;
-- CandidateCase IDs;
-- Animal IDs;
-- private access notes;
-- contact information;
-- user notes.
+Tap to reopen.
 
-A bbox may naturally encompass home, but providers are never told that a coordinate is the user's home or the missing-cat origin.
+Provide one small view control:
+
+- `All`;
+- `Remaining`.
+
+When departure blockers become small, defaulting the sheet view to Remaining is acceptable, but do not make completed items impossible to inspect.
+
+No percent-complete dashboard.
 
 ---
 
-# 18. PHASE R · FAILURE / OFFLINE BEHAVIOR
+# 15. PHASE M · START SEARCH INTEGRATION
 
-Each provider owns its own error state.
+Current `SearchSessionBar` calls `startSearch()` directly.
 
-If iNaturalist fails, Surveyor, hydrography, wetlands and land cover must still work.
+Change behavior:
 
-If internet is unavailable and cached data exists:
+`Start search` → opens Preflight.
 
-- show cached data;
-- expose last refresh time;
-- mark stale when appropriate.
+If no draft/current outing exists:
 
-Manual `Refresh layer` may retry.
+```text
+Tonight's plan
 
-No rapid automatic retry loops.
+[ Build plan ]
+[ Reuse last outing ]
+[ Start without plan ]
+```
+
+If a draft exists, open it directly.
+
+If ready:
+
+`[ Start search ]`
+
+If blockers remain:
+
+```text
+2 setup blockers
+1 item not packed
+
+[ Review blockers ]
+[ Start anyway ]
+```
+
+Do not hard-disable departure.
+
+## M1. Starting with a plan
+
+`POST /api/surveyor/outings/{plan_id}/start` should transactionally:
+
+1. validate plan is startable;
+2. create a `SurveyorSearchSession`;
+3. link its ID to the outing plan;
+4. set outing status = `active`;
+5. record Surveyor events;
+6. return plan + session.
+
+Allow an explicit `start_with_blockers=true` flag.
+
+If starting with blockers, record an event such as:
+
+`outing_started_with_blockers`.
+
+## M2. Start without plan
+
+Keep the existing direct session endpoint/path available.
+
+The planning system is an aid, not a gate.
 
 ---
 
-# 19. TEST PLAN
+# 16. PHASE N · REUSE LAST OUTING
 
-Automated provider tests must mock upstream HTTP. Do not call live public APIs from pytest.
+Implement one-tap:
 
-Add focused tests covering at least:
+`Reuse last outing`
 
-## Review/location/24Pet
+Clone:
 
-1. 68 match score remains above 31 despite client trait boost.
-2. default Archie selections do not double-resort smart order.
-3. current-location text/distance/bearing/map all use the same record.
-4. location precision is not hardcoded to address.
-5. `/ViewAnimals/` is classified as search-results, not exact original.
-6. exact animal detail link must match Animal ID.
-7. request-level `Inactive` does not mark displayed animals inactive.
-8. legacy Chatham record can derive the correct holding entity.
+- title/objective as a starting point;
+- item text/notes/order;
+- dependencies;
+- linked map-object/task/candidate references when still valid;
+- required/optional flags;
+- time hints.
 
-## External backend
+Reset:
 
-9. taxon resolution accepts exact species and rejects wrong rank/name.
-10. public iNaturalist observation normalizes correctly.
-11. obscured observation remains obscured.
-12. private/no-coordinate observation is not mapped.
-13. observed_at remains distinct from provider-created timestamp.
-14. positional accuracy is preserved.
-15. rate limiter spaces iNaturalist requests.
-16. fresh cache prevents duplicate upstream request.
-17. stale successful cache is returned after provider failure.
-18. NC OneMap stream/waterbody responses normalize to WGS84 GeoJSON.
-19. transfer-limit subdivision deduplicates features.
-20. NWI normalization preserves mapped-wetland semantics.
-21. land-cover tile endpoint rejects invalid z/x/y.
-22. arbitrary proxy URLs/layers cannot be supplied by clients.
-23. land-cover tile cache works.
-24. external context distance uses projected metric calculation.
-25. Save as context preserves provenance and third-party status.
-26. no provider request includes private Archie Radar context.
+- all item statuses to pending;
+- completed_at;
+- session link;
+- plan status to draft.
 
-Do not add fragile wall-clock performance assertions to CI.
+Never copy yesterday's `ready`, `packed` or `done` state into today.
+
+If a linked source entity no longer exists, keep the text but mark the reference unavailable rather than failing the clone.
 
 ---
 
-# 20. MANUAL ACCEPTANCE
+# 17. PHASE O · ADD TO OUTING FROM EXISTING WORK
+
+Add a low-friction `Add to outing` action where Archie Radar already knows something may need field work.
+
+Priority integrations:
+
+1. Surveyor map object inspector;
+2. open SurveyorTask/follow-up;
+3. Candidate Case Workspace;
+4. trail camera inspector/context.
+
+Default target:
+
+- current draft outing, if one exists;
+- otherwise create a draft outing and add the item.
+
+Examples:
+
+Trail camera:
+`Check Raccoon Creek camera`
+
+Needs-search zone:
+`Search abandoned-house edge`
+
+Candidate:
+`Check candidate location`
+
+Follow-up task:
+use task title.
+
+Automatically preserve the source reference.
+
+Do not force the user to retype a location or title that already exists.
+
+---
+
+# 18. PHASE P · TASK / OUTING SOURCE-OF-TRUTH RULE
+
+Do not create two independent follow-up states for the same action.
+
+If a Gameplan item was created from an open `SurveyorTask`:
+
+- show `From follow-up`;
+- completing the Gameplan item should complete the linked task in the same backend operation/transaction;
+- UI should make this behavior visible, e.g. `Done · completes follow-up`.
+
+Do not auto-complete tasks when a Prep or Packing item is completed.
+
+If a task is later reopened, do not rewrite historical outing completion. The task may be added to a future outing again.
+
+---
+
+# 19. PHASE Q · ACTIVE FIELD MISSION STRIP
+
+Once the session starts, Prep and Packing should recede.
+
+Show a compact active mission strip over Surveyor:
+
+```text
+NEXT
+2 / 5 · Check Raccoon Creek camera
+Pull SD · swap battery
+
+[ Map ]   [ Done ]   [ Skip ]   [ Plan ]
+```
+
+Rules:
+
+- next = first pending Gameplan item by position;
+- Done completes it and advances;
+- Skip marks it skipped and advances;
+- Plan opens full outing;
+- Map focuses the linked map object/candidate when a usable location exists;
+- if no location exists, hide Map rather than disabling a mystery button.
+
+When no pending Gameplan remains:
+
+`Gameplan complete`
+
+Do not auto-end the search session.
+
+Do not auto-optimize/reorder the route.
+
+---
+
+# 20. PHASE R · OPTIONAL TIME HINTS
+
+Gameplan items may have a lightweight optional `time_hint`.
+
+Examples:
+
+- `Dusk`;
+- `10:30 PM`;
+- `Late`;
+- `Anytime`.
+
+This is display context, not scheduling infrastructure.
+
+Do not require exact times.
+
+Do not create reminders/automations from these fields in this slice.
+
+---
+
+# 21. PHASE S · ENDING A SEARCH
+
+Ending a search session must not erase unfinished Gameplan items.
+
+When the linked session ends:
+
+- outing status becomes `completed`;
+- completed/skipped/pending item states remain historical facts;
+- show how many Gameplan items remain unfinished.
+
+Do not force another questionnaire solely to preserve them.
+
+For the next outing, surface:
+
+`2 unfinished from last outing · Continue`
+
+One tap should create a new draft containing the unfinished Gameplan items and any Prep dependencies still relevant.
+
+This is separate from `Reuse last outing`, which copies the whole structure.
+
+Suggested endpoint:
+
+`POST /api/surveyor/outings/{plan_id}/continue-unfinished`
+
+The new outing resets copied item state to pending.
+
+---
+
+# 22. PHASE T · PACKING KITS ARE DEFERRED
+
+Named kits such as:
+
+- Camera kit;
+- Night kit;
+
+are a useful future chunking mechanism, but do not block this slice.
+
+Do NOT build a full inventory subsystem now.
+
+Record as a Slice 9 polish candidate if field use shows repeated packing-list duplication.
+
+---
+
+# 23. PHASE U · DRAFT / FAILURE BEHAVIOR
+
+Outing plans are server-persisted drafts, so do not duplicate the full plan into the existing local Surveyor draft-recovery system.
+
+Frontend should tolerate:
+
+- refresh;
+- navigating away and back;
+- mobile browser suspension.
+
+On load:
+
+- fetch current draft outing;
+- fetch active outing linked to active search session if one exists.
+
+If backend is temporarily unavailable during a checkbox action:
+
+- retain the user-visible attempted state only while retry/error handling is clear;
+- do not falsely indicate persistence.
+
+---
+
+# 24. PHASE V · EVENT HISTORY
+
+Record meaningful outing events in `SurveyorEvent`.
+
+At minimum:
+
+- outing_created;
+- outing_item_added;
+- outing_item_completed;
+- outing_item_skipped;
+- outing_dependency_added;
+- outing_started;
+- outing_started_with_blockers;
+- outing_completed;
+- outing_abandoned;
+- outing_reused;
+- outing_continued.
+
+Do not create a noisy event for every character typed into a note/title.
+
+---
+
+# 25. PHASE W · RESPONSIVE UX
+
+## Desktop
+
+Preflight may be a centered field sheet or right-side panel, but all three sections remain on one scroll surface.
+
+## Portrait mobile
+
+This is the primary design target.
+
+Requirements:
+
+- full-width bottom sheet;
+- sticky readiness header;
+- 44px minimum row/action targets;
+- completed sections collapse;
+- dependency picker opens as a small nested sheet;
+- no horizontal scroll;
+- active mission strip remains compact above the footer controls.
+
+## Phone landscape
+
+Use a side sheet where practical so the map remains usable.
+
+Do not let preflight obscure the entire map unless the user explicitly opens the full plan.
+
+---
+
+# 26. PHASE X · FILE ORGANIZATION
+
+Backend:
+
+```text
+backend/app/surveyor/outings.py
+backend/app/models.py
+backend/app/schemas.py
+backend/tests/test_surveyor_outings.py
+```
+
+Frontend:
+
+```text
+frontend/src/components/surveyor/PreflightSheet.vue
+frontend/src/components/surveyor/OutingSection.vue
+frontend/src/components/surveyor/OutingItemRow.vue
+frontend/src/components/surveyor/OutingDependencyPicker.vue
+frontend/src/components/surveyor/ActiveMissionStrip.vue
+frontend/src/surveyor/outings.js
+```
+
+Keep outing-specific logic out of the already-large `SurveyorView.vue` as much as practical.
+
+---
+
+# 27. BACKEND TESTS
+
+Add focused tests.
 
 ## Queue / 24Pet
 
-Use at least 10 24Pet cases.
+1. 68 match score remains above 31 despite larger trait boost on 31.
+2. default Archie selections do not double-resort smart order.
+3. current-location text/distance/bearing/map use the same record.
+4. location precision is not hardcoded.
+5. `/ViewAnimals/` classifies as search_results.
+6. exact 24Pet detail link must correspond to the same Animal ID.
+7. request-level `Inactive` does not mark displayed animal inactive.
+8. legacy Chatham source can derive Chatham holder context.
 
-Verify:
+## Outings
 
-- review order is sane;
-- review actions stay before details;
-- holder/custody is the dominant heading;
-- location map uses the exact current-location bundle;
-- internal source-record number is details-only;
-- exact detail links open the matching Animal ID;
-- saved ViewAnimals links are never called `Original`;
-- request-level inactive text does not erase current animal results.
+9. create plan.
+10. create Prep/Packing/Gameplan items.
+11. reject dependency whose source is not Prep.
+12. reject cross-plan dependency.
+13. shared Prep blocker is counted once.
+14. optional unfinished item does not block departure.
+15. unfinished Gameplan itself does not block departure.
+16. unfinished Prep dependency for a required Gameplan item blocks departure.
+17. completing Prep clears the dependency blocker.
+18. reuse clones structure but resets all state.
+19. continue-unfinished copies only unfinished Gameplan work plus required dependency context.
+20. starting outing creates and links a SearchSession.
+21. start-with-blockers requires explicit override.
+22. completing Gameplan item linked from SurveyorTask completes that task.
+23. completing Packing item does not complete linked task.
+24. abandoning an outing preserves history.
+25. new tables are created additively without destructive schema reset.
 
-## Surveyor control
-
-Desktop, portrait mobile, and phone landscape:
-
-- persistent Layers control is visible;
-- LayerDrawer opens without entering More/search-session menus;
-- enabled overlay chips appear;
-- toggles reliably apply after initial map load;
-- no MapLibre null-number warning remains.
-
-## Land cover
-
-Enable land cover.
-
-Browser network log must hit only Archie Radar's tile endpoint, not MRLC directly.
-
-## Hydrography / wetlands
-
-Enable each.
-
-Verify:
-
-- visually subordinate styling;
-- no network storm while panning;
-- no statewide payloads;
-- toggling OFF stops fetches.
-
-## Wildlife
-
-Enable Coyote + Fox, 90 days.
-
-Verify:
-
-- markers are visibly different from user observations;
-- observed date, quality, provider, precision are visible;
-- obscured public points are clearly approximate;
-- Save as context preserves third-party styling.
-
-## Environment inspector
-
-Inspect:
-
-- arbitrary map point;
-- one active trail camera;
-- one candidate current location.
-
-Verify provider wording and location precision are honest.
+Keep tests local and deterministic.
 
 ---
 
-# 21. PERFORMANCE / RUNTIME REPORT
+# 28. FRONTEND / MANUAL ACCEPTANCE
 
-After implementation, report real local/LAN timings from the deployed app for:
+No new frontend test framework is required solely for this slice if the repo does not already use one.
 
-- `GET /api/candidate-cases`;
-- `GET /api/candidate-cases/map`;
-- `GET /api/queue-stats`;
-- `GET /api/surveyor/objects`;
-- representative hydrography request, cached and uncached;
-- representative wildlife request, cached and uncached;
-- representative land-cover tile, cached and uncached.
+Run the frontend build and do focused manual acceptance.
 
-Do not optimize based only on assumptions.
+## Review queue
 
-Surveyor's base map and local field objects must become usable without waiting for external providers.
+Verify:
+
+- smart ranking no longer behaves strangely under defaults;
+- candidate location display and Map action agree;
+- internal source record ID is details-only;
+- 24Pet fallback URL is not called Original.
+
+## Preflight
+
+Create:
+
+```text
+PREP
+○ Charge camera batteries
+○ Clear SD cards
+
+PACKING
+○ Camera bag
+○ Flashlight
+
+GAMEPLAN
+1. Check Raccoon Creek camera
+2. Check Blue Lagoon camera
+3. Dusk pass
+```
+
+Link:
+
+- Camera bag → Charge camera batteries;
+- Raccoon Creek camera → Charge camera batteries;
+- Blue Lagoon camera → Clear SD cards.
+
+Expected:
+
+- readiness shows unresolved blockers;
+- dependencies are visible where they matter;
+- shared Charge-camera-batteries Prep appears only once;
+- checking Charge camera batteries updates all dependent rows immediately;
+- Packing/Gameplan rows remain manually actionable even when dependency unfinished;
+- no general Save button.
+
+## Departure
+
+With blockers:
+
+- Start search shows blockers;
+- Start anyway remains available.
+
+With everything required ready:
+
+- UI says `Ready to go`;
+- Start search starts/links a session.
+
+## Active field use
+
+- mission strip shows first pending Gameplan item;
+- Done advances;
+- Skip advances;
+- Map focuses linked object;
+- Plan opens full outing;
+- screen remains usable in portrait and landscape.
+
+## Session end
+
+End with two Gameplan items unfinished.
+
+Expected:
+
+- session can finish normally;
+- plan preserves unfinished history;
+- next planning entry offers `2 unfinished from last outing · Continue`;
+- Continue creates a fresh draft rather than silently reusing old completion state.
 
 ---
 
-# 22. IMPLEMENTATION ORDER
+# 29. PERFORMANCE / FRICTION TARGETS
 
-Follow this order:
+This slice is more about cognitive latency than benchmark latency.
+
+Targets:
+
+- opening Preflight from Surveyor should feel immediate on LAN;
+- checkbox completion should update optimistically with no full-page reload;
+- adding a dependency should not require leaving the current item;
+- Start Search should require at most one extra tap when already ready;
+- if no plan is desired, Start without plan remains a direct escape hatch;
+- active field mode exposes the next action without opening a full sheet.
+
+Do not add a heavy client state-management dependency for this.
+
+---
+
+# 30. IMPLEMENTATION ORDER
+
+Use this order:
 
 1. fix smart queue ordering;
-2. fix current-location/map action;
-3. fix 24Pet link semantics/detail extraction/inactive-request behavior;
+2. fix candidate current-location/map action;
+3. fix 24Pet link classification/detail extraction/request-level inactive handling;
 4. add persistent Surveyor Layers control;
-5. fix numeric-null MapLibre warning;
-6. create external backend package/router/cache/health primitives;
-7. implement MRLC backend tile proxy and replace direct browser WMS;
-8. implement NC OneMap hydrography;
-9. wire capability-driven LayerDrawer and lazy frontend external store;
-10. implement NWI wetlands;
-11. implement iNaturalist taxon resolver + observation provider;
-12. add wildlife styling/popup/geoprivacy semantics;
-13. add Save as context;
-14. add Environment Inspector;
-15. add camera/candidate environmental context;
-16. add observation-concentration view;
-17. responsive polish;
-18. focused mocked tests;
-19. manual acceptance;
-20. push to `main`, deploy to `dietpi` per `AGENTS.md`, and record timings.
+5. fix MapLibre numeric-null warning;
+6. add outing models/schemas/router;
+7. implement readiness calculation;
+8. implement outing CRUD + dependencies + reorder;
+9. implement reuse / continue-unfinished;
+10. implement PreflightSheet and three sections;
+11. implement inline dependency picker;
+12. replace direct Start Search flow with preflight entry;
+13. implement transactional outing→SearchSession start;
+14. add `Add to outing` from map object/task/candidate/camera;
+15. implement task-completion linkage;
+16. implement active mission strip;
+17. session-end carry-forward UX;
+18. responsive polish;
+19. focused tests;
+20. manual acceptance;
+21. commit/push to `main`;
+22. if and only if the execution environment has device access, deploy to `dietpi` per `AGENTS.md`; otherwise report deployment not attempted from that environment.
 
 ---
 
-# 23. RECOMMENDED COMMIT SEQUENCE
+# 31. RECOMMENDED COMMITS
 
-Suggested focused commits:
+Suggested sequence:
 
 1. `fix(candidates): stabilize review order location and 24pet links`
-2. `fix(surveyor): expose persistent layer controls and sanitize map properties`
-3. `feat(external): add provider cache health and service framework`
-4. `feat(external): proxy and cache annual NLCD landcover`
-5. `feat(external): add NC OneMap hydrography`
-6. `feat(external): add NWI mapped wetlands`
-7. `feat(external): add iNaturalist public wildlife observations`
-8. `feat(surveyor): add external layers provenance and context inspection`
-9. `test(external): cover caching privacy precision and provider failures`
+2. `fix(surveyor): expose persistent layers control and sanitize map properties`
+3. `feat(surveyor): add outing plan and readiness model`
+4. `feat(surveyor): add prep packing and gameplan preflight`
+5. `feat(surveyor): integrate outing plans with field sessions`
+6. `feat(surveyor): add active mission strip and unfinished carry-forward`
+7. `test(surveyor): cover outing readiness dependencies and session linkage`
 
-All commits must end on `main` and be pushed/deployed as required by `AGENTS.md`.
+Do not force a commit boundary if the implementation naturally combines two tiny adjacent changes.
 
 ---
 
-# 24. DO NOT IMPLEMENT IN THIS SLICE
+# 32. EXPLICITLY DEFER TO SLICE 8
 
-Explicitly defer:
+Do not implement in this slice:
 
-- Radar Assistant / LLM;
-- OpenAI chat;
-- image/video AI;
-- automated search recommendations;
-- automated camera placement;
+- iNaturalist wildlife;
+- NC OneMap hydrography;
+- NWI wetlands;
+- MRLC backend WMS/tile proxy;
+- environmental context inspector;
+- public-observation concentration;
 - predator-risk scoring;
-- inferred cat-highway generation;
-- Movebank;
-- eBird;
-- rare-species Natural Heritage occurrence points;
-- USGS GAP modeled animal-habitat overlays;
-- automatic headless crawling of external environmental providers on a cron;
-- redesign of the already-landed Facebook selected-group collector unless a regression is discovered.
+- automatic search-route planning;
+- automatic camera-placement recommendations.
+
+Slice 8 will consume the cleaned-up persistent Layers control added here.
 
 ---
 
-# 25. DEFINITION OF DONE
+# 33. EXPLICITLY DEFER TO SLICE 9 / LATER
 
-Slice 7 is complete only when all of the following are true:
+Do not implement now:
 
-## Candidate correctness
+- packing inventory database;
+- named packing kits unless a very small implementation falls out naturally;
+- consumable counts;
+- automatic restock;
+- AI-generated outing plans;
+- Gantt/calendar planning;
+- generic dependency graphs;
+- route optimization;
+- mandatory duration estimates;
+- automation/reminder scheduling from `time_hint`.
 
-- smart order no longer allows small trait boosts to swamp match score;
-- default Archie traits are not double-counted in client sorting;
-- candidate location/distance/bearing/map use one coherent current-location record;
-- review actions precede details;
-- internal record IDs are details-only;
-- 24Pet search URLs are no longer labeled Original;
-- real animal-specific 24Pet links are extracted/validated when available;
-- request-level `Inactive` is not mistaken for animal inactivity.
+---
+
+# 34. DEFINITION OF DONE
+
+Slice 7 is complete only when:
+
+## Review correctness
+
+- smart order cannot let small client trait boosts swamp large score differences;
+- default Archie traits are not double-counted;
+- candidate map/location/distance/bearing use one coherent current-location record;
+- review actions remain above details;
+- technical source record IDs are details-only;
+- 24Pet saved searches are not labeled Original;
+- exact animal links are used only when verified to match that animal;
+- request-level inactive state is not mistaken for animal inactivity.
 
 ## Surveyor shell
 
-- Layers control is permanently discoverable on desktop/portrait/landscape;
+- persistent Layers control is visible desktop / portrait / landscape;
 - initial layer visibility is deterministic;
-- overlay status chips work;
-- MapLibre numeric-null warning is gone;
-- Surveyor local/core data renders independently of external providers.
+- MapLibre numeric-null warning is gone.
 
-## Environmental providers
+## Field readiness
 
-- Annual NLCD 2025 goes through Archie Radar backend cache/proxy;
-- no direct MRLC browser WMS request remains;
-- NC OneMap streams and waterbodies work;
-- NWI mapped wetlands work;
-- iNaturalist selected wildlife taxa work;
-- external requests are lazy, bounded, cached, cancellable and failure-isolated;
-- iNaturalist public geoprivacy is respected;
-- public wildlife observations are visually distinct from user observations;
-- Save as context is explicit and preserves provenance;
-- observation concentration is neutrally labeled and does not imply population density;
-- Environment Inspector works for map points, cameras and candidate locations;
-- private Archie Radar context is never sent to third-party providers.
+- one outing plan contains Prep / Packing / Gameplan;
+- Prep dependencies can be attached to Packing/Gameplan rows inline;
+- shared Prep work is not duplicated;
+- readiness shows unresolved work, not a percentage;
+- readiness is derived, not stored as stale plan state;
+- all routine edits auto-save;
+- Start Search opens Preflight;
+- Start without plan remains available;
+- blockers warn but never hard-lock departure;
+- Reuse last outing resets completion state;
+- Add to outing works from existing field entities;
+- active search exposes the next Gameplan item;
+- Done/Skip advances the mission strip;
+- task-linked Gameplan completion resolves the linked task;
+- unfinished Gameplan survives session end and can be continued next time;
+- portrait / landscape / desktop are usable.
 
 ## Quality
 
-- focused mocked backend tests pass;
+- focused backend tests pass;
 - frontend build succeeds;
-- manual desktop + portrait + landscape pass succeeds;
-- representative runtime timings are reported;
+- manual acceptance passes;
 - changes are pushed to `main`;
-- `dietpi` pulls the pushed SHA and Docker Compose is rebuilt/restarted;
-- lightweight deployment verification succeeds.
+- deployment is attempted only from environments that actually have device access.
 
 ---
 
-# 26. END-OF-RUN REPORT FORMAT
+# 35. END-OF-RUN REPORT
 
-Return exactly this information at the end of implementation:
+Return:
 
 ```text
 SLICE 7 STATUS
@@ -1263,71 +1365,56 @@ Final SHA:
 CORRECTIONS
 Smart review order:
 Current-location/map consistency:
-24Pet detail/fallback links:
+24Pet exact/fallback links:
 24Pet request-level inactive handling:
-Persistent Surveyor Layers control:
-MapLibre null warning:
+Persistent Layers control:
+MapLibre numeric warning:
 
-EXTERNAL FRAMEWORK
-Provider health:
-Cache:
-Rate limiting:
-Failure/stale-cache behavior:
+OUTING MODEL
+Plan:
+Items:
+Dependencies:
+Readiness:
+Reuse:
+Continue unfinished:
 
-LAND COVER
-Backend proxy:
-Tile cache:
-Direct browser WMS removed:
+PREFLIGHT
+Prep / Setup:
+Packing:
+Gameplan:
+Dependency UX:
+Auto-save:
+Remaining mode:
 
-HYDROGRAPHY
-Streams:
-Waterbodies:
-
-WETLANDS:
-
-WILDLIFE
-Taxon resolution:
-Observations:
-Geoprivacy:
-Popup:
-Save as context:
-Concentration:
-
-ENVIRONMENT INSPECTOR
-Point:
-Camera:
-Candidate:
+SESSION INTEGRATION
+Start flow:
+Start anyway:
+Start without plan:
+SearchSession linkage:
+Mission strip:
+Map focus:
+Task completion linkage:
+Session end carry-forward:
 
 RESPONSIVE
 Portrait:
 Landscape:
 Desktop:
 
-PERFORMANCE
-candidate list:
-candidate map:
-queue stats:
-surveyor objects:
-hydro uncached/cached:
-wildlife uncached/cached:
-landcover uncached/cached:
-
 TESTS:
+FRONTEND BUILD:
 MANUAL ACCEPTANCE:
 
 DEPLOYMENT
 main commit:
-dietpi pulled SHA:
-docker compose restart:
-health verification:
+DietPi deployment:
+verification:
 
 KNOWN LIMITATIONS:
 ```
 
----
+If the execution environment does not have device access, use:
 
-## Project progress after this brief
+`DietPi deployment: not attempted from this environment`
 
-Before implementation: **6/9 sequential slices complete (67%)**.
-
-Current slice: **Slice 7/9 · Correctness Rollup + External Environmental Intelligence**.
+Do not treat that as an implementation failure.
