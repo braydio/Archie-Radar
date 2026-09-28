@@ -1,1420 +1,1129 @@
-# NEXT SLICE IMPLEMENTATION
+# NEXT SLICE TASK PACKET
 
-## Archie Radar v1 · Slice 7 of 9
-### Field Readiness + Review/Map Correctness
+## Archie Radar v1 · Slice 7B
+### Preflight Hardening + Candidate/Map Correctness
 
-**Reviewed application baseline:** `main` at `0c91cea316e6a14d59c1bea8bb335b2a000f6095`  
-**Instruction baseline:** `main` at `797ee832138fa898ace63e1bbdada459c1ed6530`
+**Base:** `main` at `98a23466ef0b949034d64e43bbce1aca61b79b36`
 
-This packet supersedes the previous Slice 7 brief.
+This packet is corrective and incremental. Do not rebuild the outing/preflight system. Review the current implementation first, then harden what landed in `98a23466` and finish the correctness items that still remain from the prior packets.
 
-The previous packet bundled too much work into one slice: queue correctness, 24PetConnect correctness, Surveyor layer-control defects, and a full external environmental provider stack. That was technically coherent but operationally too broad.
+The goal is to make the newly landed Prep / Packing / Gameplan flow dependable enough for real field use, while closing the candidate-order, location, 24PetConnect, Surveyor Layers, and MapLibre issues that are still present in current `main`.
 
-The current user-facing friction is more immediate:
-
-- before leaving, it is hard to answer **"is everything prepped?"**
-- it is hard to answer **"do I have everything?"**
-- it is hard to answer **"what specifically am I doing?"**
-- once outside, it should be obvious **what is next** without reopening or mentally reconciling several systems.
-
-Therefore the roadmap is intentionally re-sequenced:
-
-- **Slice 7:** Field Readiness + Review/Map Correctness
-- **Slice 8:** External Environmental Intelligence
-- **Slice 9:** Final hardening / release polish
-
-Progress remains **6/9 slices complete (67%)** before this slice.
-
-The already-landed server-side Facebook selected-group collector remains in place. Do not redesign it in this slice unless an actual regression is discovered.
+Do **not** begin External Environmental Intelligence in this packet. That remains the next numbered feature slice after this hardening pass.
 
 ---
 
-# 1. CURRENT-MAIN REVIEW
+# 1. CURRENT STATE VERIFIED IN MAIN
 
-Latest application code already includes:
+The following has landed and should be preserved:
 
-- CandidateCase and stable case/source-record separation;
-- Case Workspace;
-- case notes, merges/splits, projection provenance, evidence export;
-- lean candidate map endpoint and batched candidate reads;
-- candidate request cancellation/version guard;
-- Surveyor map objects, links, trail cameras, access records, evidence, tasks, search sessions and route coverage;
-- Media Vault and local media handling;
-- server-side selected-group Facebook collection;
-- Docker deployment workflow instructions in `AGENTS.md`.
+- additive outing tables:
+  - `SurveyorOutingPlan`
+  - `SurveyorOutingItem`
+  - `SurveyorOutingDependency`
+- `backend/app/surveyor/outings.py`
+- one-screen Prep / Packing / Gameplan UI in `OutingPreflight.vue`
+- inline Prep dependencies
+- Add & link setup item
+- Reuse last outing
+- Add to outing from Surveyor objects/tasks/candidate map inspector
+- mission strip during active search
+- optional time hints
+- All / Remaining mode
+- responsive styling
+- initial outing tests
 
-The following issues are still present and are mandatory corrections in this slice:
-
-1. `CandidatesView.clientPrioritize()` still lets client trait boost outrank meaningful score differences.
-2. `CandidatesView.locateCandidate()` still uses top-level `post.latitude/post.longitude` rather than the coherent `current_location` projection and hardcodes location precision to `address`.
-3. Candidate cards still expose internal source-record provenance in the collapsed card.
-4. Candidate cards still label every `source_url` as `Original`.
-5. The 24PetConnect connector still falls back to a saved `/ViewAnimals/<request-id>` URL when no animal detail URL is found.
-6. Request-level `Your request is currently Inactive` text from 24PetConnect must not be interpreted as every animal being inactive.
-7. Surveyor's only direct `Layers` button still lives inside `.surveyor-actions`, where mobile CSS hides it.
-8. Surveyor still has the MapLibre numeric-null warning risk.
-9. There is no outing-level Prep / Packing / Gameplan model.
-10. `Start search` currently jumps directly into a search session with no preflight.
-
-The full external environmental provider stack from the prior packet is deferred to Slice 8. Do not implement iNaturalist, NWI, NC OneMap hydrography, or the MRLC backend proxy in this slice.
+The implementation is a good first pass, but current `main` still contains correctness gaps and several behaviors from the prior packet were not implemented.
 
 ---
 
-# 2. PRODUCT RULE FOR THIS SLICE
+# 2. P0 OUTING MODEL CORRECTIONS
 
-The field-readiness system should obey one rule:
+## 2.1 Readiness must be derived, never stored
 
-> **Before leaving, show what is unresolved. Once outside, show what is next.**
+Current code still uses:
 
-Do not turn this into generic project management software.
-
-No Gantt charts.
-No dependency graph editor.
-No mandatory scheduling.
-No route optimizer.
-No AI-generated outing plan.
-No forced completion gate before leaving.
-
----
-
-# 3. PHASE A · FIX REVIEW QUEUE ORDERING
-
-## A1. Backend smart order remains authoritative
-
-For `sort=smart`, the backend result order is the authoritative base order.
-
-The backend match score already incorporates normal Archie traits, recency, distance and photo signals.
-
-Do not apply the default Archie trait set again as a dominant client-side sort.
-
-## A2. Default priorities must not double-count
-
-Change `frontend/src/views/CandidatesView.vue::clientPrioritize()`.
-
-If:
-
-- sort != `smart`, return server order;
-- traitMode != `prioritize`, return server order;
-- selected prioritization traits equal the normal Archie default selections, return server order unchanged.
-
-## A3. Custom prioritization is a tie-breaker only
-
-If the user deliberately changes prioritization traits, custom trait boost may reorder only within a narrow score neighborhood.
-
-Recommended comparator:
-
-1. `Math.floor(match_score / 10)` descending;
-2. usable source photo before no-photo when otherwise similar;
-3. custom trait boost descending;
-4. exact `match_score` descending;
-5. meaningful event time descending.
-
-A 68/100 case must not fall below a 31/100 case merely because the 31 has a larger client trait boost.
-
-## A4. Pure sorts
-
-Keep these exact:
-
-- Strongest match signals: `match_score DESC`, then meaningful event time;
-- Newest: meaningful event time DESC;
-- Closest: `current_location.distance_from_home_miles ASC`;
-- Smart: backend order plus the limited custom-priority tie-breaking above.
-
-Displayed rank must match final visible order.
-
----
-
-# 4. PHASE B · FIX CANDIDATE CARD HIERARCHY
-
-Collapsed candidate cards should emphasize:
-
-1. holder / custody context;
-2. external Animal ID or useful identity;
-3. small provider context;
-4. found/sighted/posted time;
-5. current location + distance/bearing;
-6. strongest trait chips;
-7. match-signal score;
-8. review actions;
-9. Open case / More details.
-
-Do not render generic titles such as:
-
-- `Shelter intake cat`;
-- `Found cat`;
-- `Unknown`;
-- `Cat`;
-
-as a visually dominant H2 when holder/custody context is more useful.
-
-Move technical provenance such as:
-
-`Current location · source record #180`
-
-into expanded details.
-
-Keep review actions above `More details`.
-
----
-
-# 5. PHASE C · FIX CURRENT LOCATION / MAP ACTIONS
-
-## C1. One canonical case location
-
-Candidate-level location actions must use `post.current_location`.
-
-Use:
-
-- `current_location.map_latitude`;
-- `current_location.map_longitude`;
-- `current_location.location_text`;
-- `current_location.precision`;
-- `current_location.distance_from_home_miles`;
-- `current_location.distance_is_approximate`.
-
-Do not combine top-level coordinates from one source record with current-location text from another.
-
-## C2. Fix `locateCandidate()`
-
-Update `CandidatesView.locateCandidate()` so:
-
-- map coordinates;
-- bearing;
-- distance;
-- precision;
-- display name
-
-all come from the same `current_location` bundle.
-
-Never hardcode precision to `address`.
-
-If current location has useful text but no coordinates, use the existing `/api/places/resolve` path.
-
-## C3. Primary Map action stays in Archie Radar
-
-The candidate card's primary `Map` action should:
-
-1. expand the Candidates map if collapsed;
-2. focus/fly to the case's current location;
-3. highlight/open the candidate marker.
-
-Use a small state such as `focusedCaseId` and a prop/event to `SearchMap`.
-
-Keep external OSM navigation under expanded details as a secondary action.
-
-## C4. Human-readable location formatting
-
-Display formatting may convert:
-
-`Fairfax St And Waterford St`
-
-to:
-
-`Fairfax St & Waterford St`.
-
-Do not mutate persisted source text.
-
----
-
-# 6. PHASE D · FIX 24PETCONNECT LINKS AND STATUS
-
-## D1. Link kinds
-
-Normalize 24Pet link semantics:
-
-- `exact_detail`;
-- `search_results`;
-- `provider_home`;
-- `unavailable`.
-
-Use additive raw metadata:
-
-- `source_link_kind`;
-- `listing_url`;
-- `detail_url`.
-
-Existing `PetPost.source_url` may remain for compatibility, but output/UI must classify it.
-
-## D2. Extract actual animal-specific detail links
-
-In `backend/app/connectors/regional_24petconnect.py`, find the DOM container for each specific Animal ID and inspect only that container for likely detail navigation:
-
-- `href`;
-- `data-href`;
-- `data-url`;
-- `onclick`.
-
-Accept an exact detail URL only when:
-
-- host is `24petconnect.com`;
-- path is a recognized animal-detail path;
-- the Animal ID in the target matches the current record.
-
-Do not guess provider/shelter codes.
-
-Do not search the whole page in a way that can associate Animal A with Animal B's link.
-
-## D3. Saved search URL is not Original
-
-If only `/ViewAnimals/<request-id>` is known:
-
-- classify it as `search_results`;
-- do not label it `Original`.
-
-UI behavior:
-
-Exact detail:
-- `View on 24PetConnect ↗`.
-
-Search/provider fallback:
-- `Open 24PetConnect ↗`;
-- `Copy Animal ID`.
-
-## D4. Request inactive != animal inactive
-
-The text:
-
-`Your request is currently Inactive`
-
-describes the saved search request.
-
-It does not establish that each displayed animal is inactive.
-
-Do not use request-level inactive state as animal lifecycle evidence.
-
-Only mark the animal/listing inactive when an animal-specific source record or detail response supports it.
-
-## D5. Broken exact link
-
-If a previously discovered animal-specific detail link fails:
-
-- downgrade link availability;
-- keep the source record;
-- do not infer that the animal itself is inactive merely because the URL broke.
-
-## D6. Legacy rows
-
-Existing DB rows with `/ViewAnimals/` URLs must be classified at read/output time as `search_results`.
-
-No destructive reingest required.
-
-## D7. Centralize holder/custody fallback
-
-Reuse one 24Pet context normalizer for ingestion and legacy output fallback.
-
-Known namespace-specific defaults may be used:
-
-- `chatham_24petconnect` → `Chatham County · Animal Resources Center`;
-- `durham_24petconnect` → `Animal Protection Society of Durham`;
-- `wake_24petconnect` → `Wake County Animal Center`;
-- `orange_county_24petconnect` → `Orange County Animal Services`.
-
-Do not invent a holder for generic `regional_24petconnect`.
-
----
-
-# 7. PHASE E · SURVEYOR LAYER CONTROL HOTFIX
-
-This slice does not add new environmental providers, but it must make the existing layer system discoverable and deterministic.
-
-## E1. Persistent map-level Layers control
-
-Add a persistent Layers button inside `.surveyor-map-shell`.
-
-Suggested component:
-
-`frontend/src/components/surveyor/SurveyorMapControls.vue`
-
-Requirements:
-
-- desktop: top-right of map, clear of native MapLibre controls;
-- mobile portrait: always visible;
-- phone landscape: visible in the map pane;
-- tap target at least 44x44;
-- opens/closes `layerDrawerOpen`.
-
-The existing header Layers button may remain on desktop.
-
-Do not rely on `SearchSessionBar` as the only access point.
-
-## E2. Backdrop / click-away
-
-When LayerDrawer is open:
-
-- mobile: use a subtle backdrop and bottom-sheet behavior;
-- desktop: allow click-away close without preventing drawer scrolling.
-
-## E3. Apply layer visibility explicitly
-
-Create one `applyLayerVisibility()` function.
-
-Call it:
-
-- after custom sources/layers are created;
-- whenever layer settings change.
-
-Do not rely on assigning a shallow-copied settings object to trigger timing side-effects.
-
-## E4. Overlay chips
-
-Show compact chips for enabled contextual overlays, e.g.:
-
-- `LAND COVER · 2025 ×`;
-- future Slice 8 layers can reuse this control.
-
-Click × disables the layer.
-
-## E5. Keep future capabilities extensible
-
-LayerDrawer should be ready to receive provider capabilities in Slice 8, but do not add dead toggles for providers that do not exist yet.
-
----
-
-# 8. PHASE F · MAPLIBRE NUMERIC SANITIZATION
-
-Resolve the warning class:
-
-`Expected value to be of type number, but found null instead.`
-
-Before handing GeoJSON to style expressions, ensure:
-
-- coordinates are finite;
-- numeric style properties consumed by MapLibre are finite.
-
-Audit especially:
-
-- task_count;
-- urgent_count;
-- overdue_count;
-- camera heading/FOV/range;
-- opacity-like properties;
-- any numeric property read by `get` in a numeric expression.
-
-For truly optional numeric values:
-
-- omit property when unknown; or
-- use a null-safe MapLibre expression such as `coalesce`.
-
-Do not map semantic unknown to zero when zero has a real meaning.
-
-Development-only feature validation is acceptable. Do not spam production logs.
-
----
-
-# 9. PHASE G · OUTING / PREFLIGHT DATA MODEL
-
-Do not overload `SurveyorTask` or per-object checklist properties.
-
-Create a first-class outing model using additive tables only.
-
-Do not add a new required column to the existing `surveyor_search_sessions` table because `Base.metadata.create_all()` does not migrate existing SQLite columns.
-
-Create in `backend/app/models.py`:
-
-## G1. `SurveyorOutingPlan`
-
-Recommended fields:
-
-```text
-id
-title
-objective
-status
-method
-search_session_id nullable
-notes
-created_at
-updated_at
-completed_at nullable
+```python
+PlanStatus = Literal["draft", "ready", "active", "completed", "abandoned"]
 ```
 
-Status values:
+and `_refresh_readiness_status()` writes `ready` into `SurveyorOutingPlan.status`.
 
-- `draft`;
-- `active`;
-- `completed`;
-- `abandoned`.
+Remove persisted `ready` semantics.
 
-**Correction from the earlier design:** do NOT persist a `ready` status. Readiness is derived from item/dependency state and would become stale if items change.
-
-`search_session_id` may be a nullable FK because the outing table is new.
-
-Method values should align with existing Surveyor search-session methods.
-
-## G2. `SurveyorOutingItem`
-
-Recommended fields:
+Allowed plan lifecycle states:
 
 ```text
-id
-plan_id
-section
-title
-note
-position
-required
-status
-time_hint nullable
-
-map_object_id nullable
-task_id nullable
-candidate_case_id nullable
-
-created_at
-updated_at
-completed_at nullable
+draft
+active
+completed
+abandoned
 ```
 
-Sections:
+Readiness is always computed from items/dependencies.
 
-- `prep`;
-- `packing`;
-- `gameplan`.
+Existing databases may already contain `status = "ready"` from `98a23466`. Normalize those legacy rows safely to `draft` without rebuilding or deleting the database.
 
-Statuses:
+Do not add a schema migration framework solely for this. A small idempotent normalization during application startup or outing initialization is sufficient.
 
-- `pending`;
-- `completed`;
-- `skipped`.
+## 2.2 Correct readiness semantics
 
-UI vocabulary:
+Current `_readiness()` effectively treats every required item not completed as blocking and does not expose dependency-specific state.
 
-- Prep completed → `Ready`;
-- Packing completed → `Packed`;
-- Gameplan completed → `Done`.
-
-`required` defaults true.
-
-Do not add Low/Normal/High/Urgent priority to outing items.
-
-## G3. `SurveyorOutingDependency`
-
-Fields:
-
-```text
-id
-prep_item_id
-dependent_item_id
-created_at
-```
-
-Unique pair constraint.
-
-Validation:
-
-- both items belong to the same plan;
-- `prep_item.section == prep`;
-- dependent item section is `packing` or `gameplan`;
-- item cannot depend on itself.
-
-Do not allow dependency chains between non-prep items.
-
-This restriction intentionally prevents the system from becoming a generic dependency graph.
-
----
-
-# 10. PHASE H · OUTING API
-
-Create:
-
-`backend/app/surveyor/outings.py`
-
-Register its router in `main.py`.
-
-Recommended endpoints:
-
-```text
-GET    /api/surveyor/outings
-GET    /api/surveyor/outings/current
-POST   /api/surveyor/outings
-GET    /api/surveyor/outings/{plan_id}
-PATCH  /api/surveyor/outings/{plan_id}
-
-POST   /api/surveyor/outings/{plan_id}/items
-PATCH  /api/surveyor/outings/items/{item_id}
-DELETE /api/surveyor/outings/items/{item_id}
-
-POST   /api/surveyor/outings/items/{item_id}/dependencies/{prep_item_id}
-DELETE /api/surveyor/outings/items/{item_id}/dependencies/{prep_item_id}
-
-POST   /api/surveyor/outings/{plan_id}/reorder
-POST   /api/surveyor/outings/{plan_id}/reuse
-POST   /api/surveyor/outings/{plan_id}/start
-POST   /api/surveyor/outings/{plan_id}/abandon
-```
-
-Deletion of a whole plan is not needed for ordinary UX. Prefer abandon/archive semantics.
-
----
-
-# 11. PHASE I · READINESS IS DERIVED
-
-Every plan output should include computed readiness.
-
-Example:
+Return at least:
 
 ```json
 {
-  "readiness": {
-    "ready_to_leave": false,
-    "prep_remaining": 2,
-    "packing_remaining": 1,
-    "dependency_blockers": 2,
-    "gameplan_total": 4,
-    "gameplan_remaining": 4,
-    "blocking_prep_item_ids": [12, 14]
-  }
+  "ready_to_leave": false,
+  "prep_remaining": 1,
+  "packing_remaining": 1,
+  "dependency_blockers": 1,
+  "skipped_required": 0,
+  "waived_dependency_count": 0,
+  "gameplan_total": 4,
+  "gameplan_remaining": 4,
+  "packed_items": 2,
+  "blocking_prep_item_ids": [12]
 }
 ```
 
-Departure blockers are:
+Rules:
 
-- required Prep items still pending;
-- required Packing items still pending;
-- unique unfinished Prep dependencies required by required Packing/Gameplan items.
+- required Prep with `status == pending` blocks departure;
+- required Packing with `status == pending` blocks departure;
+- pending Gameplan items do **not** block departure;
+- optional items never block departure;
+- a skipped item is an explicit user waiver and does not remain a hard blocker;
+- if a required Prep item is skipped, expose it in `skipped_required`;
+- if a dependent Packing/Gameplan item relies on a skipped Prep item, expose that in `waived_dependency_count`;
+- do not call the plan unconditionally "fully prepared" when setup was explicitly skipped. UI may say:
+  - `Ready to go · 1 setup item skipped`
+  instead of silently hiding the waiver;
+- count a shared unfinished Prep dependency once, not once per dependent item.
 
-Do NOT treat an unfinished Gameplan item by itself as a departure blocker. Gameplan items are work intended to happen after leaving.
+Keep backward-compatible aliases only if needed temporarily by the frontend, but migrate UI to the explicit field names above.
 
-Optional items do not block departure.
+## 2.3 Do not conflate "skipped" with "completed"
 
-Avoid double-counting the same unfinished Prep item when three Gameplan items depend on it.
+A skipped item must stay visibly skipped.
 
-Human-facing summary should say things like:
+Do not render it with the same green/checkmark semantics as completed.
 
-- `2 setup blockers · 1 item not packed`;
-- `Ready to go`.
+Recommended display:
 
-Do not show a readiness percentage.
+- completed: checkmark;
+- skipped: muted `Skipped` state;
+- pending: normal unchecked state.
 
----
+For Prep dependency display:
 
-# 12. PHASE J · PREFLIGHT UX
-
-Create:
-
-```text
-frontend/src/components/surveyor/PreflightSheet.vue
-frontend/src/components/surveyor/OutingSection.vue
-frontend/src/components/surveyor/OutingItemRow.vue
-frontend/src/components/surveyor/OutingDependencyPicker.vue
-frontend/src/components/surveyor/ActiveMissionStrip.vue
-frontend/src/surveyor/outings.js
-```
-
-One vertically scrolling sheet, in this order:
-
-1. Prep / Setup
-2. Packing List
-3. Gameplan
-
-Do not make these separate pages or tabs.
-
-## J1. Header
-
-Show:
-
-- plan title;
-- one-line objective;
-- readiness summary.
-
-Example:
-
-`2 setup blockers · 1 item not packed`
-
-or:
-
-`Ready to go`.
-
-Objective example:
-
-`Check creek cameras, cover abandoned-house edge, dusk pass at Coyote Island.`
-
-Objective is optional but strongly surfaced because it answers "what is tonight about?"
-
-## J2. Prep / Setup
-
-Simple rows:
-
-`○ Charge camera batteries`
-
-`✓ Clear SD cards`
-
-No priority selectors.
-
-## J3. Packing
-
-Rows may display dependency state:
-
-```text
-○ Camera bag
-  ⚠ Needs setup: Charge camera batteries
-```
-
-If several dependencies:
-
-`⚠ 2 setup items unfinished`
-
-## J4. Gameplan
-
-Ordered items:
-
-```text
-1. Raccoon Creek camera
-   Pull card + swap battery
-   ✓ Setup ready
-
-2. Blue Lagoon camera
-   Re-aim toward creek crossing
-   ⚠ Needs setup: Clear SD card
-```
-
-If linked to a map object/candidate/task, show a compact source/link label, not database IDs.
-
-## J5. Dependencies
-
-On Packing and Gameplan rows provide:
-
-`+ Needs setup`
-
-Picker shows existing Prep items first.
-
-Also provide:
-
-`+ Add new setup item`
-
-Creating a new Prep item from this picker must both:
-
-1. create the Prep item;
-2. attach the dependency;
-
-in one action.
-
-Shared Prep should be reused rather than duplicated.
-
-If multiple items depend on one Prep item, the Prep row may show:
-
-`Used by 3 items`.
-
-Do not build a node graph.
+- completed dependency: `Setup ready`;
+- pending dependency: `Needs setup`;
+- skipped dependency: `Setup skipped`.
 
 ---
 
-# 13. PHASE K · AUTO-SAVE
+# 3. P0 TRANSACTIONAL START FLOW
 
-Preflight must not have a general `Save checklist` button.
+Current frontend starts a `SurveyorSearchSession` first, then PATCHes the outing plan to active.
 
-Actions persist immediately:
+That can create an orphan active session if the second request fails.
 
-- check/uncheck;
-- add item;
-- edit title/note;
-- reorder;
-- add/remove dependency;
-- required/optional;
-- skip;
-- objective edit.
+Move linked start behavior to the backend.
 
-Use optimistic UI.
-
-Text editing may debounce briefly, e.g. 300–500 ms.
-
-If persistence fails:
-
-- restore last confirmed value;
-- show a compact actionable error;
-- do not silently lose edits.
-
-This system exists to reduce "did I remember to save the thing that helps me remember?" friction.
-
----
-
-# 14. PHASE L · COMPLETED-NOISE REDUCTION
-
-Completed Prep/Packing sections should collapse automatically when all required items are complete.
-
-Example:
-
-`✓ Prep / Setup · 5 ready`
-
-Tap to reopen.
-
-Provide one small view control:
-
-- `All`;
-- `Remaining`.
-
-When departure blockers become small, defaulting the sheet view to Remaining is acceptable, but do not make completed items impossible to inspect.
-
-No percent-complete dashboard.
-
----
-
-# 15. PHASE M · START SEARCH INTEGRATION
-
-Current `SearchSessionBar` calls `startSearch()` directly.
-
-Change behavior:
-
-`Start search` → opens Preflight.
-
-If no draft/current outing exists:
+Add:
 
 ```text
-Tonight's plan
-
-[ Build plan ]
-[ Reuse last outing ]
-[ Start without plan ]
+POST /api/surveyor/outings/{plan_id}/start
 ```
 
-If a draft exists, open it directly.
+Payload:
 
-If ready:
-
-`[ Start search ]`
-
-If blockers remain:
-
-```text
-2 setup blockers
-1 item not packed
-
-[ Review blockers ]
-[ Start anyway ]
+```json
+{
+  "method": "walking",
+  "start_with_blockers": false
+}
 ```
 
-Do not hard-disable departure.
+In one database transaction:
 
-## M1. Starting with a plan
+1. load plan;
+2. reject abandoned/completed/active plan;
+3. compute readiness;
+4. if pending blockers exist and `start_with_blockers == false`, return 409 with readiness details;
+5. create `SurveyorSearchSession`;
+6. set plan `status = active`;
+7. set `search_session_id`;
+8. record SurveyorEvent;
+9. commit once;
+10. return:
+   - updated plan;
+   - created session.
 
-`POST /api/surveyor/outings/{plan_id}/start` should transactionally:
+If blockers were explicitly overridden, record a distinct `outing_started_with_blockers` event.
 
-1. validate plan is startable;
-2. create a `SurveyorSearchSession`;
-3. link its ID to the outing plan;
-4. set outing status = `active`;
-5. record Surveyor events;
-6. return plan + session.
+`Start without plan` may continue to use the existing direct session endpoint.
 
-Allow an explicit `start_with_blockers=true` flag.
-
-If starting with blockers, record an event such as:
-
-`outing_started_with_blockers`.
-
-## M2. Start without plan
-
-Keep the existing direct session endpoint/path available.
-
-The planning system is an aid, not a gate.
+Frontend must use the outing start endpoint whenever a plan exists.
 
 ---
 
-# 16. PHASE N · REUSE LAST OUTING
+# 4. P0 OUTING COMPLETION / HISTORY
 
-Implement one-tap:
+Current `finishSearch()` changes a linked outing back to `draft` or `ready` when Gameplan work remains.
 
-`Reuse last outing`
+That is incorrect historical behavior.
 
-Clone:
+An outing describes what was planned for one actual field outing. When its linked search session ends:
 
-- title/objective as a starting point;
-- item text/notes/order;
+- the outing becomes `completed`;
+- its completed/skipped/pending item state remains exactly as it was;
+- unfinished Gameplan items remain visible as unfinished historical work;
+- `completed_at` is set;
+- it must no longer be returned as the current draft outing.
+
+Add a backend operation such as:
+
+```text
+POST /api/surveyor/outings/{plan_id}/complete
+```
+
+or make the existing session-finish path complete the linked outing transactionally.
+
+Prefer backend ownership of lifecycle changes over frontend PATCH choreography.
+
+Do not mutate unfinished items merely because the outing ended.
+
+---
+
+# 5. CONTINUE UNFINISHED
+
+The prior packet required this and it did not land.
+
+Add:
+
+```text
+POST /api/surveyor/outings/{plan_id}/continue-unfinished
+```
+
+Create a fresh `draft` plan containing:
+
+- only unfinished Gameplan items from the completed outing;
+- required Prep items that those copied Gameplan items depend on;
+- dependencies remapped to the new item IDs;
+- preserved map/task/candidate references when still valid;
+- pending state for all copied items.
+
+Do not copy completed Packing rows by default.
+
+If unfinished work has no Prep dependency, do not drag unrelated Prep items into the new outing.
+
+Frontend entry:
+
+```text
+2 unfinished from last outing · Continue
+```
+
+One tap creates/opens the new draft.
+
+---
+
+# 6. REUSE LAST OUTING CORRECTIONS
+
+Current `reuse-last` searches the newest non-abandoned plan, which can accidentally clone the current draft/active outing.
+
+Change "last outing" semantics to the most recent **completed** outing.
+
+If no completed outing exists, return a clear 404/empty state.
+
+Reuse copies:
+
+- title/objective;
+- method;
+- all item structure;
+- order;
 - dependencies;
-- linked map-object/task/candidate references when still valid;
+- source references;
 - required/optional flags;
 - time hints.
 
 Reset:
 
-- all item statuses to pending;
-- completed_at;
-- session link;
-- plan status to draft.
+- plan status to draft;
+- search session link;
+- item statuses to pending;
+- completed timestamps.
 
-Never copy yesterday's `ready`, `packed` or `done` state into today.
-
-If a linked source entity no longer exists, keep the text but mark the reference unavailable rather than failing the clone.
+If an old source reference no longer exists, keep the copied text and omit/clear only the broken reference. Do not fail the whole reuse operation.
 
 ---
 
-# 17. PHASE O · ADD TO OUTING FROM EXISTING WORK
+# 7. CURRENT OUTING SELECTION
 
-Add a low-friction `Add to outing` action where Archie Radar already knows something may need field work.
+Current lookup should be deterministic.
 
-Priority integrations:
+Priority:
 
-1. Surveyor map object inspector;
-2. open SurveyorTask/follow-up;
-3. Candidate Case Workspace;
-4. trail camera inspector/context.
+1. active plan linked to an unfinished active SearchSession;
+2. newest draft plan;
+3. none.
 
-Default target:
+Do not let a newer draft hide an actually active outing.
 
-- current draft outing, if one exists;
-- otherwise create a draft outing and add the item.
+There should be no persisted `ready` state after normalization.
 
-Examples:
+When the frontend has an active session, the mission strip must use the outing linked to **that session**, not simply whichever plan happened to be returned by `/current`.
 
-Trail camera:
-`Check Raccoon Creek camera`
-
-Needs-search zone:
-`Search abandoned-house edge`
-
-Candidate:
-`Check candidate location`
-
-Follow-up task:
-use task title.
-
-Automatically preserve the source reference.
-
-Do not force the user to retype a location or title that already exists.
-
----
-
-# 18. PHASE P · TASK / OUTING SOURCE-OF-TRUTH RULE
-
-Do not create two independent follow-up states for the same action.
-
-If a Gameplan item was created from an open `SurveyorTask`:
-
-- show `From follow-up`;
-- completing the Gameplan item should complete the linked task in the same backend operation/transaction;
-- UI should make this behavior visible, e.g. `Done · completes follow-up`.
-
-Do not auto-complete tasks when a Prep or Packing item is completed.
-
-If a task is later reopened, do not rewrite historical outing completion. The task may be added to a future outing again.
-
----
-
-# 19. PHASE Q · ACTIVE FIELD MISSION STRIP
-
-Once the session starts, Prep and Packing should recede.
-
-Show a compact active mission strip over Surveyor:
+If useful, add:
 
 ```text
-NEXT
-2 / 5 · Check Raccoon Creek camera
-Pull SD · swap battery
-
-[ Map ]   [ Done ]   [ Skip ]   [ Plan ]
+GET /api/surveyor/outings/by-session/{session_id}
 ```
 
-Rules:
-
-- next = first pending Gameplan item by position;
-- Done completes it and advances;
-- Skip marks it skipped and advances;
-- Plan opens full outing;
-- Map focuses the linked map object/candidate when a usable location exists;
-- if no location exists, hide Map rather than disabling a mystery button.
-
-When no pending Gameplan remains:
-
-`Gameplan complete`
-
-Do not auto-end the search session.
-
-Do not auto-optimize/reorder the route.
+or make `/current` active-session aware.
 
 ---
 
-# 20. PHASE R · OPTIONAL TIME HINTS
+# 8. TASK-LINKED GAMEPLAN COMPLETION
 
-Gameplan items may have a lightweight optional `time_hint`.
+Current outing items can store `surveyor_task_id`, but completing the Gameplan item does not complete the linked task.
 
-Examples:
+Implement this in the backend transaction for item completion.
 
-- `Dusk`;
-- `10:30 PM`;
-- `Late`;
-- `Anytime`.
+When:
 
-This is display context, not scheduling infrastructure.
+- item.section == `gameplan`;
+- item has `surveyor_task_id`;
+- item changes from pending/skipped -> completed;
 
-Do not require exact times.
+then:
 
-Do not create reminders/automations from these fields in this slice.
+- mark the linked open task completed;
+- set task `completed_at`;
+- record the normal task completion event;
+- record outing item completion.
 
----
+Do not auto-complete linked tasks from Prep or Packing items.
 
-# 21. PHASE S · ENDING A SEARCH
+If the Gameplan item is later changed back to pending, do **not** silently reopen the historical task. Reopening a task remains an explicit task action.
 
-Ending a search session must not erase unfinished Gameplan items.
+Frontend label when linked:
 
-When the linked session ends:
+`Done · completes follow-up`
 
-- outing status becomes `completed`;
-- completed/skipped/pending item states remain historical facts;
-- show how many Gameplan items remain unfinished.
-
-Do not force another questionnaire solely to preserve them.
-
-For the next outing, surface:
-
-`2 unfinished from last outing · Continue`
-
-One tap should create a new draft containing the unfinished Gameplan items and any Prep dependencies still relevant.
-
-This is separate from `Reuse last outing`, which copies the whole structure.
-
-Suggested endpoint:
-
-`POST /api/surveyor/outings/{plan_id}/continue-unfinished`
-
-The new outing resets copied item state to pending.
+Do not expose `follow-up #123` as the primary human label.
 
 ---
 
-# 22. PHASE T · PACKING KITS ARE DEFERRED
+# 9. ATOMIC ADD-AND-LINK PREP
 
-Named kits such as:
+Current `Add & link` performs:
 
-- Camera kit;
-- Night kit;
+1. create Prep item;
+2. second request to set dependency.
 
-are a useful future chunking mechanism, but do not block this slice.
+If request 2 fails, the user gets an orphan Prep row that was not linked.
 
-Do NOT build a full inventory subsystem now.
+Add one atomic backend operation, for example:
 
-Record as a Slice 9 polish candidate if field use shows repeated packing-list duplication.
+```text
+POST /api/surveyor/outings/items/{dependent_item_id}/create-prep-dependency
+```
 
----
+Payload:
 
-# 23. PHASE U · DRAFT / FAILURE BEHAVIOR
+```json
+{
+  "title": "Charge camera batteries"
+}
+```
 
-Outing plans are server-persisted drafts, so do not duplicate the full plan into the existing local Surveyor draft-recovery system.
+Transaction:
 
-Frontend should tolerate:
+1. validate dependent item belongs to Packing/Gameplan;
+2. create Prep row in same plan;
+3. create dependency;
+4. commit once;
+5. return updated plan.
 
-- refresh;
-- navigating away and back;
-- mobile browser suspension.
-
-On load:
-
-- fetch current draft outing;
-- fetch active outing linked to active search session if one exists.
-
-If backend is temporarily unavailable during a checkbox action:
-
-- retain the user-visible attempted state only while retry/error handling is clear;
-- do not falsely indicate persistence.
+Use this from `Add & link`.
 
 ---
 
-# 24. PHASE V · EVENT HISTORY
+# 10. ATOMIC REORDER
 
-Record meaningful outing events in `SurveyorEvent`.
+Current reorder swaps positions through two independent PATCH calls.
+
+That can leave duplicate/partial positions if one request succeeds and the second fails.
+
+Add a backend reorder endpoint:
+
+```text
+POST /api/surveyor/outings/{plan_id}/reorder
+```
+
+Payload may be:
+
+```json
+{
+  "section": "gameplan",
+  "ordered_item_ids": [21, 18, 24]
+}
+```
+
+Validate:
+
+- all IDs belong to this plan;
+- all IDs belong to the supplied section;
+- no duplicates;
+- list contains exactly the items being reordered.
+
+Set contiguous positions `0..n-1` in one transaction.
+
+Frontend move-up/move-down should call this endpoint once.
+
+---
+
+# 11. CONSISTENT MUTATION RESPONSES
+
+Current outing mutations return inconsistent shapes:
+
+- create item returns full plan;
+- dependency update returns full plan;
+- patch item returns one item and then the frontend refetches `/current`.
+
+Standardize outing mutations to return the updated full plan.
 
 At minimum:
 
-- outing_created;
-- outing_item_added;
-- outing_item_completed;
-- outing_item_skipped;
-- outing_dependency_added;
-- outing_started;
-- outing_started_with_blockers;
-- outing_completed;
-- outing_abandoned;
-- outing_reused;
-- outing_continued.
+- create item;
+- patch item;
+- set dependencies;
+- atomic add/link;
+- reorder;
+- complete/skip item.
 
-Do not create a noisy event for every character typed into a note/title.
+This allows the frontend to update readiness and dependency state from one response without a second `GET /current`.
+
+Remove the current "PATCH item then fetch /current" pattern.
+
+Benefits:
+
+- fewer requests;
+- no race against a different current plan;
+- simpler optimistic rollback;
+- correct readiness immediately.
 
 ---
 
-# 25. PHASE W · RESPONSIVE UX
+# 12. OUTING EVENT HISTORY
 
-## Desktop
+Current outing implementation does not record the event history specified previously.
 
-Preflight may be a centered field sheet or right-side panel, but all three sections remain on one scroll surface.
+Use existing `SurveyorEvent`.
 
-## Portrait mobile
+Record meaningful state changes:
 
-This is the primary design target.
+- `outing_created`;
+- `outing_item_added`;
+- `outing_item_completed`;
+- `outing_item_skipped`;
+- `outing_dependency_added`;
+- `outing_started`;
+- `outing_started_with_blockers`;
+- `outing_completed`;
+- `outing_abandoned`;
+- `outing_reused`;
+- `outing_continued`.
+
+Do not create an event for each character while editing title/notes.
+
+---
+
+# 13. HUMAN SOURCE LABELS
+
+Current preflight shows technical text such as:
+
+`Linked field item · object #42`
+
+or:
+
+`follow-up #17`.
+
+Replace these with useful human context.
+
+Outing item output should include a small resolved source object, for example:
+
+```json
+{
+  "linked_context": {
+    "kind": "trail_camera",
+    "label": "Raccoon Creek camera",
+    "focusable": true
+  }
+}
+```
+
+Examples:
+
+- `Trail camera · Raccoon Creek`;
+- `Needs-search zone · Abandoned-house edge`;
+- `Follow-up · Check creek camera`;
+- `Candidate · Animal ID A016828`.
+
+Do not expose internal IDs unless in advanced/debug details.
+
+---
+
+# 14. MISSION STRIP FOCUS CORRECTIONS
+
+Current mission strip always renders `Map` for a pending Gameplan item.
+
+Only render Map when there is a usable focus target.
+
+Focusable:
+
+- linked map object with valid geometry/centroid;
+- linked CandidateCase with usable current map location.
+
+Not focusable:
+
+- task with no spatial reference;
+- plain text item.
+
+If source reference exists but cannot currently be resolved, show a small `Location unavailable` note in the full plan, not a dead Map button.
+
+Candidate focus must use the case's coherent current location fields.
+
+Validate coordinates with `Number.isFinite` before `flyTo`.
+
+---
+
+# 15. ADD TO OUTING FROM CANDIDATE CASE WORKSPACE
+
+The candidate map inspector has Add to outing, but `CandidateCaseView.vue` still lacks it.
+
+Add a clear action near:
+
+`Open location in Surveyor`
+
+such as:
+
+`＋ Add to outing`
+
+Behavior:
+
+- use current draft outing if present;
+- otherwise create a draft;
+- create a Gameplan item;
+- link `candidate_case_id`;
+- default title should prefer useful external identity:
+  - `Check candidate A016828`
+  - fallback `Check candidate case`;
+- note/location context may be included, but do not duplicate large source descriptions.
+
+This action should not require navigating to Surveyor first.
+
+---
+
+# 16. PREFLIGHT UI HARDENING
+
+Keep the current single-screen structure.
+
+Do not redesign into separate pages.
+
+Required refinements:
+
+## 16.1 Summary
+
+Use derived fields.
+
+Examples:
+
+`2 setup blockers · 1 item not packed`
+
+`Ready to go`
+
+`Ready to go · 1 setup item skipped`
+
+Do not display a percentage.
+
+## 16.2 Dependencies
+
+For each dependent item distinguish:
+
+- `Needs setup: Charge battery`;
+- `Setup ready`;
+- `Setup skipped: Charge battery`.
+
+## 16.3 Completed section collapsing
+
+Current behavior is acceptable. Preserve it.
+
+## 16.4 Remaining mode
+
+Preserve All / Remaining.
+
+Skipped items should remain visible in Remaining unless the user explicitly wants "pending only", because skipped items are useful context.
+
+## 16.5 Start choices
+
+When pending blockers exist:
+
+- `Review blockers`;
+- `Start search anyway`.
+
+When no pending blockers:
+
+- `Start search`.
+
+If setup has been skipped but no pending blockers remain:
+
+- allow normal Start search;
+- keep the skipped-warning visible.
+
+`Start without plan` stays available only in the no-plan state.
+
+---
+
+# 17. SEARCH SESSION END UX
+
+After saving the search:
+
+- linked outing becomes completed;
+- mission strip disappears because session is no longer active;
+- unfinished count is preserved.
+
+Next time Preflight opens with no draft:
+
+show, when applicable:
+
+`2 unfinished from last outing · Continue`
+
+Then:
+
+- `Continue unfinished`;
+- `Reuse last outing`;
+- `Build plan`;
+- `Start without plan`.
+
+Do not automatically create a new draft without user action.
+
+---
+
+# 18. P0 CANDIDATE REVIEW ORDER STILL UNFIXED
+
+Current `CandidatesView.clientPrioritize()` still sorts by client trait boost before match score.
+
+Fix now.
+
+Rules:
+
+- backend `sort=smart` is authoritative;
+- if applied prioritization traits equal Archie defaults, do not client-resort;
+- custom prioritization only tie-breaks inside a narrow score band.
+
+Recommended order for custom prioritize:
+
+1. `Math.floor(match_score / 10)` descending;
+2. usable real photo before no-photo;
+3. custom trait boost descending;
+4. exact match score descending;
+5. meaningful event time descending.
+
+A 68 score must not fall below a 31 because of client boost.
+
+Pure sort modes remain pure.
+
+Add focused unit/helper coverage if practical. If frontend has no unit harness, extract comparator into a small pure module and test via a minimal JS check or cover backend ordering separately plus manual acceptance.
+
+---
+
+# 19. P0 CURRENT LOCATION STILL UNFIXED
+
+Current `locateCandidate()` still uses:
+
+- `post.latitude`;
+- `post.longitude`;
+- hardcoded `precision: "address"`.
+
+Fix it.
+
+All candidate location actions use `post.current_location`:
+
+- map_latitude;
+- map_longitude;
+- location_text;
+- precision;
+- distance_from_home_miles;
+- distance_is_approximate.
+
+Bearing must be computed from those same coordinates.
+
+If there is useful current-location text but no coordinates, use existing place-resolution behavior.
+
+Do not mix one record's coordinates with another record's text.
+
+---
+
+# 20. CANDIDATE CARD CLEANUP STILL UNFIXED
+
+Current collapsed card still shows:
+
+`Current location · source record #...`
+
+Move that to expanded details.
+
+Current card still renders any source URL as:
+
+`Original ↗`
+
+This must be replaced by source-link-aware labels described in Section 21.
+
+The large generic title should be suppressed/de-emphasized when it is only:
+
+- Found cat;
+- Shelter intake cat;
+- Cat;
+- Unknown.
+
+Keep review actions before More details.
+
+---
+
+# 21. 24PETCONNECT LINK CORRECTNESS STILL UNFIXED
+
+Current connector still:
+
+- initializes `detail_url = source_url`;
+- searches globally for links containing the Animal ID;
+- uses the saved ViewAnimals URL when no exact detail URL exists;
+- UI calls that URL Original.
+
+Implement the previously specified link semantics:
+
+```text
+exact_detail
+search_results
+provider_home
+unavailable
+```
+
+Persist/add raw metadata:
+
+- `source_link_kind`;
+- `listing_url`;
+- `detail_url`.
+
+Animal detail extraction:
+
+- find the DOM region/card belonging to the current Animal ID;
+- inspect only that region;
+- accept official 24PetConnect detail URLs whose Animal ID matches;
+- support actual observed detail patterns such as `/DetailsMain/<provider>/<animal-id>`;
+- do not guess provider codes;
+- do not pair one animal with another animal's link.
+
+Legacy `/ViewAnimals/` rows classify as `search_results` at output time without requiring destructive reingest.
+
+UI:
+
+Exact:
+`View on 24PetConnect ↗`
+
+Fallback:
+`Open 24PetConnect ↗`
+plus
+`Copy Animal ID`
+
+Never label a saved search `Original`.
+
+---
+
+# 22. 24PET REQUEST-LEVEL INACTIVE IS NOT ANIMAL INACTIVE
+
+The saved search page may say:
+
+`Your request is currently Inactive`.
+
+That is the state of the saved search request.
+
+Do not use it as lifecycle evidence for every listed animal.
+
+Only set an animal inactive when an animal-specific record/detail supports:
+
+- reunited;
+- adopted;
+- listing closed;
+- no longer active/available;
+- equivalent animal-specific state.
+
+A broken detail URL alone is not proof of inactivity.
+
+A valid result row whose detail check fails should remain unknown/active-as-seen according to source-row semantics, not be removed solely because detail validation failed.
+
+Add fixtures/tests for this exact distinction.
+
+---
+
+# 23. SURVEYOR LAYERS CONTROL STILL UNFIXED
+
+`SearchSessionBar.vue` still has a plain Layers button inside `.surveyor-actions`.
+
+Mobile CSS hides it.
+
+Add a persistent map-level control inside `.surveyor-map-shell`.
 
 Requirements:
 
-- full-width bottom sheet;
-- sticky readiness header;
-- 44px minimum row/action targets;
-- completed sections collapse;
-- dependency picker opens as a small nested sheet;
-- no horizontal scroll;
-- active mission strip remains compact above the footer controls.
+- desktop visible;
+- portrait visible;
+- phone landscape visible;
+- 44x44 minimum tap area;
+- opens/closes LayerDrawer;
+- does not require an active session;
+- does not live under More.
 
-## Phone landscape
+Existing desktop header Layers button can remain.
 
-Use a side sheet where practical so the map remains usable.
+Add click-away/backdrop behavior for LayerDrawer.
 
-Do not let preflight obscure the entire map unless the user explicitly opens the full plan.
+Do not add new external providers in this packet.
 
 ---
 
-# 26. PHASE X · FILE ORGANIZATION
+# 24. EXPLICIT LAYER VISIBILITY APPLICATION
 
-Backend:
+Replace the current reactive timing trick with:
 
-```text
-backend/app/surveyor/outings.py
-backend/app/models.py
-backend/app/schemas.py
-backend/tests/test_surveyor_outings.py
+```js
+function applyLayerVisibility() {
+  ...
+}
 ```
 
-Frontend:
+Call:
 
-```text
-frontend/src/components/surveyor/PreflightSheet.vue
-frontend/src/components/surveyor/OutingSection.vue
-frontend/src/components/surveyor/OutingItemRow.vue
-frontend/src/components/surveyor/OutingDependencyPicker.vue
-frontend/src/components/surveyor/ActiveMissionStrip.vue
-frontend/src/surveyor/outings.js
-```
+- after custom layers are created;
+- when layer settings change.
 
-Keep outing-specific logic out of the already-large `SurveyorView.vue` as much as practical.
+This packet should leave the LayerDrawer ready for Slice 8 external-provider capability flags, but do not add dead controls now.
 
 ---
 
-# 27. BACKEND TESTS
+# 25. MAPLIBRE NULL-NUMBER WARNING
 
-Add focused tests.
+Audit all Surveyor GeoJSON passed to MapLibre.
 
-## Queue / 24Pet
+Sanitize numeric style inputs, especially:
 
-1. 68 match score remains above 31 despite larger trait boost on 31.
-2. default Archie selections do not double-resort smart order.
-3. current-location text/distance/bearing/map use the same record.
-4. location precision is not hardcoded.
-5. `/ViewAnimals/` classifies as search_results.
-6. exact 24Pet detail link must correspond to the same Animal ID.
-7. request-level `Inactive` does not mark displayed animal inactive.
-8. legacy Chatham source can derive Chatham holder context.
+- task_count;
+- urgent_count;
+- overdue_count;
+- camera heading/FOV/range;
+- coordinates and centroids.
 
-## Outings
+Use finite numbers or null-safe expressions such as `coalesce`.
 
-9. create plan.
-10. create Prep/Packing/Gameplan items.
-11. reject dependency whose source is not Prep.
-12. reject cross-plan dependency.
-13. shared Prep blocker is counted once.
-14. optional unfinished item does not block departure.
-15. unfinished Gameplan itself does not block departure.
-16. unfinished Prep dependency for a required Gameplan item blocks departure.
-17. completing Prep clears the dependency blocker.
-18. reuse clones structure but resets all state.
-19. continue-unfinished copies only unfinished Gameplan work plus required dependency context.
-20. starting outing creates and links a SearchSession.
-21. start-with-blockers requires explicit override.
-22. completing Gameplan item linked from SurveyorTask completes that task.
-23. completing Packing item does not complete linked task.
-24. abandoning an outing preserves history.
-25. new tables are created additively without destructive schema reset.
+Do not turn semantically unknown values into zero unless zero is a valid intended fallback for that property.
 
-Keep tests local and deterministic.
+No production log spam.
+
+Acceptance: no `Expected value to be of type number, but found null instead` warning during normal Surveyor load/use.
 
 ---
 
-# 28. FRONTEND / MANUAL ACCEPTANCE
+# 26. BACKEND TESTS
 
-No new frontend test framework is required solely for this slice if the repo does not already use one.
+Expand `backend/tests/test_surveyor_outings.py`.
 
-Run the frontend build and do focused manual acceptance.
+Add at least:
 
-## Review queue
+1. legacy `ready` status normalizes to draft.
+2. readiness is not persisted as lifecycle status.
+3. required pending Prep blocks.
+4. required pending Packing blocks.
+5. pending Gameplan does not block departure.
+6. optional pending item does not block.
+7. skipped required item is reported but does not remain a hard pending blocker.
+8. skipped Prep dependency is reported as waived dependency.
+9. shared Prep dependency counted once.
+10. atomic start creates exactly one session and links plan.
+11. start with blockers returns 409 without creating a session.
+12. explicit blocker override starts and records state.
+13. completing a linked outing marks it completed even with unfinished Gameplan.
+14. completed outing no longer appears as current.
+15. continue-unfinished copies only pending Gameplan + required Prep dependencies.
+16. reuse-last selects completed outing, not current draft/active.
+17. Gameplan completion completes linked open SurveyorTask.
+18. Packing completion does not complete task.
+19. atomic add-and-link leaves no orphan Prep item on validation failure.
+20. reorder produces contiguous unique positions.
+21. mutation responses return updated readiness/full plan.
+22. candidate reference may be absent after reuse without failing entire clone.
 
-Verify:
+Also add/extend 24Pet tests:
 
-- smart ranking no longer behaves strangely under defaults;
-- candidate location display and Map action agree;
-- internal source record ID is details-only;
-- 24Pet fallback URL is not called Original.
+23. ViewAnimals classified search_results.
+24. exact detail target must match Animal ID.
+25. request-level inactive text does not mark animal inactive.
+26. broken detail URL does not alone mark animal inactive.
+27. known Chatham source context resolves correctly for legacy output.
+
+Keep tests focused. Do not run the entire suite repeatedly during implementation.
+
+---
+
+# 27. FRONTEND MANUAL ACCEPTANCE
 
 ## Preflight
 
 Create:
 
-```text
-PREP
-○ Charge camera batteries
-○ Clear SD cards
+Prep:
+- Charge camera batteries
+- Clear SD card
 
-PACKING
-○ Camera bag
-○ Flashlight
+Packing:
+- Camera bag
+- Flashlight
 
-GAMEPLAN
-1. Check Raccoon Creek camera
-2. Check Blue Lagoon camera
-3. Dusk pass
-```
+Gameplan:
+- Raccoon Creek camera
+- Blue Lagoon camera
+- Dusk pass
 
-Link:
+Dependencies:
 
-- Camera bag → Charge camera batteries;
-- Raccoon Creek camera → Charge camera batteries;
-- Blue Lagoon camera → Clear SD cards.
+- Camera bag -> Charge batteries
+- Raccoon Creek -> Charge batteries
+- Blue Lagoon -> Clear SD card
 
-Expected:
+Verify:
 
-- readiness shows unresolved blockers;
-- dependencies are visible where they matter;
-- shared Charge-camera-batteries Prep appears only once;
-- checking Charge camera batteries updates all dependent rows immediately;
-- Packing/Gameplan rows remain manually actionable even when dependency unfinished;
-- no general Save button.
+- shared Charge batteries blocker counted once;
+- dependency labels update immediately;
+- Add & link is atomic;
+- reorder cannot produce duplicate order;
+- skipped setup remains visible as skipped/waived;
+- no general Save button;
+- no technical object/task IDs dominate UI.
 
-## Departure
+## Start
 
 With blockers:
+- normal Start does not accidentally create an orphan session;
+- Start search anyway works with explicit override.
 
-- Start search shows blockers;
-- Start anyway remains available.
+Without blockers:
+- one Start action creates linked outing+session.
 
-With everything required ready:
+Start without plan still works.
 
-- UI says `Ready to go`;
-- Start search starts/links a session.
+## Active field mode
 
-## Active field use
-
-- mission strip shows first pending Gameplan item;
+- mission strip belongs to the outing linked to current active session;
+- Map only appears for focusable items;
 - Done advances;
-- Skip advances;
-- Map focuses linked object;
-- Plan opens full outing;
-- screen remains usable in portrait and landscape.
+- linked task completes when corresponding Gameplan item completes;
+- Skip advances and remains visibly skipped in plan.
 
-## Session end
+## Finish
 
-End with two Gameplan items unfinished.
+End search with 2 unfinished Gameplan items.
 
-Expected:
+Verify:
 
-- session can finish normally;
-- plan preserves unfinished history;
-- next planning entry offers `2 unfinished from last outing · Continue`;
-- Continue creates a fresh draft rather than silently reusing old completion state.
+- old outing status is completed;
+- old plan remains historical;
+- no old "ready" outing hijacks current preflight;
+- next preflight offers Continue unfinished;
+- Continue creates a fresh draft with only those stops + needed Prep dependencies.
 
----
+## Candidate queue
 
-# 29. PERFORMANCE / FRICTION TARGETS
+Verify:
 
-This slice is more about cognitive latency than benchmark latency.
+- a 68-signal candidate does not fall below a 31-signal candidate due to default client trait boost;
+- location text/map/distance/bearing agree;
+- collapsed card does not show internal source-record ID;
+- saved 24Pet search links are not called Original.
 
-Targets:
+## Surveyor layers
 
-- opening Preflight from Surveyor should feel immediate on LAN;
-- checkbox completion should update optimistically with no full-page reload;
-- adding a dependency should not require leaving the current item;
-- Start Search should require at most one extra tap when already ready;
-- if no plan is desired, Start without plan remains a direct escape hatch;
-- active field mode exposes the next action without opening a full sheet.
+Verify Layers control on:
 
-Do not add a heavy client state-management dependency for this.
+- desktop;
+- portrait phone;
+- phone landscape.
 
----
-
-# 30. IMPLEMENTATION ORDER
-
-Use this order:
-
-1. fix smart queue ordering;
-2. fix candidate current-location/map action;
-3. fix 24Pet link classification/detail extraction/request-level inactive handling;
-4. add persistent Surveyor Layers control;
-5. fix MapLibre numeric-null warning;
-6. add outing models/schemas/router;
-7. implement readiness calculation;
-8. implement outing CRUD + dependencies + reorder;
-9. implement reuse / continue-unfinished;
-10. implement PreflightSheet and three sections;
-11. implement inline dependency picker;
-12. replace direct Start Search flow with preflight entry;
-13. implement transactional outing→SearchSession start;
-14. add `Add to outing` from map object/task/candidate/camera;
-15. implement task-completion linkage;
-16. implement active mission strip;
-17. session-end carry-forward UX;
-18. responsive polish;
-19. focused tests;
-20. manual acceptance;
-21. commit/push to `main`;
-22. if and only if the execution environment has device access, deploy to `dietpi` per `AGENTS.md`; otherwise report deployment not attempted from that environment.
+Verify no MapLibre null-number warning.
 
 ---
 
-# 31. RECOMMENDED COMMITS
+# 28. FILE BOUNDARIES
 
-Suggested sequence:
+Prefer keeping outing-specific backend logic in:
 
-1. `fix(candidates): stabilize review order location and 24pet links`
-2. `fix(surveyor): expose persistent layers control and sanitize map properties`
-3. `feat(surveyor): add outing plan and readiness model`
-4. `feat(surveyor): add prep packing and gameplan preflight`
-5. `feat(surveyor): integrate outing plans with field sessions`
-6. `feat(surveyor): add active mission strip and unfinished carry-forward`
-7. `test(surveyor): cover outing readiness dependencies and session linkage`
+`backend/app/surveyor/outings.py`
 
-Do not force a commit boundary if the implementation naturally combines two tiny adjacent changes.
+Do not move it back into the already-large `main.py`.
+
+Frontend:
+
+- keep `OutingPreflight.vue`;
+- small helpers/components may be split if the file becomes harder to maintain;
+- keep `SurveyorView.vue` orchestration thin.
+
+If needed, add:
+
+```text
+frontend/src/surveyor/outings.js
+frontend/src/components/surveyor/OutingMissionStrip.vue
+frontend/src/components/surveyor/OutingItemRow.vue
+```
+
+Do not refactor merely for aesthetics if the current component remains clear.
 
 ---
 
-# 32. EXPLICITLY DEFER TO SLICE 8
+# 29. IMPLEMENTATION ORDER
 
-Do not implement in this slice:
+1. remove persisted ready status + legacy normalization;
+2. fix readiness/skipped/dependency semantics;
+3. transactional outing start;
+4. correct outing completion lifecycle;
+5. continue-unfinished;
+6. reuse-last selection correction;
+7. task-linked Gameplan completion;
+8. atomic add-and-link Prep;
+9. atomic reorder;
+10. consistent mutation responses;
+11. event history;
+12. human linked-context labels;
+13. mission-strip focus rules;
+14. CandidateCase Workspace Add to outing;
+15. preflight UI semantics;
+16. candidate smart-order fix;
+17. current-location fix;
+18. candidate card cleanup;
+19. 24Pet link/lifecycle fixes;
+20. persistent Surveyor Layers control;
+21. explicit layer visibility application;
+22. MapLibre numeric sanitization;
+23. focused backend tests;
+24. frontend build;
+25. manual acceptance;
+26. push all changes to `main`;
+27. deploy to DietPi only if the execution environment actually has device access, per `AGENTS.md`.
 
-- iNaturalist wildlife;
+---
+
+# 30. DO NOT IMPLEMENT YET
+
+Defer until the next feature slice:
+
+- iNaturalist;
 - NC OneMap hydrography;
 - NWI wetlands;
-- MRLC backend WMS/tile proxy;
+- MRLC backend tile proxy;
 - environmental context inspector;
-- public-observation concentration;
-- predator-risk scoring;
-- automatic search-route planning;
-- automatic camera-placement recommendations.
-
-Slice 8 will consume the cleaned-up persistent Layers control added here.
-
----
-
-# 33. EXPLICITLY DEFER TO SLICE 9 / LATER
-
-Do not implement now:
-
-- packing inventory database;
-- named packing kits unless a very small implementation falls out naturally;
-- consumable counts;
-- automatic restock;
-- AI-generated outing plans;
-- Gantt/calendar planning;
-- generic dependency graphs;
+- wildlife concentration overlays;
 - route optimization;
-- mandatory duration estimates;
-- automation/reminder scheduling from `time_hint`.
+- automatic camera placement;
+- AI-generated outing plans;
+- packing inventory / consumable tracking;
+- generic dependency graphs.
 
 ---
 
-# 34. DEFINITION OF DONE
+# 31. DEFINITION OF DONE
 
-Slice 7 is complete only when:
+This packet is done when:
 
-## Review correctness
-
-- smart order cannot let small client trait boosts swamp large score differences;
-- default Archie traits are not double-counted;
-- candidate map/location/distance/bearing use one coherent current-location record;
-- review actions remain above details;
-- technical source record IDs are details-only;
-- 24Pet saved searches are not labeled Original;
-- exact animal links are used only when verified to match that animal;
-- request-level inactive state is not mistaken for animal inactivity.
-
-## Surveyor shell
-
-- persistent Layers control is visible desktop / portrait / landscape;
-- initial layer visibility is deterministic;
-- MapLibre numeric-null warning is gone.
-
-## Field readiness
-
-- one outing plan contains Prep / Packing / Gameplan;
-- Prep dependencies can be attached to Packing/Gameplan rows inline;
-- shared Prep work is not duplicated;
-- readiness shows unresolved work, not a percentage;
-- readiness is derived, not stored as stale plan state;
-- all routine edits auto-save;
-- Start Search opens Preflight;
-- Start without plan remains available;
-- blockers warn but never hard-lock departure;
-- Reuse last outing resets completion state;
-- Add to outing works from existing field entities;
-- active search exposes the next Gameplan item;
-- Done/Skip advances the mission strip;
-- task-linked Gameplan completion resolves the linked task;
-- unfinished Gameplan survives session end and can be continued next time;
-- portrait / landscape / desktop are usable.
-
-## Quality
-
-- focused backend tests pass;
-- frontend build succeeds;
+- no persisted ready lifecycle state remains;
+- existing ready rows normalize safely;
+- readiness correctly distinguishes pending, completed, skipped and dependency waivers;
+- linked outing start is transactional;
+- ending the search always completes the historical outing;
+- unfinished work can be continued into a fresh draft;
+- reuse-last cannot clone the current draft/active outing by mistake;
+- Gameplan completion resolves linked SurveyorTask;
+- Add & link and reorder are atomic;
+- outing mutations return consistent fresh plan/readiness state;
+- mission strip is tied to the active session's outing;
+- dead Map actions are hidden;
+- CandidateCase Workspace supports Add to outing;
+- candidate smart ordering is corrected;
+- candidate location actions use current_location coherently;
+- collapsed card provenance is cleaned up;
+- 24Pet exact/search links are truthful;
+- saved-search inactive state is not treated as animal inactivity;
+- Layers is always discoverable on Surveyor;
+- MapLibre numeric-null warning is gone;
+- focused tests pass;
+- frontend build passes;
 - manual acceptance passes;
-- changes are pushed to `main`;
-- deployment is attempted only from environments that actually have device access.
+- changes are pushed to `main`.
 
 ---
 
-# 35. END-OF-RUN REPORT
+# 32. END-OF-RUN REPORT
 
 Return:
 
 ```text
-SLICE 7 STATUS
+SLICE 7B STATUS
 
 Base SHA:
 Final SHA:
 
-CORRECTIONS
-Smart review order:
-Current-location/map consistency:
-24Pet exact/fallback links:
-24Pet request-level inactive handling:
-Persistent Layers control:
-MapLibre numeric warning:
-
-OUTING MODEL
-Plan:
-Items:
-Dependencies:
-Readiness:
-Reuse:
+OUTING CORRECTIONS
+Derived readiness:
+Legacy ready normalization:
+Skipped/waived semantics:
+Transactional start:
+Completion lifecycle:
 Continue unfinished:
-
-PREFLIGHT
-Prep / Setup:
-Packing:
-Gameplan:
-Dependency UX:
-Auto-save:
-Remaining mode:
-
-SESSION INTEGRATION
-Start flow:
-Start anyway:
-Start without plan:
-SearchSession linkage:
+Reuse last:
+Task linkage:
+Atomic add/link:
+Atomic reorder:
+Mutation response consistency:
+Event history:
+Human linked labels:
 Mission strip:
-Map focus:
-Task completion linkage:
-Session end carry-forward:
 
-RESPONSIVE
-Portrait:
-Landscape:
-Desktop:
+CANDIDATE CORRECTIONS
+Smart review order:
+Current-location consistency:
+Collapsed card cleanup:
+
+24PETCONNECT
+Exact detail links:
+Search fallback labels:
+Request-level inactive handling:
+Legacy rows:
+
+SURVEYOR
+Persistent Layers control:
+Layer visibility application:
+MapLibre null warning:
 
 TESTS:
 FRONTEND BUILD:
 MANUAL ACCEPTANCE:
 
 DEPLOYMENT
-main commit:
+main SHA:
 DietPi deployment:
-verification:
 
 KNOWN LIMITATIONS:
 ```
 
-If the execution environment does not have device access, use:
+If this environment cannot reach DietPi:
 
 `DietPi deployment: not attempted from this environment`
 
-Do not treat that as an implementation failure.
+Do not treat lack of device access as implementation failure.
