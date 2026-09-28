@@ -84,6 +84,15 @@ async function toggleGroup(group) {
   } catch (cause) { error.value = cause.message }
 }
 
+async function clearServerSession() {
+  error.value = ''
+  try {
+    await request('/api/facebook/session', { method: 'DELETE' })
+    pairingToken.value = ''
+    await refresh()
+  } catch (cause) { error.value = cause.message }
+}
+
 async function syncNow() {
   loading.value = true; error.value = ''
   try {
@@ -118,10 +127,12 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
       <span :class="['facebook-paired-state', { connected: serverReady }]">{{ serverReady ? 'Server session ready' : 'One-time setup needed' }}</span>
     </div>
     <p class="facebook-panel-intro">After one-time setup, Archie Radar scans only the groups you select from its own headless browser. Your everyday browser can be completely closed.</p>
+    <p v-if="status.server_session?.auth_state === 'login_required'" class="error facebook-panel-error">Facebook asked the server to log in again. Use <strong>Refresh Facebook session</strong> once, then the server resumes scanning independently.</p>
 
     <div class="facebook-panel-actions">
       <button class="secondary-button" type="button" @click="pairBrowser">{{ serverReady ? 'Refresh Facebook session' : 'Connect Facebook once' }}</button>
       <button class="primary" type="button" :disabled="loading || !serverReady || enabledCount === 0" @click="syncNow">{{ loading ? 'Queuing…' : 'Sync selected groups' }}</button>
+      <button v-if="serverReady" class="inline-button" type="button" @click="clearServerSession">Clear server session</button>
     </div>
 
     <div v-if="pairingToken" class="facebook-pair-instructions">
