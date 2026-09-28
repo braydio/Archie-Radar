@@ -52,3 +52,18 @@ class GroupReceiptIn(BaseModel):
 
 class SyncCompleteIn(BaseModel):
     error_summary: str = Field(default="", max_length=4000)
+
+
+class FacebookSessionCookie(BaseModel):
+    name: str = Field(min_length=1, max_length=256)
+    value: str = Field(default="", max_length=8192)
+    domain: str = Field(min_length=1, max_length=512)
+    path: str = Field(default="/", max_length=1024)
+    expirationDate: float | None = None
+    httpOnly: bool = False
+    secure: bool = True
+    sameSite: str | None = Field(default=None, max_length=40)
+
+
+class SessionImportIn(BaseModel):
+    cookies: list[FacebookSessionCookie] = Field(min_length=1, max_length=300)
