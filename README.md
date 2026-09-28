@@ -49,7 +49,31 @@ Then reload the web UI at `http://<server-ip>:5173`.
 
 ## Current source layer
 
-PawBoost, Orange County, regional 24PetConnect, APS Durham community reports, Wake County, Pet911, Petkey, plus the Facebook manual/capture bridge. Petco Love remains setup-dependent on approved API access.
+PawBoost, Orange County, regional 24PetConnect, APS Durham community reports, Wake County, Pet911, Petkey, plus selected Facebook groups. Petco Love remains setup-dependent on approved API access.
+
+## Facebook selected-group collector
+
+Facebook aggregation no longer depends on leaving your everyday browser open. Archie Radar runs a headless Chromium collector on the backend and only visits groups you explicitly enable.
+
+One-time setup:
+
+1. Rebuild/restart the backend so Playwright Chromium is installed.
+2. In **Sources → Facebook**, choose **Connect Facebook once** to mint a short-lived helper pairing token.
+3. Load the `browser-extension` folder as an unpacked Chromium extension while signed into Facebook.
+4. In the helper popup, enter the Archie Radar API URL and the token, then choose **Connect & hand off session**.
+5. Once Sources shows **Server session ready**, the ordinary browser can be closed. Manual and scheduled selected-group scans run on the Archie Radar server.
+
+The helper never sends a Facebook password. The explicit handoff copies the current Facebook session cookies to the local Archie Radar server, where they are written to the configured storage-state file with restricted permissions. The collector does not browse arbitrary groups, profiles, member lists, or comments.
+
+Docker defaults to an hourly selected-group sync. Configure with:
+
+```bash
+ARCHIE_FACEBOOK_SERVER_COLLECTOR_ENABLED=true
+ARCHIE_FACEBOOK_SYNC_MINUTES=60
+ARCHIE_FACEBOOK_SESSION_STATE_PATH=/data/facebook/storage-state.json
+```
+
+For a non-Docker backend install, run `python -m playwright install chromium` once after installing the package.
 
 ## Notes
 
