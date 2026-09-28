@@ -30,11 +30,12 @@ Use the current system user's normal Git/SSH configuration and SSH agent. Do not
 
 ## Deploy every pushed change to DietPi
 
-After every successful push to `origin/main`, deploy that exact revision to the Tailscale-connected DietPi host.
+After every successful push to `origin/main`, deploy that exact revision to the Tailscale-connected DietPi host **only when the current execution environment actually has SSH/Tailscale access to that device**. If the environment cannot reach the device, skip deployment, report that it was not attempted from this environment, and do not treat that limitation as a repository-task failure.
 
 ### SSH rules
 
-- SSH to the Tailscale host named `dietpi` as the current system user:
+- First verify that an SSH client is available and that this execution environment is permitted to reach the Tailscale host. Do not install or bootstrap SSH/Tailscale just to satisfy this section.
+- When access is available, SSH to the Tailscale host named `dietpi` as the current system user:
   ```bash
   ssh dietpi
   ```
@@ -105,4 +106,6 @@ For every repository-changing run, report:
 - lightweight verification result
 - any blocker or dirty-worktree condition
 
-Do not claim deployment succeeded unless the remote pull and Docker Compose restart were actually executed successfully.
+If this environment has no device access, report `DietPi deployment: not attempted from this environment` and stop there. Do not simulate the remote commands, do not claim failure, and do not claim deployment succeeded.
+
+When device access is available, do not claim deployment succeeded unless the remote pull and Docker Compose restart were actually executed successfully.
