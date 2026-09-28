@@ -77,7 +77,7 @@ def save_chrome_cookies(cookies: list[dict[str, Any]]) -> dict[str, Any]:
         converted.append({
             "name": name,
             "value": value,
-            "domain": domain if domain.startswith(".") else f".{domain}",
+            "domain": domain,
             "path": str(cookie.get("path") or "/"),
             "expires": expires,
             "httpOnly": bool(cookie.get("httpOnly")),
