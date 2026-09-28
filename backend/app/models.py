@@ -404,3 +404,46 @@ class SurveyorTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SurveyorOutingPlan(Base):
+    __tablename__ = "surveyor_outing_plans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(String(180), default="Tonight's plan")
+    objective: Mapped[str] = mapped_column(String(500), default="")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    method: Mapped[str] = mapped_column(String(50), default="walking")
+    search_session_id: Mapped[int | None] = mapped_column(ForeignKey("surveyor_search_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SurveyorOutingItem(Base):
+    __tablename__ = "surveyor_outing_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("surveyor_outing_plans.id", ondelete="CASCADE"), index=True)
+    section: Mapped[str] = mapped_column(String(20), index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    note: Mapped[str] = mapped_column(Text, default="")
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    map_object_id: Mapped[int | None] = mapped_column(ForeignKey("surveyor_map_objects.id", ondelete="SET NULL"), nullable=True, index=True)
+    surveyor_task_id: Mapped[int | None] = mapped_column(ForeignKey("surveyor_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    candidate_case_id: Mapped[int | None] = mapped_column(ForeignKey("candidate_cases.id", ondelete="SET NULL"), nullable=True, index=True)
+    time_hint: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class SurveyorOutingDependency(Base):
+    __tablename__ = "surveyor_outing_dependencies"
+    __table_args__ = (UniqueConstraint("prep_item_id", "dependent_item_id", name="uq_surveyor_outing_dependency"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prep_item_id: Mapped[int] = mapped_column(ForeignKey("surveyor_outing_items.id", ondelete="CASCADE"), index=True)
+    dependent_item_id: Mapped[int] = mapped_column(ForeignKey("surveyor_outing_items.id", ondelete="CASCADE"), index=True)

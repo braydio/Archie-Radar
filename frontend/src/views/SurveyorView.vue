@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { TerraDraw, TerraDrawLineStringMode, TerraDrawPolygonMode, TerraDrawSelectMode } from 'terra-draw'
@@ -23,6 +23,7 @@ import PhotoCapture from '../components/surveyor/PhotoCapture.vue'
 import AccessEditor from '../components/surveyor/AccessEditor.vue'
 import SearchSessionMedia from '../components/surveyor/SearchSessionMedia.vue'
 import SearchSessionDetail from '../components/surveyor/SearchSessionDetail.vue'
+import OutingPreflight from '../components/surveyor/OutingPreflight.vue'
 import QuickAddMenu from '../components/surveyor/QuickAddMenu.vue'
 import ObjectStackSheet from '../components/surveyor/ObjectStackSheet.vue'
 import DraftRecoveryPrompt from '../components/surveyor/DraftRecoveryPrompt.vue'
@@ -67,6 +68,9 @@ const attachmentCaption = ref('')
 const uploadingAttachment = ref(false)
 const activeSession = ref(null)
 const sessionMethod = ref('walking')
+const outingPlan = ref(null)
+const preflightOpen = ref(false)
+const outingPreflight = ref(null)
 const trackCoords = ref([])
 const trackTimes = ref([])
 const locationWarning = ref('')
@@ -193,6 +197,7 @@ async function loadObjects() {
   loadCameras()
   loadLinks()
   loadActiveSession()
+  loadOutingPlan()
   loadTaskLayer()
   loadAccessRecords()
 }
@@ -362,13 +367,69 @@ async function loadActiveSession() {
   } catch { /* Running field work will still load if the session service is unavailable. */ }
 }
 
-async function startSearch() {
+async function loadOutingPlan() {
+  try {
+    const response = await fetch(`${API}/api/surveyor/outings/current`)
+    if (response.ok) outingPlan.value = await response.json()
+  } catch { /* Preflight stays optional if its service is temporarily unavailable. */ }
+}
+
+function openPreflight() { preflightOpen.value = true }
+
+async function startSearch({ plan = null, method = sessionMethod.value } = {}) {
   const response = await fetch(`${API}/api/surveyor/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ method: sessionMethod.value }) })
+    body: JSON.stringify({ method }) })
   if (!response.ok) { error.value = 'Could not start search session'; return }
   activeSession.value = await response.json(); trackCoords.value = []; trackTimes.value = []; locationWarning.value = ''; refreshTrack()
+  sessionMethod.value = method
+  preflightOpen.value = false
+  if (plan?.id) {
+    const response = await fetch(`${API}/api/surveyor/outings/${plan.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'active', search_session_id: activeSession.value.id, method }) })
+    if (response.ok) outingPlan.value = await response.json()
+  }
   requestScreenWakeLock()
   beginLocationWatch()
+}
+
+async function addToOuting(values) {
+  try {
+    preflightOpen.value = true
+    await nextTick()
+    await outingPreflight.value?.refresh()
+    const item = await outingPreflight.value?.addItem({ section: 'gameplan', ...values })
+    if (item) error.value = ''
+  } catch (cause) { error.value = cause.message }
+}
+
+function addObjectToOuting(object) {
+  const defaultTitle = object.object_type === 'trail_camera' ? `Check ${object.name || 'trail camera'}`
+    : object.subtype === 'needs_search' ? `Search ${object.name || 'area'}`
+      : object.object_type === 'access' ? `Follow up at ${object.name || 'property'}`
+        : `Visit ${object.name || object.subtype || 'field location'}`
+  addToOuting({ title: defaultTitle, map_object_id: object.id })
+}
+
+function addTaskToOuting(task, mapObjectId = task.map_object_id) {
+  addToOuting({ title: task.title, map_object_id: mapObjectId || null, surveyor_task_id: task.id })
+}
+
+function focusOutingItem(item) {
+  if (item.map_object_id) {
+    const object = objects.value.find(row => row.id === item.map_object_id)
+    if (object) {
+      selectedCandidate.value = null; selected.value = object
+      title.value = object.name || ''; subtype.value = object.subtype || ''; notes.value = object.notes || ''
+      const center = object.geometry.type === 'Point' ? object.geometry.coordinates : [object.centroid_lon, object.centroid_lat]
+      map?.flyTo({ center, zoom: Math.max(map.getZoom(), 14) })
+    }
+  } else if (item.candidate_case_id) {
+    const candidate = candidates.value.find(row => row.case_id === item.candidate_case_id || row.id === item.candidate_case_id)
+    if (candidate) {
+      selected.value = null; selectedCandidate.value = candidate
+      map?.flyTo({ center: [candidate.map_longitude, candidate.map_latitude], zoom: Math.max(map.getZoom(), 14) })
+    }
+  }
 }
 
 function showSessionRoute(session) {
@@ -456,6 +517,14 @@ async function finishSearch(result) {
     const evidenceBody = await evidenceResponse.json().catch(() => ({}))
     if (!evidenceResponse.ok) error.value = evidenceBody.detail || 'Search saved, but the evidence marker could not be created'
     else { objects.value.unshift(evidenceBody); refreshSource(); selected.value = evidenceBody }
+  }
+  if (outingPlan.value?.search_session_id === sessionId) {
+    const unfinishedStops = outingPlan.value.items.some(item => item.section === 'gameplan' && item.status === 'pending')
+    const nextStatus = unfinishedStops || !outingPlan.value.readiness?.ready
+      ? (outingPlan.value.readiness?.ready ? 'ready' : 'draft') : 'completed'
+    const planResponse = await fetch(`${API}/api/surveyor/outings/${outingPlan.value.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: nextStatus }) })
+    if (planResponse.ok) outingPlan.value = await planResponse.json()
   }
   if (geoWatchId != null) navigator.geolocation?.clearWatch(geoWatchId)
   geoWatchId = null; activeSession.value = null; searchResultOpen.value = false; setCoveragePreview(null); releaseScreenWakeLock()
@@ -1349,7 +1418,7 @@ onBeforeUnmount(() => {
   <main class="surveyor-page">
     <header class="surveyor-topbar">
       <div><p class="eyebrow">FIELD MAP · {{ objects.length }} OBJECTS</p><h1>Surveyor</h1></div>
-    <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="startSearch" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" @media="sessionMediaOpen=true" @observation="quickObservation" @note="quickNote" />
+    <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="openPreflight" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" @media="sessionMediaOpen=true" @observation="quickObservation" @note="quickNote" />
     </header>
     <p v-if="error" class="surveyor-error">{{ error }}</p><p v-if="locationWarning" class="location-warning">{{ locationWarning }}</p>
     <div v-if="locatedAddress" class="located-address-banner"><div><p class="eyebrow">LOCATED ADDRESS</p><strong>{{ locatedAddress.displayName }}</strong><span>{{ locatedAddress.distance_miles }} mi {{ locatedAddress.bearing_label }} of home</span></div><button class="secondary-button" @click="saveLocatedPin">Save pin</button><button class="secondary-button" @click="createNeedsSearchAtLocation">Create needs-search area</button><button class="dismiss-location-focus" aria-label="Dismiss located address" @click="dismissLocationFocus">×</button></div>
@@ -1359,15 +1428,15 @@ onBeforeUnmount(() => {
       <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','access','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? 'Choose a marker type, then tap the map' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : activeTool === 'access' ? 'Tap a property to record access details' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option value="searched">Searched</option><option value="needs_search">Needs search</option><option value="needs_recheck">Needs re-check</option><option value="known_cat_highway">Known cat highway</option><option value="wildlife_hotspot">Wildlife hotspot</option><option value="likely_shelter">Likely shelter</option><option value="dog_territory">Dog territory</option><option value="private_no_access">Private / no access</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
       <LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" @update:model-value="layerSettings = $event" @close="layerDrawerOpen = false" />
       <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(metersToFeet(selectedHistoricalPlacement.range_meters)) }} ft</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
-      <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" />
-      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" />
+      <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" @add-outing="addToOuting({ title: `Review ${selectedCandidate.name || 'candidate case'}`, candidate_case_id: selectedCandidate.case_id || selectedCandidate.id })" />
+      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" @add-outing="addObjectToOuting(selected)" @add-task-outing="addTaskToOuting($event, selected.id)" />
     </div>
 
-    <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button @click="activateTool('access'); mobileMoreOpen=false">Property / access</button><button @click="undoLast" :disabled="!history.canUndo.value">Undo</button><button @click="redoLast" :disabled="!history.canRedo.value">Redo</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="startSearch">Start search</button><button v-else @click="endSearch">End search</button></div>
+    <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button @click="activateTool('access'); mobileMoreOpen=false">Property / access</button><button @click="undoLast" :disabled="!history.canUndo.value">Undo</button><button @click="redoLast" :disabled="!history.canRedo.value">Redo</button><button disabled>Measure · coming soon</button><button @click="layerDrawerOpen=true; mobileMoreOpen=false">Layers</button><button v-if="!activeSession" @click="openPreflight(); mobileMoreOpen=false">Start search</button><button v-else @click="endSearch">End search</button></div>
     <MobileInspectorSheet :open="Boolean(selected || selectedCandidate || selectedHistoricalPlacement)" @close="selected=null; selectedCandidate=null; selectedHistoricalPlacement=null">
-      <template v-if="selectedCandidate"><p class="eyebrow">CANDIDATE REPORT · {{ selectedCandidate.source }}</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2><p>{{ selectedCandidate.location_text }}</p><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button></template>
+      <template v-if="selectedCandidate"><p class="eyebrow">CANDIDATE REPORT · {{ selectedCandidate.source }}</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2><p>{{ selectedCandidate.location_text }}</p><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.case_id || selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button><button class="secondary-button" @click="addToOuting({ title: `Review ${selectedCandidate.name || 'candidate case'}`, candidate_case_id: selectedCandidate.case_id || selectedCandidate.id })">＋ Add to outing</button></template>
       <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(metersToFeet(selectedHistoricalPlacement.range_meters)) }} ft</p></template>
-      <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" />
+      <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" @add-outing="addObjectToOuting(selected)" @add-task-outing="addTaskToOuting($event, selected.id)" />
     </MobileInspectorSheet>
     <div v-if="objectStack.length" class="field-sheet-backdrop object-stack-backdrop" @click.self="objectStack=[]"><ObjectStackSheet :objects="objectStack" @select="chooseStackedObject" @close="objectStack=[]" /></div>
     <QuickAddMenu v-if="quickAdd" :coordinates="quickAdd.coordinates" :position="quickAdd.position" @select="chooseQuickAdd" @close="closeQuickAdd" />
@@ -1376,6 +1445,7 @@ onBeforeUnmount(() => {
     <div v-if="accessDraftCoordinates" class="field-sheet-backdrop"><AccessEditor :coordinates="accessDraftCoordinates" :record="accessDraftRecord" :initial-form="restoredAccessForm" :api="API" @save="accessSaved($event).catch(err => error=err.message)" @cancel="cancelAccessDraft" /></div>
     <div v-if="sessionMediaOpen && activeSession" class="field-sheet-backdrop"><SearchSessionMedia :api="API" :session-id="activeSession.id" @close="sessionMediaOpen=false" /></div>
     <div v-if="sessionDetailId" class="field-sheet-backdrop"><SearchSessionDetail :api="API" :session-id="sessionDetailId" @close="sessionDetailId=null" @show-route="showSessionRoute" @show-coverage="showSessionCoverage" @add-note="addSessionNote" @add-evidence="addSessionEvidence" @create-coverage="createSessionCoverage" @create-followup="createSessionFollowup" /></div>
+    <OutingPreflight ref="outingPreflight" v-model:open="preflightOpen" v-model:plan="outingPlan" :api="API" :method="sessionMethod" :active-session="activeSession" :inspector-open="Boolean(selected || selectedCandidate)" @start="startSearch" @focus="focusOutingItem" @error="error=$event" />
     <div v-if="searchResultOpen" class="field-sheet-backdrop"><SearchResultSheet :route="trackCoords.length >= 2 ? { type: 'LineString', coordinates: trackCoords } : null" :method="activeSession?.method || sessionMethod" :session="activeSession" :distance="sessionDistance()" :initial-form="restoredSearchForm" @coverage-preview="setCoveragePreview" @save="finishSearch" @cancel="cancelSearchResult" /></div>
     <div v-if="draftRecovery" class="draft-recovery-backdrop"><DraftRecoveryPrompt :draft="draftRecovery" @restore="restoreFieldDraft" @discard="discardFieldDraft" /></div>
     <footer class="surveyor-footer"><SurveyTimeline v-model="timelineWindow" /><span v-if="activeSession" class="active-session-status">SEARCH ACTIVE · {{ formatDistance(sessionDistance()) }}</span></footer>
