@@ -2,21 +2,38 @@
   "manifest_version": 3,
   "name": "Archie Radar Facebook Group Collector",
   "version": "1.0.0",
-  "description": "Collects recent cat-report posts from Facebook groups you explicitly selected in Archie Radar.",
-  "permissions": ["storage", "tabs", "scripting", "alarms", "permissions"],
+  "description": "One-time Facebook session helper and selected-group shortcut for Archie Radar's server-side collector.",
+  "permissions": [
+    "storage",
+    "cookies",
+    "permissions"
+  ],
   "host_permissions": [
     "https://www.facebook.com/*",
     "https://m.facebook.com/*",
     "https://*.facebook.com/*",
     "https://*.fbcdn.net/*"
   ],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_popup": "popup.html", "default_title": "Archie Radar Facebook collector" },
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Archie Radar Facebook collector"
+  },
   "content_scripts": [
     {
-      "matches": ["https://www.facebook.com/groups/*", "https://m.facebook.com/groups/*"],
-      "js": ["facebook/postExtractor.js", "facebook/groupScanner.js"],
+      "matches": [
+        "https://www.facebook.com/groups/*",
+        "https://m.facebook.com/groups/*"
+      ],
+      "js": [
+        "facebook/groupScanner.js"
+      ],
       "run_at": "document_idle"
     }
   ]
