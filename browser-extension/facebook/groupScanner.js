@@ -1,55 +1,4 @@
 (() => {
-  const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
-
-  async function scanGroup(group) {
-    const seenIds = new Set(group.watermark_post_ids || [])
-    const byKey = new Map()
-    const seenWatermarks = new Set()
-    const seenOldPosts = new Set()
-    let repeatedWatermark = 0
-    let olderThanCutoff = 0
-    let scannedArticles = 0
-    const cutoff = group.first_sync_cutoff ? new Date(group.first_sync_cutoff).getTime() : 0
-    const scrollRoot = document.scrollingElement || document.documentElement
-
-    for (let pass = 0; pass < 12; pass += 1) {
-      const snapshot = window.ArchieFacebookPostExtractor.extractFeed()
-      scannedArticles = Math.max(scannedArticles, snapshot.article_count)
-      for (const post of snapshot.posts) {
-        const key = post.facebook_post_id || post.canonical_url
-        if (key) byKey.set(key, post)
-        if (post.facebook_post_id && seenIds.has(post.facebook_post_id) && !seenWatermarks.has(post.facebook_post_id)) {
-          seenWatermarks.add(post.facebook_post_id)
-          repeatedWatermark += 1
-        }
-        if (key && cutoff && post.posted_at && new Date(post.posted_at).getTime() < cutoff && !seenOldPosts.has(key)) {
-          seenOldPosts.add(key)
-          olderThanCutoff += 1
-        }
-      }
-      if (repeatedWatermark >= 20 || olderThanCutoff >= 10) break
-      const before = scrollRoot.scrollHeight
-      scrollRoot.scrollTo({ top: scrollRoot.scrollHeight, behavior: 'instant' })
-      await pause(950 + Math.round(Math.random() * 350))
-      if (scrollRoot.scrollHeight === before && pass >= 2) break
-    }
-
-    const posts = [...byKey.values()]
-    return {
-      group_name: window.ArchieFacebookPostExtractor.extractFeed().group_name,
-      scanned: scannedArticles,
-      posts,
-      parser_warning: scannedArticles === 0 ? 'No rendered feed articles detected; Facebook layout or permissions may have changed.' : ''
-    }
-  }
-
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type === 'ARCHIE_SCAN_GROUP') {
-      scanGroup(message.group).then(sendResponse).catch(error => sendResponse({ error: error.message, posts: [], scanned: 0 }))
-      return true
-    }
-  })
-
   function groupDetails() {
     const match = location.pathname.match(/^\/groups\/([^/?]+)/)
     if (!match) return null
@@ -80,7 +29,7 @@
         button.textContent = 'Added to Archie Radar ✓'
       } catch (error) {
         button.disabled = false
-        button.textContent = error.message || 'Pair extension first'
+        button.textContent = error.message || 'Connect helper first'
       }
     })
     document.body.append(button)

@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     petkey_enabled: bool = True
     petkey_places: str = "chapel-hill_nc,durham_nc,raleigh_nc"
 
+    # Facebook selected-group aggregation. The server collector is independent of
+    # the user's everyday browser after a one-time authenticated session handoff.
+    facebook_server_collector_enabled: bool = True
+    facebook_sync_minutes: int = 60
+    facebook_session_state_path: str = ""
+    facebook_page_timeout_seconds: int = 35
+    facebook_scan_max_passes: int = 12
+
     analyze_images: bool = True
     max_image_bytes: int = 8_000_000
     surveyor_max_audio_mb: int = 100

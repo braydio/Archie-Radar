@@ -19,6 +19,8 @@ let refreshing = false
 
 const enabledCount = computed(() => groups.value.filter(group => group.enabled).length)
 const latestRun = computed(() => run.value || status.value.last_sync)
+const serverReady = computed(() => Boolean(status.value.server_session_ready))
+const collectorReady = computed(() => status.value.collector_mode === 'server' ? serverReady.value : Boolean(status.value.paired))
 
 async function request(path, options = {}) {
   const response = await fetch(`${props.api}${path}`, options)
@@ -83,6 +85,15 @@ async function toggleGroup(group) {
   } catch (cause) { error.value = cause.message }
 }
 
+async function clearServerSession() {
+  error.value = ''
+  try {
+    await request('/api/facebook/session', { method: 'DELETE' })
+    pairingToken.value = ''
+    await refresh()
+  } catch (cause) { error.value = cause.message }
+}
+
 async function syncNow() {
   loading.value = true; error.value = ''
   try {
@@ -113,19 +124,21 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
 <template>
   <section class="facebook-groups-panel" aria-labelledby="facebook-groups-heading">
     <div class="facebook-panel-header">
-      <div><p class="eyebrow">FACEBOOK · BROWSER COLLECTOR</p><h3 id="facebook-groups-heading">Selected groups</h3></div>
-      <span :class="['facebook-paired-state', { connected: status.paired }]">{{ status.paired ? 'Browser paired' : 'Not connected' }}</span>
+      <div><p class="eyebrow">FACEBOOK · SERVER COLLECTOR</p><h3 id="facebook-groups-heading">Selected groups</h3></div>
+      <span :class="['facebook-paired-state', { connected: collectorReady }]">{{ status.collector_mode === 'server' ? (serverReady ? 'Server session ready' : 'One-time setup needed') : (collectorReady ? 'Browser collector ready' : 'Not connected') }}</span>
     </div>
-    <p class="facebook-panel-intro">Archie Radar scans only the groups you select. Your Facebook login stays in this browser.</p>
+    <p class="facebook-panel-intro">After one-time setup, Archie Radar scans only the groups you select from its own headless browser. Your everyday browser can be completely closed.</p>
+    <p v-if="status.server_session?.auth_state === 'login_required'" class="error facebook-panel-error">Facebook asked the server to log in again. Use <strong>Refresh Facebook session</strong> once, then the server resumes scanning independently.</p>
 
     <div class="facebook-panel-actions">
-      <button class="secondary-button" type="button" @click="pairBrowser">{{ status.paired ? 'Pair another browser' : 'Connect browser' }}</button>
-      <button class="primary" type="button" :disabled="loading || !status.paired || enabledCount === 0" @click="syncNow">{{ loading ? 'Queuing…' : 'Sync selected groups' }}</button>
+      <button class="secondary-button" type="button" @click="pairBrowser">{{ serverReady ? 'Refresh Facebook session' : 'Connect Facebook once' }}</button>
+      <button class="primary" type="button" :disabled="loading || !collectorReady || enabledCount === 0" @click="syncNow">{{ loading ? 'Queuing…' : 'Sync selected groups' }}</button>
+      <button v-if="serverReady" class="inline-button" type="button" @click="clearServerSession">Clear server session</button>
     </div>
 
     <div v-if="pairingToken" class="facebook-pair-instructions">
-      <strong>One-time extension token</strong>
-      <p>Load the <code>browser-extension</code> folder as an unpacked extension in Chrome or Edge. Open its popup, enter this Archie Radar server URL and paste the token. The token is shown only once.</p>
+      <strong>One-time Facebook session handoff</strong>
+      <p>Load the <code>browser-extension</code> folder once, while signed into Facebook. Open its popup, enter <code>{{ props.api }}</code>, paste the token, then choose <strong>Connect & hand off session</strong>. After it says the server session is ready, this browser does not need to remain open.</p>
       <div class="facebook-token-row"><input aria-label="One-time extension token" readonly :value="pairingToken" @focus="$event.target.select()" /><button class="secondary-button" type="button" @click="copyToken">Copy</button></div>
       <button class="inline-button" type="button" @click="pairingToken = ''">Hide token</button>
     </div>
@@ -140,7 +153,7 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
 
     <div class="facebook-group-list">
       <p class="eyebrow">FACEBOOK GROUPS · {{ enabledCount }} SELECTED</p>
-      <p v-if="!groups.length" class="facebook-empty">Add a group URL or use the extension button while viewing a Facebook group.</p>
+      <p v-if="!groups.length" class="facebook-empty">Add Facebook group URLs here. The extension's in-group button is only an optional shortcut for adding a group, not a requirement for scanning.</p>
       <article v-for="group in groups" :key="group.id" class="facebook-group-row">
         <button type="button" class="facebook-group-toggle" :aria-label="`${group.enabled ? 'Disable' : 'Enable'} ${group.group_name}`" @click="toggleGroup(group)">{{ group.enabled ? '✓' : '○' }}</button>
         <div><strong>{{ group.group_name }}</strong><span>{{ group.last_error ? `Needs attention · ${group.last_error}` : `Last synced ${syncTime(group.last_success_at)}` }}</span></div>

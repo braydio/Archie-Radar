@@ -88,6 +88,7 @@ from .vision import fingerprint_image
 from .surveyor_media import PublicMediaFiles, attachment_metadata, classify_media, contained_path, delete_attachment_files, generate_video_poster, store_upload
 from .traits import ARCHIE_TRAITS, is_archie_compatible
 from .facebook.router import router as facebook_router
+from .facebook.collector import facebook_collector_forever
 
 
 settings = get_settings()
@@ -328,6 +329,8 @@ async def lifespan(_: FastAPI):
         tasks.append(asyncio.create_task(_poll_all_forever()))
     if settings.geocode_enabled:
         tasks.append(asyncio.create_task(_geocode_worker_forever()))
+    if settings.facebook_server_collector_enabled:
+        tasks.append(asyncio.create_task(facebook_collector_forever()))
     try:
         yield
     finally:
