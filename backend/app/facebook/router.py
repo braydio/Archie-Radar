@@ -16,12 +16,15 @@ from ..models import (CandidateCasePost, FacebookBridgeToken, FacebookGroupSubsc
                       PetPost, utcnow)
 from ..schemas import PetPostIn
 from ..service import upsert_posts
+from ..settings import get_settings
 from ..candidates.identity import merge_candidate_cases
 from .classifier import candidate_status, is_cat_related
 from .dedupe import likely_crosspost, text_fingerprint
-from .schemas import BatchIn, GroupIn, GroupPatch, GroupReceiptIn, SyncCompleteIn
+from .schemas import BatchIn, GroupIn, GroupPatch, GroupReceiptIn, SessionImportIn, SyncCompleteIn
+from .session import clear_session, save_chrome_cookies, session_ready, session_status
 
 router = APIRouter(prefix="/api/facebook", tags=["facebook-collector"])
+settings = get_settings()
 
 
 def _token_hash(value: str) -> str:
@@ -120,11 +123,47 @@ def collector_status(db: Session = Depends(get_db)):
     latest_run = db.scalar(select(FacebookGroupSyncRun).order_by(
         FacebookGroupSyncRun.started_at.desc(), FacebookGroupSyncRun.id.desc()
     ).limit(1))
+    server_state = session_status()
+    server_mode = bool(settings.facebook_server_collector_enabled)
     return {
-        "paired": token is not None,
+        "paired": server_state["ready"] if server_mode else token is not None,
+        "collector_mode": "server" if server_mode else "extension",
+        "server_collector_enabled": server_mode,
+        "server_session_ready": server_state["ready"],
+        "server_session": server_state,
+        "extension_paired": token is not None,
         "last_seen_at": token.last_seen_at if token else None,
+        "automatic_sync_minutes": int(settings.facebook_sync_minutes) if server_mode else None,
         "last_sync": _run_out(db, latest_run) if latest_run else None,
     }
+
+
+@router.post("/session/import")
+def import_server_session(
+    payload: SessionImportIn,
+    _token: FacebookBridgeToken = Depends(require_bridge_token),
+):
+    try:
+        result = save_chrome_cookies([cookie.model_dump() for cookie in payload.cookies])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "connected": True,
+        "collector_mode": "server",
+        "cookie_count": result["cookie_count"],
+        "message": "Server Facebook session ready. This browser no longer needs to stay open for scans.",
+    }
+
+
+@router.get("/session/status")
+def get_server_session_status():
+    return session_status()
+
+
+@router.delete("/session")
+def delete_server_session():
+    clear_session()
+    return {"connected": False}
 
 
 @router.get("/groups")
@@ -176,7 +215,10 @@ def disable_group(group_id: int, db: Session = Depends(get_db)):
 
 @router.post("/sync")
 def create_sync(db: Session = Depends(get_db)):
-    if db.scalar(select(FacebookBridgeToken.id).where(FacebookBridgeToken.revoked_at.is_(None))) is None:
+    if settings.facebook_server_collector_enabled:
+        if not session_ready():
+            raise HTTPException(409, "Connect Facebook once so the server can scan selected groups independently.")
+    elif db.scalar(select(FacebookBridgeToken.id).where(FacebookBridgeToken.revoked_at.is_(None))) is None:
         raise HTTPException(409, "Connect the Facebook browser extension first")
     groups = list(db.scalars(select(FacebookGroupSubscription).where(FacebookGroupSubscription.enabled.is_(True))))
     if not groups:
@@ -196,6 +238,10 @@ def create_sync(db: Session = Depends(get_db)):
 
 @router.get("/sync/next")
 def next_sync(_token: FacebookBridgeToken = Depends(require_bridge_token), db: Session = Depends(get_db)):
+    # The extension is only the transport when server-side collection is disabled.
+    # In normal server mode, queued runs are claimed by the backend Playwright worker.
+    if settings.facebook_server_collector_enabled:
+        return {"job": None, "collector_mode": "server"}
     run = db.scalar(select(FacebookGroupSyncRun).where(FacebookGroupSyncRun.status == "queued")
                      .order_by(FacebookGroupSyncRun.started_at, FacebookGroupSyncRun.id).limit(1))
     if run is None:
