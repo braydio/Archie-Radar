@@ -20,6 +20,7 @@ let refreshing = false
 const enabledCount = computed(() => groups.value.filter(group => group.enabled).length)
 const latestRun = computed(() => run.value || status.value.last_sync)
 const serverReady = computed(() => Boolean(status.value.server_session_ready))
+const collectorReady = computed(() => status.value.collector_mode === 'server' ? serverReady.value : Boolean(status.value.paired))
 
 async function request(path, options = {}) {
   const response = await fetch(`${props.api}${path}`, options)
@@ -124,14 +125,14 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
   <section class="facebook-groups-panel" aria-labelledby="facebook-groups-heading">
     <div class="facebook-panel-header">
       <div><p class="eyebrow">FACEBOOK · SERVER COLLECTOR</p><h3 id="facebook-groups-heading">Selected groups</h3></div>
-      <span :class="['facebook-paired-state', { connected: serverReady }]">{{ serverReady ? 'Server session ready' : 'One-time setup needed' }}</span>
+      <span :class="['facebook-paired-state', { connected: collectorReady }]">{{ status.collector_mode === 'server' ? (serverReady ? 'Server session ready' : 'One-time setup needed') : (collectorReady ? 'Browser collector ready' : 'Not connected') }}</span>
     </div>
     <p class="facebook-panel-intro">After one-time setup, Archie Radar scans only the groups you select from its own headless browser. Your everyday browser can be completely closed.</p>
     <p v-if="status.server_session?.auth_state === 'login_required'" class="error facebook-panel-error">Facebook asked the server to log in again. Use <strong>Refresh Facebook session</strong> once, then the server resumes scanning independently.</p>
 
     <div class="facebook-panel-actions">
       <button class="secondary-button" type="button" @click="pairBrowser">{{ serverReady ? 'Refresh Facebook session' : 'Connect Facebook once' }}</button>
-      <button class="primary" type="button" :disabled="loading || !serverReady || enabledCount === 0" @click="syncNow">{{ loading ? 'Queuing…' : 'Sync selected groups' }}</button>
+      <button class="primary" type="button" :disabled="loading || !collectorReady || enabledCount === 0" @click="syncNow">{{ loading ? 'Queuing…' : 'Sync selected groups' }}</button>
       <button v-if="serverReady" class="inline-button" type="button" @click="clearServerSession">Clear server session</button>
     </div>
 
