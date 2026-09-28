@@ -14,7 +14,9 @@ export default {
   props: {
     posts: { type: Array, default: () => [] },
     config: { type: Object, default: null },
-    reviewRadius: { type: Number, default: 25 }
+    reviewRadius: { type: Number, default: 25 },
+    focusCaseId: { type: Number, default: null },
+    focusLocation: { type: Object, default: null }
   },
   setup(props) {
     const el = ref(null)
@@ -30,7 +32,11 @@ export default {
     let mapFontStack = ['Noto Sans Regular']
     let resizeObserver = null
 
-    const mappable = computed(() => props.posts.filter(p => p.map_latitude != null && p.map_longitude != null))
+    const mappable = computed(() => props.posts.filter(p => {
+      const latitude = Number(p.map_latitude), longitude = Number(p.map_longitude)
+      return p.map_latitude != null && p.map_longitude != null && Number.isFinite(latitude) && Number.isFinite(longitude) &&
+        latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
+    }))
     const preciseCount = computed(() => mappable.value.filter(p => p.location_precision === 'exact').length)
     const approximateCount = computed(() => mappable.value.filter(p => p.location_precision === 'city').length)
 
@@ -127,6 +133,7 @@ export default {
           id: post.id,
           properties: {
             id: post.id,
+            focused: Number(post.case_id || post.id) === Number(props.focusCaseId),
             rank: Math.max(1, props.posts.findIndex(item => item.id === post.id) + 1),
             title: post.name || `${statusLabel(post.status) || 'Found'} cat`,
             score: Math.round(Number(post.match_score || 0)),
@@ -311,6 +318,7 @@ export default {
       if (!map.getSource('distance-rings')) map.addSource('distance-rings', { type: 'geojson', data: distanceRingsGeoJSON() })
       if (!map.getSource('archie-posts')) map.addSource('archie-posts', { type: 'geojson', data: postsGeoJSON(), cluster: true, clusterRadius: 48, clusterMaxZoom: 14 })
       if (!map.getSource('probe-line')) map.addSource('probe-line', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+      if (!map.getSource('candidate-focus')) map.addSource('candidate-focus', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
 
       if (!map.getLayer('distance-ring-fill')) map.addLayer({
         id: 'distance-ring-fill', type: 'fill', source: 'distance-rings',
@@ -370,8 +378,8 @@ export default {
         paint: {
           'circle-radius': ['interpolate', ['linear'], ['zoom'], 7, 10, 11, 13, 14, 16],
           'circle-color': ['step', ['get', 'score'], '#d8ddd7', 48, '#e5bf78', 70, '#db7d55'],
-          'circle-stroke-color': ['case', ['==', ['get', 'precision'], 'city'], '#43574e', '#fffdf6'],
-          'circle-stroke-width': ['case', ['==', ['get', 'precision'], 'city'], 2, 3],
+          'circle-stroke-color': ['case', ['==', ['get', 'focused'], true], '#b45b35', ['==', ['get', 'precision'], 'city'], '#43574e', '#fffdf6'],
+          'circle-stroke-width': ['case', ['==', ['get', 'focused'], true], 5, ['==', ['get', 'precision'], 'city'], 2, 3],
           'circle-opacity': ['case', ['==', ['get', 'precision'], 'city'], 0.80, 0.96]
         }
       })
@@ -379,6 +387,15 @@ export default {
         id: 'candidate-scores', type: 'symbol', source: 'archie-posts', filter: ['!', ['has', 'point_count']],
         layout: { 'text-field': ['concat', '#', ['to-string', ['get', 'rank']]], 'text-size': 10.5, 'text-font': mapFontStack },
         paint: { 'text-color': '#24332d', 'text-halo-color': 'rgba(255,255,255,.5)', 'text-halo-width': 0.8 }
+      })
+      if (!map.getLayer('candidate-focus-ring')) map.addLayer({
+        id: 'candidate-focus-ring', type: 'circle', source: 'archie-posts',
+        filter: ['all', ['!', ['has', 'point_count']], ['==', ['get', 'focused'], true]],
+        paint: { 'circle-radius': 24, 'circle-color': 'rgba(180,91,53,0)', 'circle-stroke-color': '#b45b35', 'circle-stroke-width': 3, 'circle-stroke-opacity': 0.92 }
+      })
+      if (!map.getLayer('candidate-focus-target')) map.addLayer({
+        id: 'candidate-focus-target', type: 'circle', source: 'candidate-focus',
+        paint: { 'circle-radius': 10, 'circle-color': '#f2c36f', 'circle-stroke-color': '#b45b35', 'circle-stroke-width': 3 }
       })
       if (!map.getLayer('approx-symbol')) map.addLayer({
         id: 'approx-symbol', type: 'symbol', source: 'archie-posts',
@@ -409,6 +426,24 @@ export default {
       if (rings) rings.setData(distanceRingsGeoJSON())
       const home = map.getSource('home-point')
       if (home && props.config) home.setData({ type: 'Point', coordinates: [Number(props.config.home_longitude), Number(props.config.home_latitude)] })
+      applyFocusTarget()
+    }
+
+    function applyFocusTarget() {
+      if (!map) return
+      const focus = props.focusLocation
+      const focusedPoint = focus && focus.latitude != null && focus.longitude != null && Number.isFinite(Number(focus.latitude)) && Number.isFinite(Number(focus.longitude))
+        ? [Number(focus.longitude), Number(focus.latitude)] : null
+      const casePost = props.posts.find(post => Number(post.case_id || post.id) === Number(props.focusCaseId))
+      const location = casePost?.current_location
+      const rawLatitude = location?.map_latitude ?? casePost?.map_latitude
+      const rawLongitude = location?.map_longitude ?? casePost?.map_longitude
+      const latitude = rawLatitude == null ? NaN : Number(rawLatitude)
+      const longitude = rawLongitude == null ? NaN : Number(rawLongitude)
+      const center = focusedPoint || (Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180 ? [longitude, latitude] : null)
+      const source = map.getSource('candidate-focus')
+      if (source) source.setData({ type: 'FeatureCollection', features: focusedPoint ? [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: focusedPoint } }] : [] })
+      if (center) map.flyTo({ center, zoom: Math.max(map.getZoom(), 14.5), duration: 550 })
     }
 
     function popupHtml(propsData, coords) {
@@ -562,7 +597,8 @@ export default {
         updateRadar()
         nextTick(() => {
           map?.resize()
-          window.setTimeout(fit, 80)
+          if (!props.focusCaseId && !props.focusLocation) window.setTimeout(fit, 80)
+          applyFocusTarget()
         })
       })
       map.on('error', event => {
@@ -576,6 +612,7 @@ export default {
     watch(() => props.config, () => { ensureMap(); updateData() }, { deep: true })
     watch(() => props.posts, () => updateData(), { deep: true })
     watch(() => props.reviewRadius, () => updateData())
+    watch(() => [props.focusCaseId, props.focusLocation], () => { updateData(); applyFocusTarget() }, { deep: true })
     onBeforeUnmount(() => {
       resizeObserver?.disconnect()
       popup?.remove()

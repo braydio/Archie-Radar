@@ -25,6 +25,7 @@ const tab = ref('overview')
 const error = ref('')
 const saving = ref(false)
 const exporting = ref(false)
+const outingAdded = ref(false)
 const copied = ref('')
 const hero = computed(() => item.value?.primary_image || item.value?.case_images?.[0] || null)
 const tabs = ['overview', 'activity', 'media', 'sources']
@@ -129,6 +130,19 @@ async function copyIdentifier(value, label = '') {
     setTimeout(() => { copied.value = '' }, 1800)
   } catch { error.value = 'Clipboard access is unavailable' }
 }
+async function addToOuting() {
+  if (!item.value) return
+  try {
+    let plan = await request('/api/surveyor/outings/current')
+    if (plan?.status !== 'draft') plan = null
+    if (!plan) plan = await request('/api/surveyor/outings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: "Tonight's plan", method: 'walking' }) })
+    const animal = item.value.external_ids?.find(identifier => identifier.kind === 'animal_id')
+    const title = animal ? `Check candidate ${animal.value}` : 'Check candidate case'
+    const note = item.value.current_location?.location_text ? `Current reported location: ${item.value.current_location.location_text}` : ''
+    await request(`/api/surveyor/outings/${plan.id}/items`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ section: 'gameplan', title, note, candidate_case_id: item.value.case_id }) })
+    outingAdded.value = true
+  } catch (cause) { error.value = cause.message || 'Could not add candidate to outing' }
+}
 onMounted(load)
 watch(() => route.params.caseId, load)
 </script>
@@ -149,7 +163,7 @@ watch(() => route.params.caseId, load)
           <small v-if="copied">{{ copied }}</small>
         </div>
         <p v-if="item.current_location?.location_text">{{ item.current_location.location_text }}<template v-if="item.current_location.distance_from_home_miles != null"> · {{ item.current_location.distance_is_approximate ? '~' : '' }}{{ Number(item.current_location.distance_from_home_miles).toFixed(1) }} mi from home</template><small v-if="item.current_location.record_id"> · source record #{{ item.current_location.record_id }}</small></p>
-        <button v-if="item.current_location?.map_latitude != null" type="button" class="secondary-button" @click="openCurrentLocation">Open location in Surveyor</button>
+        <div class="case-location-actions"><button v-if="item.current_location?.map_latitude != null" type="button" class="secondary-button" @click="openCurrentLocation">Open location in Surveyor</button><button type="button" class="secondary-button" :disabled="outingAdded" @click="addToOuting">{{ outingAdded ? 'Added to outing' : '＋ Add to outing' }}</button></div>
         <div class="review-actions case-review-actions">
           <button class="possible" @click="review('possible')">Possible Archie</button>
           <button class="hold" @click="review('needs_review')">Hold</button>

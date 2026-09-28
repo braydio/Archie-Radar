@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import re
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -21,9 +21,42 @@ class Regional24PetConnectConnector(Connector):
     """
 
     source_name = "regional_24petconnect"
+    DETAIL_PATH = re.compile(r"/(?:DetailsMain/[^/]+/|[^/]+/Details/[^/]+/)([A-Z0-9-]+)/?$", re.I)
+
+    @classmethod
+    def _matching_detail_url(cls, container, base_url: str, animal_id: str) -> str | None:
+        if container is None:
+            return None
+        candidates = []
+        for node in container.find_all(True):
+            for attr in ("href", "data-href", "data-url", "onclick"):
+                value = node.get(attr)
+                if value:
+                    candidates.extend(re.findall(r"(?:https?://[^\s'\"<>]+|/[^\s'\"<>]+)", str(value)))
+        for candidate in candidates:
+            absolute = urljoin(base_url, candidate)
+            parsed = urlparse(absolute)
+            match = cls.DETAIL_PATH.search(parsed.path)
+            host = (parsed.hostname or "").lower()
+            if (host == "24petconnect.com" or host.endswith(".24petconnect.com")) and match and match.group(1).casefold() == animal_id.casefold():
+                return absolute
+        return None
 
     @staticmethod
-    def parse_24pet_context(status_text: str) -> dict:
+    def _animal_container(soup: BeautifulSoup, animal_id: str):
+        marker = soup.find(string=re.compile(rf"Animal\s+id\s*:\s*{re.escape(animal_id)}\b", re.I))
+        if marker is None:
+            return None
+        node = marker.parent
+        for ancestor in [node, *node.parents]:
+            text = ancestor.get_text(" ", strip=True)
+            ids = re.findall(r"Animal\s+id\s*:\s*([^\s]+)", text, re.I)
+            if len(ids) == 1 and ids[0].casefold() == animal_id.casefold() and re.search(r"(?:Status|Location Found|Breed)\s*:", text, re.I):
+                return ancestor
+        return node
+
+    @staticmethod
+    def parse_24pet_context(status_text: str, source: str = "") -> dict:
         value = (status_text or "").strip()
         lower = value.casefold()
         holding = None
@@ -37,6 +70,14 @@ class Regional24PetConnectConnector(Connector):
             holding = "Wake County Animal Center"
         elif "orange county animal services" in lower:
             holding = "Orange County Animal Services"
+        else:
+            holding = {
+                "chatham_24petconnect": "Chatham County · Animal Resources Center",
+                "durham_24petconnect": "Animal Protection Society of Durham",
+                "wake_24petconnect": "Wake County Animal Center",
+                "burlington_24petconnect": "Burlington Animal Services",
+                "orange_county_24petconnect": "Orange County Animal Services",
+            }.get((source or "").casefold())
 
         if any(term in lower for term in ("finder's home", "finders home", "held by finder", "with finder")):
             custody_type, custody_label = "finder", "With finder"
@@ -54,6 +95,22 @@ class Regional24PetConnectConnector(Connector):
             "custody_label": custody_label,
         }
 
+    @staticmethod
+    def parse_animal_lifecycle(detail_text: str, animal_id: str) -> tuple[str, str | None]:
+        text = (detail_text or "").casefold()
+        if not animal_id or not re.search(rf"\b{re.escape(animal_id.casefold())}\b", text, re.I):
+            return "active", None
+        # ViewAnimals banners describe the saved request, not each animal.
+        text = re.sub(r"your request is currently inactive", "", text, flags=re.I)
+        match = re.search(
+            r"\b(reunited|adopted|inactive)\b|listing (?:is )?closed|no longer (?:active|available)|animal (?:is )?no longer available",
+            text, re.I,
+        )
+        if not match:
+            return "active", None
+        reason = match.group(1).lower() if match.lastindex else "closed"
+        return "inactive", reason
+
     def __init__(self, url: str):
         self.url = url.strip()
 
@@ -67,27 +124,34 @@ class Regional24PetConnectConnector(Connector):
             rows = self.parse_listing(response.text, str(response.url))
 
             async def active(row: PetPostIn) -> PetPostIn | None:
-                if not row.source_url or row.source_url == str(response.url):
+                detail_url = row.raw.get("detail_url") if isinstance(row.raw, dict) else None
+                # The saved ViewAnimals request status describes the search, not the
+                # animal. A row present in current results remains active-as-seen.
+                if not detail_url or row.raw.get("source_link_kind") != "exact_detail":
                     return row.model_copy(update={"raw": {**row.raw, "listing_state": "active",
                         "listing_state_checked_at": datetime.now(timezone.utc).isoformat()}})
+                def unavailable_link():
+                    raw = {**row.raw, "source_link_kind": "unavailable", "detail_url": None,
+                        "listing_state": "active", "listing_state_checked_at": datetime.now(timezone.utc).isoformat()}
+                    return row.model_copy(update={"source_url": row.raw.get("listing_url") or row.source_url, "raw": raw})
                 try:
-                    detail = await client.get(row.source_url, timeout=12)
+                    detail = await client.get(detail_url, timeout=12)
                     detail.raise_for_status()
-                    text = BeautifulSoup(detail.text, "html.parser").get_text(" ", strip=True).lower()
-                    reason_match = re.search(
-                        r"\b(reunited|adopted|inactive)\b|listing (?:is )?closed|no longer (?:active|available)|animal (?:is )?no longer available",
-                        text, re.I,
-                    )
-                    reason = reason_match.group(1).lower() if reason_match and reason_match.lastindex else (
-                        "closed" if reason_match else None
-                    )
-                    state = "inactive" if reason else "active"
+                    text = BeautifulSoup(detail.text, "html.parser").get_text(" ", strip=True)
+                    final_url = urlparse(str(detail.url))
+                    match = self.DETAIL_PATH.search(final_url.path)
+                    host = (final_url.hostname or "").lower()
+                    if (host != "24petconnect.com" and not host.endswith(".24petconnect.com")) or not match or match.group(1).casefold() != (row.source_id or "").casefold():
+                        return unavailable_link()
+                    if not re.search(rf"\b{re.escape(row.source_id or '')}\b", text, re.I):
+                        return unavailable_link()
+                    state, reason = self.parse_animal_lifecycle(text, row.source_id or "")
                     return row.model_copy(update={"raw": {**row.raw, "listing_state": state,
                         "listing_state_reason": reason,
                         "listing_state_checked_at": datetime.now(timezone.utc).isoformat()}})
                 except Exception:
                     # A failed detail check must not erase a valid search-result row.
-                    pass
+                    return unavailable_link()
                 return row.model_copy(update={"raw": {**row.raw, "listing_state": "active",
                     "listing_state_checked_at": datetime.now(timezone.utc).isoformat()}})
 
@@ -150,25 +214,25 @@ class Regional24PetConnectConnector(Connector):
 
             # 24PetConnect result pages carry linked animal images. Prefer a matching
             # alt/title if present; otherwise leave blank rather than fabricating a URL.
+            container = Regional24PetConnectConnector._animal_container(soup, animal_id)
             image_url = None
-            detail_url = source_url
-            for img in soup.find_all("img"):
-                label = " ".join(filter(None, [img.get("alt"), img.get("title")]))
-                if animal_id.lower() in label.lower():
+            if container:
+                for img in container.find_all("img"):
+                    label = " ".join(filter(None, [img.get("alt"), img.get("title")]))
                     src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
-                    if src:
+                    if src and (animal_id.casefold() in label.casefold() or len(container.find_all("img")) == 1):
                         image_url = urljoin(source_url, src)
-                    parent_link = img.find_parent("a", href=True)
-                    if parent_link:
-                        detail_url = urljoin(source_url, parent_link["href"])
-                    break
-            if detail_url == source_url:
-                link = soup.find("a", href=re.compile(re.escape(animal_id), re.I))
-                if link and link.get("href"):
-                    detail_url = urljoin(source_url, link["href"])
-
+                        break
+            if image_url is None:
+                for img in soup.find_all("img"):
+                    label = " ".join(filter(None, [img.get("alt"), img.get("title")]))
+                    src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
+                    if animal_id.casefold() in label.casefold() and src:
+                        image_url = urljoin(source_url, src)
+                        break
+            detail_url = Regional24PetConnectConnector._matching_detail_url(container, source_url, animal_id)
             source = Regional24PetConnectConnector._source_for_status(status_text)
-            context = Regional24PetConnectConnector.parse_24pet_context(status_text)
+            context = Regional24PetConnectConnector.parse_24pet_context(status_text, source)
             status = "found"
             if "finder's home" in status_text.lower() or "finders home" in status_text.lower():
                 status = "found_with_finder"
@@ -180,7 +244,7 @@ class Regional24PetConnectConnector(Connector):
                 PetPostIn(
                     source=source,
                     source_id=animal_id or raw_hash,
-                    source_url=detail_url,
+                    source_url=detail_url or source_url,
                     status=status,
                     species="cat",
                     sex=sex,
@@ -191,6 +255,8 @@ class Regional24PetConnectConnector(Connector):
                     reported_at=reported_at,
                     raw={
                         "listing_url": source_url,
+                        "detail_url": detail_url,
+                        "source_link_kind": "exact_detail" if detail_url else "search_results",
                         "status_text": status_text,
                         "breed": breed,
                         "days_since_event": days,

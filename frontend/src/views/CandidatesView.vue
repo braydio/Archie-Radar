@@ -6,6 +6,7 @@ import FilterSection from '../components/FilterSection.vue'
 import SearchMap from '../components/SearchMap.vue'
 import FacebookGroupsPanel from '../components/FacebookGroupsPanel.vue'
 import { sourceLabel, statusLabel } from '../lib/format.js'
+import { clientPrioritize as prioritizeClientFeed } from '../candidates/reviewOrder.js'
 import { API_BASE } from '../apiBase.js'
 
 const FILTER_STORAGE = 'archie-radar-v09-filters'
@@ -57,6 +58,8 @@ export default {
     const setupOpen = ref(false)
     const sourcesOpen = ref(false)
     const showMap = ref(false)
+    const focusedCaseId = ref(null)
+    const focusedLocation = ref(null)
     const filterSheet = ref(null)
     const filterButton = ref(null)
     const refreshBusy = ref({})
@@ -256,35 +259,7 @@ export default {
     function isDefaultDraft(key, value) { return DEFAULT_FILTERS[key] === value }
 
     function clientPrioritize(list, f) {
-      if (sort.value !== 'smart' || f.traitMode !== 'prioritize') return list
-      return [...list].map(post => {
-        const traits = post.parsed_traits || {}
-        let boost = 0
-        if (f.sex && post.sex === f.sex) boost += 4
-        if (f.color && (traits.colors || []).includes(f.color)) boost += 7
-        if (f.pattern && (traits.patterns || []).includes(f.pattern)) boost += 5
-        if (f.coat && traits.coat === f.coat) boost += 3
-        if (f.altered && traits.altered_status === f.altered) boost += 4
-        if (f.whiteChest === 'yes' && traits.white_chest === true) boost += 4
-        if (f.whiteChest === 'no' && traits.white_chest === false) boost += 2
-        if (f.whiteBelly === 'yes' && traits.white_belly === true) boost += 1
-        if (f.whiteBelly === 'no' && traits.white_belly === false) boost += 1
-        if (f.whitePaws === 'yes' && traits.white_paws === true) boost += 2
-        if (f.whitePaws === 'no' && traits.white_paws === false) boost += 1
-        if (f.whiteFace === 'yes' && traits.white_face === true) boost += 2
-        if (f.whiteFace === 'no' && traits.white_face === false) boost += 1
-        if (f.collar && traits.collar === f.collar) boost += 3
-        if (f.microchip && traits.microchip === f.microchip) boost += 3
-        if (f.ageCompatible && traits.age_years != null && Math.abs(Number(traits.age_years) - 8) <= 2.5) boost += 2
-        if (f.archieCompatible && (post.archie_trait_conflicts || []).length === 0) boost += 5
-        return { ...post, _trait_boost: boost }
-      }).sort((a, b) => {
-        const boost = Number(b._trait_boost || 0) - Number(a._trait_boost || 0)
-        if (boost) return boost
-        const score = Number(b.match_score || 0) - Number(a.match_score || 0)
-        if (score) return score
-        return new Date(b.posted_at || b.reported_at || b.first_seen_at || 0) - new Date(a.posted_at || a.reported_at || a.first_seen_at || 0)
-      })
+      return prioritizeClientFeed(list, f, sort.value)
     }
 
     async function load() {
@@ -404,23 +379,30 @@ export default {
       } catch (e) { error.value = e?.message || String(e) }
     }
 
-    function locateCandidate(post) {
-      const config = searchConfig.value
-      if (post.latitude != null && post.longitude != null && config) {
-        const lat1 = Number(config.home_latitude) * Math.PI / 180
-        const lat2 = Number(post.latitude) * Math.PI / 180
-        const dLon = (Number(post.longitude) - Number(config.home_longitude)) * Math.PI / 180
-        const y = Math.sin(dLon) * Math.cos(lat2)
-        const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon)
-        const bearing = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
-        const labels = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW']
-        window.dispatchEvent(new CustomEvent('archie:locate', { detail: { latitude: post.latitude, longitude: post.longitude,
-          displayName: post.location_text || 'Candidate location', precision: 'address', distance_miles: post.distance_from_home_miles,
-          bearing_degrees: Number(bearing.toFixed(1)), bearing_label: labels[Math.round(bearing / 22.5) % 16],
-          home: { latitude: config.home_latitude, longitude: config.home_longitude } } }))
-      } else {
-        window.dispatchEvent(new CustomEvent('archie:locate', { detail: { query: post.location_text || '' } }))
+    async function locateCandidate(post) {
+      const location = post.current_location || null
+      const rawLatitude = location?.map_latitude, rawLongitude = location?.map_longitude
+      const latitude = rawLatitude == null ? NaN : Number(rawLatitude)
+      const longitude = rawLongitude == null ? NaN : Number(rawLongitude)
+      showMap.value = true
+      focusedCaseId.value = null
+      focusedLocation.value = null
+      if (Number.isFinite(latitude) && Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180) {
+        focusedCaseId.value = post.case_id || post.id
+        await nextTick()
+        return
       }
+      const query = location?.location_text || post.location_text || ''
+      if (!query) return
+      try {
+        const response = await fetch(`${API}/api/places/resolve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }) })
+        if (!response.ok) throw new Error(`Location lookup failed (${response.status})`)
+        const result = await response.json()
+        const match = result.matches?.[0]
+        if (!match) return
+        focusedLocation.value = { latitude: match.latitude, longitude: match.longitude, caseId: post.case_id || post.id }
+        await nextTick()
+      } catch (cause) { error.value = cause.message || 'Location could not be resolved' }
     }
 
     async function uploadReference(event) {
@@ -523,7 +505,7 @@ export default {
 
     return {
       API, posts, referencePhotos, searchConfig, queueStats, loading, uploading, error, scanSummary,
-      filtersOpen, setupOpen, sourcesOpen, showMap, filterSheet, filterButton, state, sort,
+      filtersOpen, setupOpen, sourcesOpen, showMap, focusedCaseId, focusedLocation, filterSheet, filterButton, state, sort,
       filterSectionOpen, defaultsExpanded, defaultTraitCount, filterSummaries,
       source, facebookGroupId, status, sex, photoFilter, ageDays, minScore, maxDistance, hideDuplicates, color, pattern, coat,
       collar, microchip, altered, whiteChest, whiteBelly, whitePaws, whiteFace, ageCompatible, archieCompatible,
@@ -655,10 +637,10 @@ export default {
     </section>
 
     <p v-if="error" class="error">{{ error }}</p>
-    <SearchMap v-if="showMap" :posts="posts" :config="searchConfig" :review-radius="appliedFilters.maxDistance" />
+    <SearchMap v-if="showMap" :posts="posts" :config="searchConfig" :review-radius="appliedFilters.maxDistance" :focus-case-id="focusedCaseId" :focus-location="focusedLocation" />
 
     <div class="results-heading"><div><p class="eyebrow">REVIEW QUEUE</p><h2>{{ posts.length }} {{ state === 'new' ? 'new candidates' : 'candidates' }}</h2></div><div class="results-meta"><span v-if="mappedCount">{{ mappedCount }} on map</span><span v-if="loading">Updating…</span></div></div>
     <p v-if="!loading && !posts.length" class="empty">Nothing in this view. Widen a filter or run a fresh scan.</p>
-    <section class="candidate-list"><CandidateCard v-for="(post, index) in posts" :id="`post-${post.id}`" :key="post.id" :post="post" :rank="index + 1" @review="review" @locate="locateCandidate" /></section>
+    <section class="candidate-list"><CandidateCard v-for="(post, index) in posts" :id="`post-${post.id}`" :key="post.case_id || post.id" :post="post" :rank="index + 1" :config="searchConfig" @review="review" @locate="locateCandidate" @map="locateCandidate" /></section>
   </main>
 </template>

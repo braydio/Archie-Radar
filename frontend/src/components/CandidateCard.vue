@@ -21,9 +21,10 @@ export default {
   components: { CandidateMedia, RouterLink },
   props: {
     post: { type: Object, required: true },
-    rank: { type: Number, default: 1 }
+    rank: { type: Number, default: 1 },
+    config: { type: Object, default: null }
   },
-  emits: ['review', 'locate'],
+  emits: ['review', 'locate', 'map'],
   setup(props, { emit }) {
     const imageUnavailable = ref(false)
     const selectedImage = ref(null)
@@ -53,14 +54,14 @@ export default {
     const eventAt = computed(() => props.post.reported_at || null)
     const addedAt = computed(() => props.post.first_seen_at || null)
     const title = computed(() => props.post.name || `${statusLabel(props.post.status) || 'Found'} cat`)
-    const usefulTitle = computed(() => !/^(found\s+)?cat$|^unknown$/i.test(String(title.value || '').trim()))
+    const usefulTitle = computed(() => !/^(found\s+cat|shelter\s+intake\s+cat|cat|unknown)$/i.test(String(title.value || '').trim()))
     const detailsAvailable = computed(() => Boolean(props.post.nearest_landmark || props.post.finder_message || props.post.contact_info || props.post.contact_url))
     const candidateHeading = computed(() => props.post.current_custody?.holding_entity || props.post.holding_entity || props.post.current_custody?.custody_label || props.post.custody_label || statusLabel(props.post.status) || 'Found report')
     const candidateSubheading = computed(() => [props.post.current_custody?.custody_label || props.post.custody_label,
       (props.post.current_custody || props.post.source_platform) ? `via ${props.post.source_platform || sourceLabel(props.post.source)}` : sourceLabel(props.post.source)].filter(Boolean).join(' · '))
     const currentLocation = computed(() => props.post.current_location || null)
-    const locationText = computed(() => currentLocation.value?.location_text ?? props.post.location_text)
-    const locationDistance = computed(() => currentLocation.value?.distance_from_home_miles ?? props.post.distance_from_home_miles)
+    const locationText = computed(() => (currentLocation.value?.location_text || '').replace(/\s+And\s+/gi, ' & '))
+    const locationDistance = computed(() => currentLocation.value?.distance_from_home_miles)
     const identityIds = computed(() => props.post.external_ids || [])
     const facebookAppearances = computed(() => {
       const byGroup = new Map()
@@ -72,15 +73,38 @@ export default {
       return [...byGroup.values()].sort((a, b) => String(a.group_name).localeCompare(String(b.group_name)))
     })
     const mapHref = computed(() => {
-      const lat = currentLocation.value?.map_latitude ?? props.post.map_latitude
-      const lon = currentLocation.value?.map_longitude ?? props.post.map_longitude
+      const lat = currentLocation.value?.map_latitude
+      const lon = currentLocation.value?.map_longitude
       return lat == null || lon == null ? null : `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=14/${lat}/${lon}`
+    })
+    const bearing = computed(() => {
+      const { map_latitude: rawLat, map_longitude: rawLon } = currentLocation.value || {}
+      const { home_latitude: rawHomeLat, home_longitude: rawHomeLon } = props.config || {}
+      if (rawLat == null || rawLon == null || rawHomeLat == null || rawHomeLon == null) return null
+      const lat = Number(rawLat), lon = Number(rawLon)
+      const homeLat = Number(rawHomeLat), homeLon = Number(rawHomeLon)
+      if (![lat, lon, homeLat, homeLon].every(Number.isFinite)) return null
+      const rad = value => value * Math.PI / 180
+      const y = Math.sin(rad(lon - homeLon)) * Math.cos(rad(lat))
+      const x = Math.cos(rad(homeLat)) * Math.sin(rad(lat)) - Math.sin(rad(homeLat)) * Math.cos(rad(lat)) * Math.cos(rad(lon - homeLon))
+      const degrees = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
+      return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(degrees / 22.5) % 16]
     })
     const distanceText = computed(() => {
       if (locationDistance.value == null) return ''
-      const prefix = (currentLocation.value?.distance_is_approximate ?? props.post.distance_is_approximate) ? '~' : ''
-      return `${prefix}${Number(locationDistance.value).toFixed(1)} mi from home`
+      const approximate = Boolean(currentLocation.value?.distance_is_approximate)
+      const prefix = approximate ? '~' : ''
+      const direction = bearing.value ? ` ${bearing.value}` : ''
+      const suffix = approximate ? ' · Approximate' : ''
+      return `${prefix}${Number(locationDistance.value).toFixed(1)} mi${direction} of home${suffix}`
     })
+    const sourceIs24Pet = computed(() => String(props.post.source || '').includes('24petconnect'))
+    const sourceLink = computed(() => sourceIs24Pet.value
+      ? (props.post.source_link_kind === 'exact_detail' ? (props.post.detail_url || props.post.source_url) : (props.post.listing_url || props.post.source_url))
+      : props.post.source_url)
+    const sourceLinkLabel = computed(() => sourceIs24Pet.value
+      ? (props.post.source_link_kind === 'exact_detail' ? 'View on 24PetConnect ↗' : 'Open 24PetConnect ↗')
+      : 'Open source ↗')
 
     const traitTokens = computed(() => {
       const traits = props.post.parsed_traits || {}
@@ -136,12 +160,18 @@ export default {
 
     function review(reviewState) { emit('review', props.post, reviewState) }
     function locate() { emit('locate', props.post) }
+    function focusMap() { emit('map', props.post) }
+    async function copyAnimalId() {
+      const identifier = identityIds.value.find(item => item.kind === 'animal_id') || identityIds.value[0]
+      if (!identifier) return
+      try { await navigator.clipboard.writeText(identifier.value) } catch { /* Clipboard may be unavailable in insecure contexts. */ }
+    }
 
     return {
       imageUnavailable, candidateImage, displayedImage, selectedImage, caseImages, priorityClass, photoPct, hasPhoto, sourceAccent, candidateHeading, candidateSubheading, identityIds,
-      sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText,
+      sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText, sourceLink, sourceLinkLabel, sourceIs24Pet,
       traitTokens, primaryTraitTokens, reasonSummary, colorClass, facebookAppearances,
-      sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review, locate, locationText, currentLocation
+      sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review, locate, focusMap, locationText, currentLocation, copyAnimalId
     }
   }
 }
@@ -164,8 +194,9 @@ export default {
       </div>
 
       <div class="title-row">
-        <h2 :class="{ 'generic-title': !usefulTitle }">{{ title }}</h2>
-        <a v-if="post.source_url" class="original-link prominent" :href="post.source_url" target="_blank" rel="noopener">Original ↗</a>
+        <h2 v-if="usefulTitle">{{ title }}</h2>
+        <a v-if="sourceLink" class="original-link prominent" :href="sourceLink" target="_blank" rel="noopener">{{ sourceLinkLabel }}</a>
+        <button v-if="sourceIs24Pet && post.source_link_kind !== 'exact_detail'" type="button" class="copy-id-button" @click="copyAnimalId">Copy Animal ID</button>
       </div>
 
       <div v-if="identityIds.length || post.record_count > 1" class="case-identity-row">
@@ -188,12 +219,11 @@ export default {
       <div v-if="locationText || distanceText" class="address-row">
         <div>
           <strong v-if="locationText">{{ locationText }}</strong>
-          <span v-if="distanceText" :class="{ approximate: post.distance_is_approximate }">{{ distanceText }}</span>
-          <small v-if="currentLocation?.record_id">Current location · source record #{{ currentLocation.record_id }}</small>
+          <span v-if="distanceText" :class="{ approximate: currentLocation?.distance_is_approximate }">{{ distanceText }}</span>
         </div>
-        <a v-if="mapHref" :href="mapHref" target="_blank" rel="noopener">Map ↗</a>
+        <button v-if="currentLocation?.map_latitude != null && currentLocation?.map_longitude != null" type="button" @click="focusMap">Map</button>
       </div>
-      <button v-if="locationText || post.map_latitude != null" type="button" class="candidate-locate-link" @click="locate">Locate relative to home</button>
+      <button v-if="locationText && !currentLocation?.map_latitude" type="button" class="candidate-locate-link" @click="locate">Locate relative to home</button>
 
       <div v-if="primaryTraitTokens.length" class="trait-row" aria-label="Most relevant traits parsed from listing text">
         <span v-for="token in primaryTraitTokens" :key="`${token.label}-${token.state}`" :class="['trait-chip', token.state]">{{ token.label }}</span>
@@ -231,6 +261,9 @@ export default {
             <template v-if="eventAt"><dt>Found / sighted</dt><dd>{{ exactDate(eventAt) }}</dd></template>
             <template v-if="addedAt"><dt>Added to Radar</dt><dd>{{ exactDate(addedAt) }}</dd></template>
           </dl>
+          <div v-if="currentLocation" class="location-provenance"><h3>Location provenance</h3><p>Current location from source record #{{ currentLocation.record_id }}</p><p>Precision: {{ currentLocation.precision || 'unknown' }}</p><p>{{ currentLocation.location_text }}</p></div>
+          <a v-if="mapHref" class="detail-link" :href="mapHref" target="_blank" rel="noopener">Open external map ↗</a>
+          <p v-if="sourceIs24Pet" class="inspector-meta">Source link: {{ post.source_link_kind === 'exact_detail' ? 'exact animal detail' : post.source_link_kind === 'search_results' ? 'saved search results' : post.source_link_kind || 'unavailable' }}</p>
         </section>
         <section v-if="post.source_records?.length > 1" class="more-detail-section source-history">
           <h3>Source history</h3>
@@ -240,7 +273,7 @@ export default {
             <span v-if="record.source_id">{{ record.identifier_label }} {{ record.source_id }}</span>
             <small>{{ record.custody_label || statusLabel(record.status) }}<template v-if="record.source_platform"> · via {{ record.source_platform }}</template></small>
             <em v-if="displayedImage?.source_post_id === record.post_id">Current photo</em>
-            <a v-if="record.source_url" :href="record.source_url" target="_blank" rel="noopener">Open record ↗</a>
+            <a v-if="record.source_url" :href="record.source_link_kind === 'exact_detail' ? (record.detail_url || record.source_url) : (record.listing_url || record.source_url)" target="_blank" rel="noopener">{{ record.source_link_kind === 'exact_detail' ? 'View animal ↗' : record.source_platform === '24PetConnect' ? 'Open 24PetConnect ↗' : 'Open record ↗' }}</a>
           </article>
         </section>
         <section v-if="facebookAppearances.length" class="more-detail-section source-history">

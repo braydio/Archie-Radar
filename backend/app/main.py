@@ -45,7 +45,7 @@ from .candidates.identity import (case_is_inactive, case_output, choose_best_mat
 from .db import Base, SessionLocal, engine, get_db
 from .geocoder import NominatimGeocoder, geocode_posts
 from .image_service import analyze_post_ids
-from .models import ArchieProfile, ArchieReferencePhoto, CandidateCase, CandidateCasePost, CandidateIdentifier, FacebookGroupSubscription, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorAttachmentLink, SurveyorObjectLink, SurveyorTask, utcnow
+from .models import ArchieProfile, ArchieReferencePhoto, CandidateCase, CandidateCasePost, CandidateIdentifier, FacebookGroupSubscription, PetPost, PostVision, SurveyorMapObject, SurveyorTrailCamera, SurveyorCameraPlacement, SurveyorSearchSession, SurveyorEvent, SurveyorAttachment, SurveyorAttachmentLink, SurveyorObjectLink, SurveyorOutingPlan, SurveyorTask, utcnow
 from .schemas import (
     FacebookBridgeIn,
     PetPostIn,
@@ -321,6 +321,8 @@ async def lifespan(_: FastAPI):
     # Importing geocoder above registers its cache table with SQLAlchemy metadata.
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
+        from .surveyor.outings import normalize_legacy_ready_statuses
+        normalize_legacy_ready_statuses(db)
         ensure_candidate_cases(db)
         _set_home_anchor(db)
         rescore_all(db)
@@ -711,6 +713,15 @@ def finish_surveyor_session(session_id: int, payload: SurveyorSessionUpdate, db:
     row.ended_at = payload.ended_at or utcnow()
     _record_surveyor_event(db, "search_completed", "search_session", row.id, f"Completed {row.method} search",
         after=_session_output(row).model_dump(mode="json"), reversible=False)
+    linked_outing = db.query(SurveyorOutingPlan).filter(SurveyorOutingPlan.search_session_id == row.id).first()
+    if linked_outing and linked_outing.status == "active":
+        before = {"status": linked_outing.status, "search_session_id": linked_outing.search_session_id}
+        linked_outing.status = "completed"
+        linked_outing.completed_at = row.ended_at
+        linked_outing.updated_at = row.ended_at
+        _record_surveyor_event(db, "outing_completed", "outing_plan", linked_outing.id,
+            "Completed outing with search session", before=before,
+            after={"status": linked_outing.status, "search_session_id": row.id}, reversible=False)
     db.commit(); db.refresh(row)
     return _session_output(row)
 

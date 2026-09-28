@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import urlparse
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -10,12 +11,45 @@ from ..models import (CandidateCase, CandidateCaseMerge, CandidateCasePost, Cand
                       CandidateIdentityExclusion, PetPost, PostVision)
 from ..service import get_or_create_profile, post_output
 from ..vision import compare_fingerprints
+from ..connectors.regional_24petconnect import Regional24PetConnectConnector
 
 P24_SOURCES = {
     "regional_24petconnect", "chatham_24petconnect", "orange_county_24petconnect",
     "durham_24petconnect", "wake_24petconnect", "burlington_24petconnect", "orange_county_found",
 }
 REVIEW_PRECEDENCE = ("confirmed", "possible", "needs_review", "new", "dismissed")
+
+
+def _source_link_context(post: PetPost, raw: dict) -> dict:
+    if post.source not in P24_SOURCES:
+        return {"source_link_kind": "exact_detail" if post.source_url else "unavailable",
+                "listing_url": raw.get("listing_url"), "detail_url": post.source_url}
+    listing_url = raw.get("listing_url")
+    detail_url = raw.get("detail_url")
+    kind = raw.get("source_link_kind")
+    source_url = post.source_url or ""
+    path = urlparse(source_url).path.casefold()
+    if "/viewanimals/" in path:
+        kind = "unavailable" if kind == "unavailable" else "search_results"
+        listing_url, detail_url = listing_url or source_url, None
+    elif kind not in {"exact_detail", "search_results", "provider_home", "unavailable"}:
+        detail_match = re.search(r"/(?:detailsmain/[^/]+/|[^/]+/details/[^/]+/)([a-z0-9-]+)/?$", path, re.I)
+        host = (urlparse(source_url).hostname or "").lower()
+        if detail_match and detail_match.group(1).casefold() == str(post.source_id or "").casefold() and (host == "24petconnect.com" or host.endswith(".24petconnect.com")):
+            kind, detail_url = "exact_detail", source_url
+        elif source_url:
+            kind = "provider_home" if path in {"", "/"} else "search_results"
+        else:
+            kind = "unavailable"
+    return {"source_link_kind": kind or "unavailable", "listing_url": listing_url,
+            "detail_url": detail_url if kind == "exact_detail" else None}
+
+
+def _normalized_24pet_context(post: PetPost, raw: dict) -> dict:
+    if post.source not in P24_SOURCES:
+        return {key: raw.get(key) for key in ("source_platform", "holding_entity", "custody_type", "custody_label")}
+    context = Regional24PetConnectConnector.parse_24pet_context(raw.get("status_text", ""), post.source)
+    return {key: raw.get(key) or context.get(key) for key in ("source_platform", "holding_entity", "custody_type", "custody_label")}
 
 
 def normalize_external_id(source: str, source_id: str, raw: dict | None = None):
@@ -422,6 +456,8 @@ def case_output(db: Session, case: CandidateCase, profile=None, *, posts=None, v
     records = []
     for post in sorted(posts, key=lambda item: item.last_seen_at, reverse=True):
         raw = _raw(post)
+        context = _normalized_24pet_context(post, raw)
+        links = _source_link_context(post, raw)
         meta = raw.get("image_meta") if isinstance(raw.get("image_meta"), dict) else {}
         facebook_appearances = raw.get("facebook_group_appearances") if isinstance(raw.get("facebook_group_appearances"), list) else []
         records.append({"post_id": post.id, "source": post.source,
@@ -431,8 +467,9 @@ def case_output(db: Session, case: CandidateCase, profile=None, *, posts=None, v
             "location_text": post.location_text, "latitude": post.latitude, "longitude": post.longitude,
             "map_latitude": output_by_id[post.id].get("map_latitude"),
             "map_longitude": output_by_id[post.id].get("map_longitude"),
-            "holding_entity": raw.get("holding_entity"), "custody_type": raw.get("custody_type"),
-            "custody_label": raw.get("custody_label"), "source_platform": raw.get("source_platform"),
+            "holding_entity": context.get("holding_entity"), "custody_type": context.get("custody_type"),
+            "custody_label": context.get("custody_label"), "source_platform": context.get("source_platform"),
+            **links,
             "image_width": meta.get("width"), "image_height": meta.get("height"),
             "image_aspect_ratio": meta.get("aspect_ratio"),
             "listing_state": _lifecycle_state(post),
@@ -466,6 +503,7 @@ def case_output(db: Session, case: CandidateCase, profile=None, *, posts=None, v
     current_output = output_by_id[current.id] if current else primary_output
     location_output = output_by_id[location_record.id] if location_record else {}
     custody_raw = _raw(custody_record) if custody_record else {}
+    custody_context = _normalized_24pet_context(custody_record, custody_raw) if custody_record else {}
     current_location = ({
         "record_id": location_record.id,
         "location_text": location_record.location_text,
@@ -479,9 +517,9 @@ def case_output(db: Session, case: CandidateCase, profile=None, *, posts=None, v
     } if location_record else None)
     current_custody = ({
         "record_id": custody_record.id,
-        "holding_entity": custody_raw.get("holding_entity"),
-        "custody_type": custody_raw.get("custody_type"),
-        "custody_label": custody_raw.get("custody_label"),
+        "holding_entity": custody_context.get("holding_entity"),
+        "custody_type": custody_context.get("custody_type"),
+        "custody_label": custody_context.get("custody_label"),
         "as_of": custody_record.last_seen_at,
     } if custody_record else None)
     return {**current_output,
@@ -496,7 +534,8 @@ def case_output(db: Session, case: CandidateCase, profile=None, *, posts=None, v
         "holding_entity": current_custody["holding_entity"] if current_custody else "",
         "custody_type": current_custody["custody_type"] if current_custody else None,
         "custody_label": current_custody["custody_label"] if current_custody else "Status unknown",
-        "source_platform": _raw(custody_record).get("source_platform") if custody_record else None,
+        "source_platform": custody_context.get("source_platform") if custody_record else None,
+        **(_source_link_context(current, _raw(current)) if current else {}),
         "current_record_id": current.id if current else None,
         "current_location": current_location,
         "current_custody": current_custody,
