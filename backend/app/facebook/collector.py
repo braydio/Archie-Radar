@@ -13,7 +13,7 @@ from ..db import SessionLocal
 from ..models import FacebookGroupSubscription, FacebookGroupSyncReceipt, FacebookGroupSyncRun, utcnow
 from ..settings import get_settings
 from .schemas import BatchIn
-from .session import session_ready, storage_state_path, update_session_meta
+from .session import session_status, storage_state_path, update_session_meta
 
 logger = logging.getLogger("archie-radar.facebook")
 settings = get_settings()
@@ -99,7 +99,7 @@ def _as_utc(value: datetime | None) -> datetime | None:
 
 def _run_due(db) -> bool:
     minutes = max(0, int(settings.facebook_sync_minutes))
-    if not settings.facebook_server_collector_enabled or minutes <= 0 or not session_ready():
+    if not settings.facebook_server_collector_enabled or minutes <= 0 or not session_status()["ready"]:
         return False
     if db.scalar(select(FacebookGroupSyncRun.id).where(
         FacebookGroupSyncRun.status.in_(["queued", "syncing"])
