@@ -138,7 +138,7 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
 
     <div v-if="pairingToken" class="facebook-pair-instructions">
       <strong>One-time Facebook session handoff</strong>
-      <p>Load the <code>browser-extension</code> folder once, while signed into Facebook. Open its popup, enter this Archie Radar server URL, paste the token, then choose <strong>Connect & hand off session</strong>. After it says the server session is ready, this browser does not need to remain open.</p>
+      <p>Load the <code>browser-extension</code> folder once, while signed into Facebook. Open its popup, enter <code>{{ props.api }}</code>, paste the token, then choose <strong>Connect & hand off session</strong>. After it says the server session is ready, this browser does not need to remain open.</p>
       <div class="facebook-token-row"><input aria-label="One-time extension token" readonly :value="pairingToken" @focus="$event.target.select()" /><button class="secondary-button" type="button" @click="copyToken">Copy</button></div>
       <button class="inline-button" type="button" @click="pairingToken = ''">Hide token</button>
     </div>
