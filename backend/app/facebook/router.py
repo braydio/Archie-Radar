@@ -216,8 +216,10 @@ def disable_group(group_id: int, db: Session = Depends(get_db)):
 @router.post("/sync")
 def create_sync(db: Session = Depends(get_db)):
     if settings.facebook_server_collector_enabled:
-        if not session_ready():
-            raise HTTPException(409, "Connect Facebook once so the server can scan selected groups independently.")
+        server_state = session_status()
+        if not server_state["ready"]:
+            detail = "Reconnect Facebook once so the server can scan selected groups independently." if server_state["auth_state"] == "login_required" else "Connect Facebook once so the server can scan selected groups independently."
+            raise HTTPException(409, detail)
     elif db.scalar(select(FacebookBridgeToken.id).where(FacebookBridgeToken.revoked_at.is_(None))) is None:
         raise HTTPException(409, "Connect the Facebook browser extension first")
     groups = list(db.scalars(select(FacebookGroupSubscription).where(FacebookGroupSubscription.enabled.is_(True))))
