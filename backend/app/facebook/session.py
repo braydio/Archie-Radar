@@ -132,9 +132,11 @@ def session_status() -> dict[str, Any]:
             meta = json.loads(_meta_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         meta = {}
+    file_ready = session_ready()
+    auth_state = meta.get("auth_state") or ("unverified" if file_ready else "missing")
     return {
-        "ready": session_ready(),
-        "auth_state": meta.get("auth_state") or ("unverified" if session_ready() else "missing"),
+        "ready": bool(file_ready and auth_state not in {"login_required", "missing"}),
+        "auth_state": auth_state,
         "last_checked_at": meta.get("checked_at"),
         "error": meta.get("error") or "",
     }
