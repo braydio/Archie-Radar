@@ -135,7 +135,7 @@ def session_status() -> dict[str, Any]:
     file_ready = session_ready()
     auth_state = meta.get("auth_state") or ("unverified" if file_ready else "missing")
     return {
-        "ready": bool(file_ready and auth_state not in {"login_required", "missing"}),
+        "ready": bool(file_ready and auth_state not in {"login_required", "missing", "collector_unavailable"}),
         "auth_state": auth_state,
         "last_checked_at": meta.get("checked_at"),
         "error": meta.get("error") or "",
