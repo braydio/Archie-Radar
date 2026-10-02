@@ -44,9 +44,424 @@ frontend/src/components/surveyor/EnvironmentalInspector.vue 29 lines
 frontend/src/style.css                              1065 lines
 frontend/src/components/SearchMap.vue               695 lines
 frontend/src/views/CandidateCaseView.vue            223 lines
+frontend/src/views/CandidatesView.vue                review-page orientation
+frontend/src/components/surveyor/SearchSessionBar.vue duplicate overlay control
+frontend/src/components/surveyor/MarkerTypePicker.vue NEW · marker-first placement
 ```
 
 Do not touch other files unless a named anchor no longer exists.
+
+---
+
+# 1A. P0 — SURVEYOR MUST OPEN AT HOME + NEARBY FIELD CONTEXT
+
+Current:
+`frontend/src/views/SurveyorView.vue:1250-1258`
+
+The map starts from a hardcoded center/zoom and does not fit itself to actual home + nearby Surveyor objects.
+
+Do not add another backend endpoint.
+
+Use existing:
+```text
+GET /api/search-config
+home_latitude
+home_longitude
+```
+
+Add:
+```js
+const searchConfig = ref(null)
+let initialViewportApplied = false
+```
+
+Load `/api/search-config` before/while initializing Surveyor.
+
+Replace the hardcoded startup coordinates with `searchConfig.home_longitude/home_latitude` when available.
+
+After `loadObjects()` has populated local Surveyor objects, run exactly once:
+
+```js
+fitInitialHomeContext()
+```
+
+Behavior:
+1. home is the required anchor;
+2. collect valid point coordinates or object centroids;
+3. calculate distance from home;
+4. keep the nearest **up to 8 objects within 3 miles**;
+5. fit bounds to home + those objects;
+6. padding ~64 desktop / ~42 mobile;
+7. `maxZoom: 13.5`;
+8. if no nearby objects, center home at ~13.2.
+
+Do not include distant candidates in initial fit. A far report must not zoom the field map out to county scale.
+
+Explicit navigation intent overrides the home fit:
+- `?object=`;
+- active location focus;
+- photo GPS focus;
+- a deliberate session/map focus.
+
+Add a subtle permanent HOME point using a dedicated `survey-home` GeoJSON source/layer. Do not overload temporary `location-focus`.
+
+The user can pan/zoom normally after initial fit. Do not continuously snap back home.
+
+---
+
+# 1B. P0 — "LAYERS" → ONE SINGLE "OVERLAYS" CONTROL
+
+Current duplication is real:
+
+```text
+frontend/src/components/surveyor/SearchSessionBar.vue
+  emits/shows a Layers button
+
+frontend/src/views/SurveyorView.vue:1477
+  also renders a floating Layers button
+```
+
+Keep only the floating map control.
+
+Remove `layers` emit/button from `SearchSessionBar.vue`.
+
+Rename user-facing map control:
+```text
+Layers → Overlays
+```
+
+Keep internal names such as `layerSettings` / `LayerDrawer.vue`; do not waste tokens renaming architecture.
+
+In `LayerDrawer.vue` user-facing copy becomes:
+
+```text
+eyebrow: OVERLAYS
+heading: Map context
+aria-label: Map overlays
+```
+
+Sections:
+- YOUR SEARCH
+- LAND + WATER
+- WILDLIFE OBSERVATIONS
+
+The purpose is: **what extra context should be drawn over the field map?**
+
+Do not show "Layers" anywhere else on Surveyor.
+
+---
+
+# 1C. P0 — SURFACE THE EXISTING NIGHTLY READINESS SYSTEM
+
+The system already exists. Do not rebuild it.
+
+Existing implementation:
+
+```text
+frontend/src/components/surveyor/OutingPreflight.vue
+backend/app/surveyor/outings.py
+```
+
+It already supports:
+- Prep / Setup;
+- Packing List;
+- Gameplan;
+- editable titles/details;
+- required vs optional;
+- skip/restore;
+- reordering;
+- dependencies;
+- "Used by N items";
+- "Needs setup";
+- shared blockers;
+- readiness counts;
+- reuse last outing;
+- continue unfinished;
+- linked candidate/map/task context.
+
+Current UX defect:
+it is mostly discoverable only by pressing **Start search**.
+
+## Add a persistent Tonight readiness bar
+
+In `SurveyorView.vue`, directly below the top bar and before the map workspace, render a compact clickable `night-readiness-bar`.
+
+When no draft/current plan:
+```text
+TONIGHT
+Build tonight's checklist
+Prep · pack · gameplan
+[Plan tonight]
+```
+
+When plan exists and not ready:
+```text
+TONIGHT · 3 things left
+2 setup · 1 unpacked · 4 stops
+[Open plan]
+```
+
+When ready:
+```text
+TONIGHT · READY
+6 packed · 4 stops
+[Review plan]
+```
+
+Click opens the existing `OutingPreflight` by setting `preflightOpen=true`.
+
+Use `outingPlan.readiness`; do not duplicate readiness calculations client-side beyond formatting.
+
+During an active search, the existing OutingPreflight mission strip remains the primary "NEXT" surface. Avoid showing two competing readiness bars.
+
+## Dependency visibility
+
+The full plan must continue to visibly show:
+- each gameplan/packing item's dependency summary;
+- pending dependency warning;
+- shared prep item "Used by N items";
+- add/link setup dependency UI.
+
+Do not hide these under another advanced menu.
+
+## Mental-load principle
+
+The normal nightly flow should now read:
+
+```text
+TONIGHT → finish setup/packing → review gameplan → START SEARCH → NEXT stop
+```
+
+The user should not need to remember where the readiness checklist lives.
+
+---
+
+# 1D. P1 — MAKE EACH PAGE SAY WHAT JOB IT DOES
+
+The app currently has features but weak "what should I do now?" hierarchy.
+
+## Candidates page
+
+Current:
+`frontend/src/views/CandidatesView.vue:523-532`
+
+Keep it compact, but change the lede to an action sequence:
+
+```text
+Review #1 first → classify it → open anything promising → add field follow-up to Tonight.
+```
+
+Add a tiny `review-flow-strip` under the header:
+
+```text
+1 Review new reports   2 Mark Possible / Hold / Not Archie   3 Send field work to Tonight
+```
+
+This is instructional UI, not a modal/tutorial.
+
+Do not add another dashboard card.
+
+## Surveyor page
+
+Current header:
+`SurveyorView.vue:1468+`
+
+Keep the Surveyor name but add one compact field-flow line:
+
+```text
+Plan tonight → map what matters → start search → log what you find
+```
+
+The readiness bar immediately below it provides the actual next action.
+
+No onboarding carousel.
+No forced walkthrough.
+No repeated explanatory paragraphs.
+
+---
+
+# 1E. P0 — MARKER/PIN FLOW MUST BE TYPE-FIRST
+
+Current behavior:
+- user clicks Pin;
+- user taps map;
+- draft opens;
+- type selection happens too late.
+
+There is also a correctness risk:
+`SurveyorView.vue:705-707` currently uses the shared editing ref `subtype.value` for new pins, so a previously selected object's subtype can leak into a new marker draft.
+
+## Rename user-facing "Pin" to "Marker"
+
+Keep stored object type `pin`. Only UI wording changes.
+
+`SurveyorToolbar.vue`:
+```text
+Pin → Marker
+```
+
+Mobile:
+```text
+Pin → Marker
+```
+
+## Add
+`frontend/src/components/surveyor/MarkerTypePicker.vue`
+
+Use existing:
+```js
+PIN_GROUPS
+OBJECT_TYPES
+```
+
+Do not create another marker taxonomy.
+
+Picker requirements:
+- opens immediately when user taps/clicks Marker;
+- grouped Search / Environment / Wildlife / Evidence;
+- large touch targets;
+- common label + icon/color indicator;
+- close/cancel;
+- mobile = bottom sheet;
+- desktop = compact popover/panel.
+
+Suggested top/common choices may be shown first:
+- Sighting
+- Possible sighting
+- Outdoor cat
+- Coyote
+- Fox
+- Dog lives here
+- Food station
+- Scent item
+
+But all existing `PIN_GROUPS` types remain available.
+
+## New state
+
+In `SurveyorView.vue` add:
+
+```js
+const markerPickerOpen = ref(false)
+const pendingMarkerType = ref(null)
+```
+
+Do **not** reuse the object editor's `subtype` ref.
+
+## Activation flow
+
+```text
+tap Marker
+→ marker picker opens
+→ choose "Outdoor cat"
+→ active tool becomes marker placement
+→ map shows "OUTDOOR CAT · Tap map to place"
+→ cursor/placement visual indicates placement mode
+→ tap map
+→ draft opens already typed Outdoor cat
+```
+
+`activateTool('pin')` should open the picker instead of immediately entering placement mode.
+
+After a marker type is chosen:
+- set `pendingMarkerType`;
+- set `activeTool='pin'`;
+- close picker;
+- clear competing selected inspectors.
+
+## Placement cue
+
+While `activeTool === 'pin'` and `pendingMarkerType`:
+- cursor = crosshair on desktop;
+- show small colored placement badge using the type color/icon;
+- text: `<TYPE> · Tap map to place`;
+- include a small `Change` action that reopens MarkerTypePicker.
+
+No heavy ghost rendering is required.
+
+Optional tiny tap feedback:
+show a brief marker pulse at the clicked coordinate before the draft sheet appears if trivial.
+
+## Map click
+
+Change:
+```js
+createPin(coordinates)
+```
+
+to:
+```js
+createPin(coordinates, pendingMarkerType.value)
+```
+
+and:
+
+```js
+function createPin(coordinates, markerType) {
+  if (!markerType) return
+  draftObject.value = {
+    kind: 'pin',
+    geometry: { type:'Point', coordinates },
+    subtype: markerType
+  }
+}
+```
+
+The DraftObjectSheet may still allow changing the type before save, but it should open on the already chosen type.
+
+After save:
+- clear `pendingMarkerType`;
+- return to Select.
+
+After cancel:
+- return to Select and clear pending type.
+
+Long-press/right-click QuickAdd remains available as the location-first shortcut. That is a separate expert shortcut and does not define the normal Marker workflow.
+
+---
+
+# 1F. P0 — WILDLIFE/WETLANDS "UNAVAILABLE" IS A UI STATE BUG
+
+Current defaults:
+`SurveyorView.vue:48`
+```text
+wetlands:false
+wildlife:false
+all wildlifeSpecies:false
+```
+
+Current controller initializes/uses `unavailable` for these normal inactive states.
+
+So today's UI does **not** establish that USFWS or iNaturalist are actually down.
+
+Apply §4 status semantics strictly:
+
+Wetlands default-off:
+```text
+Wetlands                     Off
+```
+
+Wildlife default-off:
+```text
+Wildlife observations        Off
+```
+
+Wildlife enabled but no taxa:
+```text
+Wildlife observations        Choose species
+```
+
+Wildlife enabled below zoom 9:
+```text
+Wildlife observations        Zoom in
+```
+
+Only real request/config failure may say:
+```text
+Unavailable
+```
+
+Do not turn wetlands or wildlife on by default merely to avoid the word unavailable.
 
 ---
 
@@ -628,23 +1043,27 @@ One portrait pass: Layers + environment inspector + QuickAdd usable without over
 
 # 19. IMPLEMENTATION ORDER
 
-1. stale-setting closure + network refresh discipline;
-2. status semantics;
-3. layer order;
-4. bbox bucket correctness;
-5. hydro naming/pagination/partial failure;
-6. wildlife pagination/clustering;
-7. base health + retry;
-8. inspector exclusivity + safe marker action;
-9. boundary inspection;
-10. centralized zone types + picker fix;
-11. candidate provenance cleanup;
-12. pointer/mobile polish;
-13. focused backend tests;
-14. one frontend build if dependencies already exist;
-15. manual acceptance;
-16. commit/push `main`;
-17. deploy per `AGENTS.md` only if real DietPi access exists.
+1. single Overlays control + truthful off/zoom/species statuses;
+2. load search config + home/nearby initial viewport;
+3. surface Tonight readiness bar using existing outing plan;
+4. Marker type-first picker + placement cue + stale-subtype fix;
+5. Candidates/Surveyor one-line workflow orientation;
+6. stale-setting closure + network refresh discipline;
+7. environment layer order;
+8. bbox bucket correctness;
+9. hydro naming/pagination/partial failure;
+10. wildlife pagination/clustering;
+11. base health + retry;
+12. inspector exclusivity + safe environmental marker action;
+13. boundary inspection;
+14. centralized zone types + picker fix;
+15. candidate provenance cleanup;
+16. pointer/mobile polish;
+17. focused backend tests;
+18. one frontend build if dependencies already exist;
+19. manual acceptance;
+20. commit/push `main`;
+21. deploy per `AGENTS.md` only if real DietPi access exists.
 
 ---
 
@@ -667,6 +1086,15 @@ The disabled `Measure · coming soon` control is not part of 8B.
 
 # 21. DONE WHEN
 
+- Surveyor opens framed around home + nearby local field markers;
+- HOME is visually identifiable without dominating the map;
+- only one user-facing Overlays control exists;
+- wetlands/wildlife show Off/Choose species/Zoom in instead of false Unavailable states;
+- Tonight readiness is visible before starting a search and opens the existing editable Prep/Packing/Gameplan plan;
+- dependency blockers remain visible and editable in the plan;
+- Candidates and Surveyor expose a compact obvious workflow;
+- Marker placement is type-first and never inherits a stale selected-object subtype;
+- selected marker type is visibly indicated while choosing the map location;
 - pan/zoom always respects current environment toggles;
 - non-environment toggles do not refetch providers;
 - off/zoom/select-species/degraded states are truthful;
