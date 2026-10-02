@@ -531,7 +531,7 @@ select { min-height: 42px; border: 1px solid var(--line-strong); border-radius: 
 .surveyor-tools button.active { border-color: #bdc8bc; background: #e7ece3; color: #1e392d; }
 .surveyor-tools button:disabled { opacity: .42; }
 .surveyor-map-shell { position: relative; min-width: 0; min-height: 0; }
-.surveyor-map { position: absolute; inset: 0; }
+.surveyor-map-shell > .surveyor-map { position: absolute; inset: 0; }
 .map-health-badge { position: absolute; z-index: 7; top: 62px; left: 10px; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 20px); padding: 7px 10px; border: 1px solid #b8a276; border-radius: 9px; background: rgba(250,249,242,.96); color: #58492f; font-size: .72rem; font-weight: 800; box-shadow: 0 2px 8px #17282020; }
 .map-health-badge.degraded { border-color: #c28a46; color: #744b20; }
 .map-health-badge.failed { border-color: #a75a4c; color: #873e35; }
