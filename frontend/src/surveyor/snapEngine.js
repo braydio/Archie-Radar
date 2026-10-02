@@ -36,15 +36,22 @@ export function createMapFeatureSnapper(map, getSettings, setTarget, threshold =
     let features = []
     try { features = map.queryRenderedFeatures(bounds) } catch { setTarget(null); return undefined }
     let best = null
-    const accept = (candidate, coordinate, kind) => {
-      if (candidate.distance <= threshold && (!best || candidate.distance < best.distance)) best = { ...candidate, coordinate, kind }
+    const accept = (candidate, coordinate, kind, authoritativeHydro = false) => {
+      if (candidate.distance > threshold) return
+      const preferred = !best || (authoritativeHydro && !best.authoritativeHydro && candidate.distance <= best.distance + 4) ||
+        (!authoritativeHydro && best.authoritativeHydro && candidate.distance < best.distance - 4) ||
+        (authoritativeHydro === best?.authoritativeHydro && candidate.distance < best.distance)
+      if (preferred) {
+        best = { ...candidate, coordinate, kind, authoritativeHydro }
+      }
     }
     for (const feature of features) {
       const layerName = `${feature.layer?.id || ''} ${feature.sourceLayer || feature.layer?.['source-layer'] || ''}`.toLowerCase()
       const isUserGeometry = feature.source === 'surveyor-objects'
       const isRoad = /road|transport|highway|street/.test(layerName)
       const isTrail = /trail|path|track/.test(layerName)
-      const isWater = /water|stream|river|canal|drain/.test(layerName)
+      const isWater = /water|stream|river|canal|drain|hydro/.test(layerName)
+      const isAuthoritativeHydro = layerName.includes('survey-hydro')
       const objectType = feature.properties?.object_type
       const isCamera = objectType === 'trail_camera'
       const isZone = objectType === 'zone' || feature.geometry?.type === 'Polygon'
@@ -55,7 +62,7 @@ export function createMapFeatureSnapper(map, getSettings, setTarget, threshold =
       if (feature.geometry?.type === 'Point' || feature.geometry?.type === 'MultiPoint') {
         for (const coordinate of coords) {
           const screen = map.project(coordinate)
-          accept({ distance: Math.hypot(screen.x - screenPoint[0], screen.y - screenPoint[1]) }, coordinate, kind)
+          accept({ distance: Math.hypot(screen.x - screenPoint[0], screen.y - screenPoint[1]) }, coordinate, kind, isAuthoritativeHydro)
         }
         continue
       }
@@ -63,7 +70,7 @@ export function createMapFeatureSnapper(map, getSettings, setTarget, threshold =
         const a = map.project(start), b = map.project(end)
         const nearest = segmentNearest(screenPoint, [a.x, a.y], [b.x, b.y])
         const coordinate = map.unproject(nearest.coordinate)
-        accept({ distance: nearest.distance }, [coordinate.lng, coordinate.lat], kind)
+        accept({ distance: nearest.distance }, [coordinate.lng, coordinate.lat], kind, isAuthoritativeHydro)
       }
     }
     const snappedScreen = best ? map.project(best.coordinate) : null

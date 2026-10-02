@@ -351,9 +351,11 @@ from .candidates.router import router as candidates_detail_router
 from .surveyor.access import router as surveyor_access_router
 from .surveyor.tasks import router as surveyor_tasks_router
 from .surveyor.outings import router as surveyor_outings_router
+from .surveyor.environment import router as surveyor_environment_router
 app.include_router(surveyor_access_router)
 app.include_router(surveyor_tasks_router)
 app.include_router(surveyor_outings_router)
+app.include_router(surveyor_environment_router)
 app.include_router(places_router)
 app.include_router(candidates_detail_router)
 app.include_router(facebook_router)
