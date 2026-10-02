@@ -78,7 +78,7 @@ export function createEnvironmentLayers({ map, api, getTimeline, onStatus, onSel
     clearTimeout(timer)
     controller?.abort()
     timer = setTimeout(async () => {
-      if (destroyed || !map.isStyleLoaded()) return
+      if (destroyed || !installed || !map.getSource('survey-hydro-streams')) return
       controller?.abort(); controller = new AbortController()
       const signal = controller.signal, bounds = map.getBounds(), zoom = map.getZoom()
       const params = new URLSearchParams({ west: bounds.getWest().toFixed(4), south: bounds.getSouth().toFixed(4), east: bounds.getEast().toFixed(4), north: bounds.getNorth().toFixed(4) })
