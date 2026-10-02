@@ -2,257 +2,207 @@
 
 ## Archie Radar v1 · Slice 8
 ### Surveyor Geographic Context + Environmental Intelligence
+### MINIMUM-TOKEN IMPLEMENTATION PACKET
 
-**Base:** `main` at `edc09f868e80dee0ee8599781653702e43c17875`
-
-This is the next Surveyor feature slice after the Slice 7B hardening work already landed on `main`.
-
-The Surveyor architecture is already substantially aligned with the product direction: full-page map, TerraDraw geometry, object types, search sessions, trail cameras with placement history, sight cones, snap support, corkboard-style links, access records, evidence/media, timeline, journal, outing planning, and candidate integration are present. Preserve those systems.
-
-The primary current failure is that the **Surveyor page does not present useful geographic context**. The map may render as an empty/featureless canvas even though the user needs to read woodland, developed areas, roads, waterways, county/state context, and environmental/wildlife observations before adding any custom search objects.
-
-Do not rebuild Surveyor. Make the existing Surveyor map a dependable field GIS with a cat-oriented visual hierarchy.
+**Code anchors verified against:** `main@bf04e47af90d6411009316b1ad290d070f0982dc`
+**Target branch:** `main`
+**Goal:** make Surveyor show useful cat-search geography immediately, then add bounded environmental/wildlife overlays without disturbing the existing field-journal systems.
 
 ---
 
-# 0. REPOSITORY / BRANCH PRECHECK
+# 0. TOKEN-BURN RULES — FOLLOW THESE FIRST
 
-Repository instructions in `AGENTS.md` are authoritative:
+Do **not** rediscover the repository.
 
-- work from latest `main`;
-- commit and push every completed repository change to `main`;
-- deploy to DietPi only when the current environment genuinely has SSH/Tailscale access;
-- do not destroy persistent volumes or secrets.
+Read only:
 
-Important repository state observed when this packet was written:
+1. `AGENTS.md`
+2. this file
+3. the exact files in §2
 
-- GitHub repository default branch is currently `feature/surveyor-v1`;
-- that branch is an ancestor of `main`, with no commits ahead and roughly 49 commits behind;
-- `AGENTS.md` correctly states that production work/deployment uses `main`.
+Do not run repo-wide architecture searches unless a named anchor below is missing.
 
-**Do not implement this packet on `feature/surveyor-v1`.**
+Do not re-research provider APIs. Exact provider endpoints/parameters are supplied in §6.
 
-If the execution environment has permission to change repository settings, set the GitHub default branch to `main`. If not, report that as a repository-admin follow-up, not an implementation blocker.
+Do not add dependencies. Existing stack already has:
+- backend: `httpx`, FastAPI, Shapely, pyproj
+- frontend: MapLibre GL + TerraDraw
 
----
+Do not change these unless a real blocker is proven:
+- `backend/app/models.py`
+- `backend/app/db.py`
+- `backend/app/settings.py`
+- `backend/pyproject.toml`
+- `frontend/package.json`
+- `frontend/src/surveyor/objectTypes.js`
+- `frontend/src/components/surveyor/SurveyTimeline.vue`
 
-# 1. PRODUCT LOCK
+No database migration is required for this slice.
 
-Surveyor is the field-work surface.
+Do not run `npm install`.
+Do not run the full backend suite repeatedly.
+Implement once, run the focused checks in §12 once near the end, fix only failures caused by this slice.
 
-Navigation remains:
-
-```text
-Candidates | Surveyor | Journal
-```
-
-Responsibilities:
-
-- **Candidates**: Could this report be Archie?
-- **Surveyor**: What does this landscape look like, what do we know about it, and where should we search next?
-- **Journal**: What did we actually do and observe?
-
-The default Surveyor map should answer a missing-cat field question before the user creates any custom object.
-
-It should read more like:
-
-```text
-woodland edge
-creek / drainage
-residential pocket
-major road barrier
-wetland / low ground
-search coverage
-camera coverage
-wildlife observations
-```
-
-and less like a generic consumer street map.
-
-Do not add restaurant/shop/POI clutter.
+If an upstream provider is temporarily unavailable, implement the specified degraded state and continue. Do not spend tokens diagnosing the provider beyond one bounded request.
 
 ---
 
-# 2. CURRENT IMPLEMENTATION TO PRESERVE
+# 1. CURRENT STATE — PRESERVE IT
 
-Review current code before editing.
-
-Core files already in place:
-
-```text
-frontend/src/views/SurveyorView.vue
-frontend/src/surveyor/catMapStyle.js
-frontend/src/surveyor/snapEngine.js
-frontend/src/surveyor/objectTypes.js
-frontend/src/components/surveyor/LayerDrawer.vue
-frontend/src/components/surveyor/SurveyTimeline.vue
-frontend/src/components/surveyor/SurveyorToolbar.vue
-frontend/src/components/surveyor/DraftObjectSheet.vue
-frontend/src/components/surveyor/ObjectInspector.vue
-frontend/src/components/surveyor/SearchSessionBar.vue
-frontend/src/views/JournalView.vue
-backend/app/models.py
-backend/app/main.py
-backend/app/surveyor/*
-```
-
-Already implemented and **not to be rebuilt**:
-
-- MapLibre Surveyor map;
-- TerraDraw select/polygon/line modes;
-- optional snapping to roads, trails, waterways, pins, zone boundaries, cameras;
-- trail-camera current placements;
-- camera heading / FOV / range;
-- camera cones;
-- camera placement history;
-- object links / corkboard connections;
-- searched / needs-search / wildlife / access-style custom objects;
+Surveyor already has:
+- full-page MapLibre map;
+- TerraDraw lines/polygons/select;
+- road/trail/water/object snapping;
+- trail cameras + cones + placement history;
+- zones;
+- object/corkboard links;
 - search sessions;
-- evidence/media capture;
+- evidence/media;
 - property/access records;
 - timeline;
-- Surveyor events/journal;
+- journal;
+- outing/preflight;
+- candidate layer;
 - undo/redo;
-- candidate report layer;
-- field toolbar;
-- mobile field controls;
-- outing/preflight system.
+- mobile field controls.
 
-This slice should close the environmental/geographic gap and integrate it with these existing tools.
+Do **not** rebuild those systems.
 
----
-
-# 3. P0: THE MAP MUST SHOW GEOGRAPHY ON FIRST LOAD
-
-Current Surveyor initialization uses OpenFreeMap Positron and calls `applyCatMapStyle(map)`, but the live Surveyor is currently being observed as having little or no useful geographic detail.
-
-Fix that first.
-
-## Required default visible geography
-
-Without opening Layers, the map must show:
-
-- roads with a clear road-class hierarchy;
-- place / road labels at sensible zooms;
-- streams and rivers;
-- ponds / lakes;
-- woodland / forest context;
-- developed / residential context;
-- county boundaries, subtle;
-- state boundary, slightly stronger;
-- home/reference context when applicable.
-
-The user must not need to enable Annual NLCD just to see usable geography.
-
-## Base-style health
-
-Do not silently show an empty canvas when the base style or tile source fails.
-
-Add a lightweight Surveyor map-health state:
-
-```text
-loading
-ready
-degraded
-failed
-```
-
-At minimum detect:
-
-- MapLibre style loaded;
-- expected road layer family exists;
-- expected water layer family exists;
-- expected place/label family exists.
-
-If the OpenFreeMap style loads but expected semantic layers cannot be found, show:
-
-`Base geography degraded · Retry`
-
-If the style request fails, show:
-
-`Base geography unavailable · Retry`
-
-The user-created Surveyor objects must remain usable even if an external environmental layer fails.
-
-Do not block the whole Surveyor workspace waiting for county/wetland/wildlife providers.
+P0 defect: the live Surveyor page currently does not show enough useful geographic detail. Fix that first.
 
 ---
 
-# 4. REPLACE REGEX-ONLY BASEMAP STYLING WITH A HARDENED CAT-VIEW STYLE PASS
+# 2. EXACT FILE SCOPE
 
-Current `catMapStyle.js` is a useful first pass but relies heavily on regular expressions over whatever layers happen to exist in the third-party style.
+## Modify only these existing files
 
-Keep compatibility with OpenFreeMap, but harden the contract.
+| File | Current anchor / lines | Required work |
+|---|---:|---|
+| `frontend/src/views/SurveyorView.vue` | imports 1–38; defaults 42–46; visibility 136+; map init 1244–1278; map shell 1450–1451 | wire environment controller, health, inspector, legend, defaults |
+| `frontend/src/surveyor/catMapStyle.js` | **entire file 1–37** | replace with hardened cat-view style + base-style audit |
+| `frontend/src/surveyor/snapEngine.js` | 45–53 | recognize/prefer authoritative hydrography |
+| `frontend/src/components/surveyor/LayerDrawer.vue` | **entire file 1–14** | replace placeholder landscape/wildlife controls |
+| `frontend/src/style.css` | Surveyor map 516–537; timeline 602+; append new selectors near Surveyor block | geography health, legend, environmental inspector, mobile |
+| `backend/app/main.py` | router imports/includes 348–357 | two-line environment-router registration |
 
-Prefer:
+## Add these files
 
 ```text
-frontend/src/surveyor/catMapStyle.js
+backend/app/surveyor/environment.py
 frontend/src/surveyor/environmentLayers.js
-frontend/src/surveyor/mapHealth.js
+frontend/src/components/surveyor/EnvironmentalInspector.vue
+frontend/src/components/surveyor/MapLegend.vue
+backend/tests/test_surveyor_environment.py
 ```
 
-or an equivalent small separation.
+That is the complete expected file set.
 
-## Visual hierarchy
+If implementation requires touching anything else, stop first and verify it is truly necessary.
 
-### Woodland / forest
-- strongest non-user land context;
-- muted natural green;
-- enough contrast to identify connected cover and edges;
-- do not make forest so opaque that user zones disappear.
+---
 
-### Developed / residential
-- warm neutral;
-- visually distinct from forest/open land;
-- buildings may appear only at close zoom.
+# 3. P0 BASE-MAP FIX
 
-### Open grass / field
-- subdued warm-green/straw tone.
+## 3.1 Replace `catMapStyle.js`
 
-### Water
-- visually stronger than the generic basemap;
-- distinguish line water from polygon water where possible;
-- streams/creeks must remain readable beneath custom objects.
+Current file: `frontend/src/surveyor/catMapStyle.js:1-37`.
 
-### Roads
-Use distinct line weights/tones for:
-- motorway / highway;
+Do not invent styling logic from scratch.
+
+Reuse the better existing styling rules already present in:
+
+`frontend/src/components/SearchMap.vue:188-252`
+
+Copy/adapt those rules into `catMapStyle.js` so Surveyor gets:
+
+- warm neutral background;
+- water fills + water lines;
+- woodland/forest/grass fills;
+- developed/building context;
+- motorway/trunk;
 - primary;
 - secondary;
-- local/residential;
-- path/trail where base source exposes it.
+- local/tertiary roads;
+- place + road labels;
+- hidden POI/shop/transit/address clutter.
 
-Large roads should read as possible barriers.
-Residential roads should be quieter.
+Export exactly:
 
-### Labels
-Keep:
-- places;
-- road names;
-- water names;
-- county labels at appropriate zoom.
+```js
+export function applyCatMapStyle(map) { ... }
+export function auditCatMapStyle(map) { ... }
+export const CAT_MAP_PALETTE = ...
+```
 
-Suppress:
-- shops;
-- restaurants;
-- transit stops;
-- POIs;
-- address numbers;
-- commercial labels that do not assist field search.
-
----
-
-# 5. DEFAULT NATURAL CONTEXT
-
-Current `defaultLayers` has `landcover: false`.
-
-Change the default experience so a first-time Surveyor user gets environmental context automatically.
-
-Recommended default:
+`auditCatMapStyle(map)` returns:
 
 ```js
 {
+  roads: boolean,
+  water: boolean,
+  labels: boolean,
+  natural: boolean,
+  status: 'ready' | 'degraded'
+}
+```
+
+Detection is by layer id + `source-layer`, same classification strategy already used in SearchMap.
+
+Do not require every category for `ready`; required minimum is:
+- roads;
+- water;
+- labels.
+
+If one is absent: `degraded`.
+
+## 3.2 Surveyor map health
+
+In `SurveyorView.vue` near refs after current line 48, add:
+
+```js
+const mapHealth = ref({ status: 'loading', roads: false, water: false, labels: false, natural: false })
+const environmentStatus = ref({})
+const selectedEnvironment = ref(null)
+let environmentController = null
+```
+
+At current `map.on('load')` around line 1255:
+
+```js
+applyCatMapStyle(map)
+mapHealth.value = auditCatMapStyle(map)
+```
+
+Also:
+
+```js
+map.on('error', () => {
+  if (!map?.isStyleLoaded()) mapHealth.value = { ...mapHealth.value, status: 'failed' }
+})
+```
+
+Render one compact badge inside `.surveyor-map-shell`:
+
+- loading: `Loading geography…`
+- degraded: `Base geography degraded · Retry`
+- failed: `Base geography unavailable · Retry`
+
+Retry may call `map.setStyle('https://tiles.openfreemap.org/styles/positron')`, then re-install custom/environment layers on `style.load`.
+
+Never hide the user's local Surveyor objects because an external geography source failed.
+
+---
+
+# 4. DEFAULT LAYER SETTINGS
+
+Current:
+
+`frontend/src/views/SurveyorView.vue:45`
+
+Replace:
+
+```js
+const defaultLayers = {
   objects: true,
   links: true,
   cameras: true,
@@ -260,1112 +210,1021 @@ Recommended default:
   candidates: true,
   landcover: true,
   hydrography: true,
-  wetlands: false,
   boundaries: true,
-  wildlife: false
+  wetlands: false,
+  wildlife: false,
+  wildlifeSpecies: {
+    coyote: false,
+    red_fox: false,
+    gray_fox: false,
+    bobcat: false,
+    raccoon: false,
+    deer: false
+  }
 }
 ```
 
-Existing users with saved layer preferences should retain explicit choices where possible.
+Keep the current merge behavior at line 46 so old localStorage preferences survive while new keys receive defaults.
 
-Do not let a legacy localStorage object permanently omit newly introduced defaults. Merge stored values onto defaults.
+Do not make wetlands or wildlife default-on.
 
 ---
 
-# 6. ANNUAL NLCD LAND COVER
+# 5. FRONTEND ENVIRONMENT CONTROLLER
 
-The current Surveyor already contains a raster Annual NLCD WMS source.
+Add:
 
-Harden it rather than replacing it blindly.
+`frontend/src/surveyor/environmentLayers.js`
 
-Authoritative source:
-- USGS / MRLC Annual NLCD;
-- MRLC publishes OGC WMS map services.
+This file owns external geography so `SurveyorView.vue` does not grow another 400 lines.
 
-Requirements:
+Export one factory:
 
-- do not hardcode a year without a graceful fallback;
-- prefer a configurable/default documented year;
-- if the configured year fails, degrade without hiding the base geography;
-- expose source/year in the Layer drawer;
-- opacity approximately 0.18–0.32, tuned so roads/water and Surveyor geometry remain legible;
-- keep land-cover provenance visible;
-- do not call NLCD a real-time habitat observation.
-
-If practical, add a compact legend mapping the displayed broad classes to:
-
-```text
-woodland
-open/grass
-developed
-wetland
-water
+```js
+export function createEnvironmentLayers({
+  map,
+  api,
+  getTimeline,
+  onStatus,
+  onSelect
+}) {
+  return {
+    install,
+    applyVisibility,
+    refreshViewport,
+    retry,
+    destroy
+  }
+}
 ```
 
-Do not reproduce the full NLCD legend unless the user opens environmental details.
+## Responsibilities
+
+### install(settings)
+1. install Annual NLCD raster;
+2. install NWI raster;
+3. install empty GeoJSON sources/layers for:
+   - `survey-hydro-streams`
+   - `survey-hydro-waterbodies`
+   - `survey-wildlife`
+4. install Census boundaries using the already-working SearchMap code (§7);
+5. register map click handlers for environmental layers;
+6. register debounced `moveend`;
+7. call `applyVisibility(settings)`;
+8. call `refreshViewport(settings)`.
+
+### applyVisibility(settings)
+Set MapLibre visibility for:
+- annual landcover;
+- hydrography;
+- boundaries;
+- wetlands;
+- wildlife.
+
+If wildlife is disabled, do not issue iNaturalist requests.
+
+### refreshViewport(settings)
+Debounce 350 ms.
+
+Cancel stale fetches with one `AbortController`.
+
+Only request:
+- hydrography when `settings.hydrography`;
+- wildlife when `settings.wildlife` and at least one species is selected.
+
+Use current map bounds.
+
+Do not request hydrography below zoom 8.
+Do not request wildlife below zoom 9.
+Do not request wetlands data in JS; it is a raster layer.
+
+### retry()
+Retry environment requests without recreating the whole Vue view.
+
+### destroy()
+Abort active requests and remove registered map event handlers.
 
 ---
 
-# 7. NC HYDROGRAPHY
+# 6. PROVIDERS — EXACT URLS / REQUEST SHAPES
 
-Add a first-class hydrography provider.
+No provider research is required.
 
-Preferred source for North Carolina:
-**NC OneMap Major Hydrography**.
+## 6.1 NC OneMap hydrography
 
-At minimum use:
-- streams/rivers;
-- waterbodies.
-
-Do not fetch statewide GeoJSON into the browser.
-
-Implement bbox-scoped requests using the current map bounds through a backend provider/proxy.
-
-Suggested backend surface:
-
+Streams:
 ```text
-GET /api/surveyor/environment/hydrography
-  ?west=
-  &south=
-  &east=
-  &north=
+https://services.nconemap.gov/secure/rest/services/NC1Map_Hydrography/FeatureServer/1/query
 ```
 
-Return normalized GeoJSON.
-
-Server responsibilities:
-
-- query only current/padded viewport;
-- request output coordinates in WGS84 / EPSG:4326 when supported;
-- cache by rounded bbox + provider;
-- short timeout;
-- bounded result count;
-- return source/provenance metadata;
-- never block Surveyor startup on provider failure.
-
-Frontend:
-
-- line layer for streams/rivers;
-- fill layer for waterbodies;
-- labels when names are available and zoom is appropriate;
-- minimum zoom/line simplification as needed for performance.
-
-The snap engine must treat this hydrography layer as `waterway` so line/polygon drawing can snap to it.
-
----
-
-# 8. WETLANDS
-
-Add an optional wetlands environmental layer.
-
-Preferred authoritative source:
-**U.S. Fish & Wildlife Service National Wetlands Inventory (NWI)**.
-
-NWI exposes REST and WMS services and is updated independently of Archie Radar.
-
-For Slice 8, use either:
-
-1. a low-opacity WMS raster layer for broad field context, or
-2. bbox-scoped normalized GeoJSON if the chosen REST layer is performant enough locally.
-
-Default: **off**.
-
-Reasons:
-- valuable in field analysis;
-- can become visually noisy;
-- not required to render core geography.
-
-Layer label:
-
-`Wetlands · USFWS NWI`
-
-Never label NWI as current water depth or guaranteed passability.
-
----
-
-# 9. COUNTY + STATE CONTEXT
-
-Add non-blocking boundaries directly to Surveyor.
-
-Use current U.S. Census TIGERweb state/county services.
-
-Visual treatment:
-
-- county line: thin, low-opacity, dashed;
-- state line: slightly stronger;
-- county labels: subtle and zoom-gated;
-- no full political-map styling.
-
-Boundaries load asynchronously.
-
-Timeout/failure must result in a quiet disabled/degraded indicator, not an endless `Loading boundaries…` state.
-
-Cache returned GeoJSON.
-
-Only fetch the region needed around the current search area, not the whole country.
-
----
-
-# 10. WILDLIFE OBSERVATIONS
-
-Add the first real external wildlife provider.
-
-Preferred provider:
-**iNaturalist public observations API**.
-
-This is an observation layer, not an inferred predator-risk engine.
-
-Initial species set:
-
+Waterbodies:
 ```text
-coyote
-red fox
-gray fox
-bobcat
-raccoon
-white-tailed deer
+https://services.nconemap.gov/secure/rest/services/NC1Map_Hydrography/FeatureServer/2/query
 ```
 
-Store species configuration separately from rendering.
+Both support GeoJSON.
 
-Recommended file:
+Backend query parameters:
+
+```text
+where=1=1
+geometry=<west>,<south>,<east>,<north>
+geometryType=esriGeometryEnvelope
+inSR=4326
+outSR=4326
+spatialRel=esriSpatialRelIntersects
+outFields=STREAM_NAM
+returnGeometry=true
+f=geojson
+resultRecordCount=2000
+```
+
+Normalize properties to:
+
+```json
+{
+  "provider": "NC OneMap",
+  "feature_type": "stream" | "waterbody",
+  "name": "Morgan Creek"
+}
+```
+
+## 6.2 iNaturalist
+
+Endpoint:
+
+```text
+https://api.inaturalist.org/v1/observations
+```
+
+Use one request per **enabled species**, concurrently, maximum 6.
+
+Scientific-name config:
+
+```python
+WILDLIFE_TAXA = {
+    "coyote": "Canis latrans",
+    "red_fox": "Vulpes vulpes",
+    "gray_fox": "Urocyon cinereoargenteus",
+    "bobcat": "Lynx rufus",
+    "raccoon": "Procyon lotor",
+    "deer": "Odocoileus virginianus",
+}
+```
+
+Params:
+
+```text
+taxon_name=<scientific name>
+swlat=<south>
+swlng=<west>
+nelat=<north>
+nelng=<east>
+d1=<YYYY-MM-DD from Surveyor timeline>
+d2=<YYYY-MM-DD to Surveyor timeline>
+quality_grade=research
+per_page=200
+order_by=observed_on
+order=desc
+```
+
+Use the public read endpoint only. No auth.
+
+Normalize each result:
+
+```json
+{
+  "provider": "iNaturalist",
+  "provider_record_id": 123,
+  "species_key": "coyote",
+  "scientific_name": "Canis latrans",
+  "common_name": "Coyote",
+  "observed_at": "...",
+  "added_at": "...",
+  "quality_grade": "research",
+  "geoprivacy": "open|obscured|private|null",
+  "coordinate_accuracy_m": 25,
+  "latitude": 35.0,
+  "longitude": -79.0,
+  "url": "https://www.inaturalist.org/observations/123"
+}
+```
+
+Coordinates:
+- use only coordinates present in the public API response;
+- never derive unobscured coordinates;
+- pass through `geoprivacy`;
+- obscured coordinates remain approximate.
+
+## 6.3 Census boundaries
+
+Do **not** build new Census backend code.
+
+Reuse the already-working code from:
+
+- URLs: `frontend/src/components/SearchMap.vue:8-10`
+- cached fetch helper: `SearchMap.vue:157-173`
+- boundary layers: `SearchMap.vue:261-312`
+
+Move/adapt that logic into `environmentLayers.js`.
+
+Keep the 3.5 second timeout and 7-day localStorage cache.
+
+## 6.4 NWI wetlands
+
+Use a MapLibre raster source directly; no backend code.
+
+Service:
+
+```text
+https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/export
+```
+
+Tile URL:
+
+```text
+https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&layers=show:0&f=image
+```
+
+MapLibre source:
+- type `raster`
+- tileSize `256`
+- attribution `USFWS National Wetlands Inventory`
+
+Layer:
+- id `survey-wetlands`
+- opacity ~0.26
+- default hidden
+- minzoom 10
+
+## 6.5 Annual NLCD
+
+Do not replace the current service.
+
+Current source exists at:
+
+`frontend/src/views/SurveyorView.vue:1275-1278`
+
+Move this source/layer creation into `environmentLayers.js`.
+
+Keep the same URL initially.
+Set opacity to ~0.22.
+Default visible.
+
+Do not spend this slice dynamically discovering the newest NLCD year. Keep current 2025 service value and expose `Annual NLCD · 2025` in Layers.
+
+---
+
+# 7. CENSUS CODE REUSE — NO DUPLICATE INVENTION
+
+The existing candidate map already solved boundaries.
+
+Do not research or redesign it.
+
+Copy/adapt:
+
+```text
+frontend/src/components/SearchMap.vue:8-10
+frontend/src/components/SearchMap.vue:157-173
+frontend/src/components/SearchMap.vue:261-312
+```
+
+into `environmentLayers.js`.
+
+Surveyor styling:
+- county: thin dashed, opacity ~0.22;
+- county label minzoom ~8.6;
+- state: solid, opacity ~0.45;
+- boundary load failure => status `unavailable`, never infinite loading.
+
+---
+
+# 8. BACKEND — ONE NEW ROUTER FILE ONLY
+
+Add:
 
 `backend/app/surveyor/environment.py`
 
-or:
+Do not add models/tables/settings/dependencies.
 
-`backend/app/surveyor/environment/providers/inaturalist.py`
+Use existing `httpx`.
 
-Do not put a large new provider implementation back into `main.py`.
+Router:
 
-## Query behavior
-
-Use viewport/bbox plus the Surveyor timeline.
-
-Default wildlife observation mode:
-- mappable public observations;
-- research-grade where practical;
-- observed date, not API ingestion date, drives the map timeline;
-- bounded result count and pagination;
-- cache results by bbox/species/time window;
-- do not make one iNaturalist request per point or pan event.
-
-Debounce viewport requests.
-
-## Geoprivacy
-
-Respect iNaturalist geoprivacy exactly.
-
-- open observations may use exposed coordinates;
-- obscured observations remain obscured;
-- private coordinates are never reconstructed or inferred;
-- never imply an obscured observation is exact.
-
-## Provenance
-
-Every external observation must carry:
-
-```text
-provider
-provider_record_id
-taxon/common name
-observed_at
-date_added when available
-quality grade
-coordinate accuracy when available
-geoprivacy
-provider URL
+```python
+router = APIRouter(prefix="/api/surveyor/environment", tags=["surveyor-environment"])
 ```
 
-Inspector copy should distinguish:
+Endpoints:
 
-`Observed Sep 18 · added Sep 20`
+```text
+GET /status
+GET /hydrography?west=&south=&east=&north=
+GET /wildlife?west=&south=&east=&north=&from_date=&to_date=&species=coyote&species=red_fox
+```
 
-rather than collapsing both timestamps.
+## /status
+
+Static capability response:
+
+```json
+{
+  "hydrography": {"provider":"NC OneMap","available":true},
+  "wetlands": {"provider":"USFWS NWI","available":true},
+  "boundaries": {"provider":"US Census TIGERweb","available":true},
+  "wildlife": {"provider":"iNaturalist","available":true}
+}
+```
+
+Do not make upstream calls from `/status`.
+
+## Shared validation
+
+Reject invalid bbox:
+- west/east outside -180..180;
+- south/north outside -90..90;
+- west >= east;
+- south >= north.
+
+Reject excessively large bbox:
+- width > 2 degrees or height > 2 degrees => HTTP 400.
+
+This protects provider calls.
+
+## Cache
+
+Implement a tiny process-local TTL dictionary in `environment.py`.
+
+No DB table.
+
+Key:
+```python
+(provider, round(west, 2), round(south, 2), round(east, 2), round(north, 2), extra_filters)
+```
+
+TTL:
+- hydro: 24 hours;
+- wildlife: 15 minutes.
+
+Cap dictionary at ~128 entries; evict oldest entry when full.
+
+## HTTP behavior
+
+Use one shared `httpx.AsyncClient(timeout=4.0)` pattern or scoped clients.
+
+On upstream timeout/error, return HTTP 502 with short provider-specific detail.
+
+Do not retry more than once.
 
 ---
 
-# 11. WILDLIFE MAP PRESENTATION
+# 9. REGISTER THE ROUTER
 
-External wildlife observations must look different from user-created wildlife evidence.
+Current router block:
 
-User object:
-`Coyote sighting · firsthand`
+`backend/app/main.py:348-357`
 
-External observation:
-`iNaturalist · Coyote observation`
+Add:
 
-Do not merge them into the same marker type.
+```python
+from .surveyor.environment import router as surveyor_environment_router
+```
 
-Default wildlife layer is off.
+and:
 
-When enabled:
+```python
+app.include_router(surveyor_environment_router)
+```
 
-- use small species-colored dots/icons;
-- age can fade marker opacity;
-- tapping opens environmental inspector;
-- provenance link is visible;
-- accuracy/geoprivacy is visible.
-
-Optional density mode:
-
-`Observation concentration`
-
-may render a heat/density surface only when enough observations exist.
-
-Label it explicitly as:
-
-`Public observation concentration`
-
-Never call a computed heat surface:
-- predator territory;
-- risk zone;
-- known coyote route;
-- wildlife hotspot.
-
-`Wildlife hotspot` remains a user-authored Surveyor zone type.
+No other `main.py` environmental code.
 
 ---
 
-# 12. ENVIRONMENTAL INSPECTOR
+# 10. SURVEYORVIEW SURGICAL CHANGES
 
-Add one compact inspector for external geography/environment features.
+## Imports
 
-Examples:
+Current imports: `SurveyorView.vue:1-38`.
 
-### Stream
-```text
-Morgan Creek
-NC OneMap hydrography
-Stream / river
+Add:
+
+```js
+import { applyCatMapStyle, auditCatMapStyle } from '../surveyor/catMapStyle.js'
+import { createEnvironmentLayers } from '../surveyor/environmentLayers.js'
+import EnvironmentalInspector from '../components/surveyor/EnvironmentalInspector.vue'
+import MapLegend from '../components/surveyor/MapLegend.vue'
 ```
 
-### Wetland
-```text
-Freshwater forested/shrub wetland
-USFWS NWI
-Mapped habitat feature
+Replace the existing one-symbol `applyCatMapStyle` import rather than duplicating it.
+
+## Visibility hook
+
+Current function begins:
+
+`SurveyorView.vue:136`
+
+At the end of `applyLayerVisibility(settings)` add:
+
+```js
+environmentController?.applyVisibility(settings)
 ```
 
-### Wildlife observation
-```text
-Coyote
-Observed Sep 18, 2026
-iNaturalist
-Research grade
-Location accuracy: 24 m
+Do not hand-code every environmental layer in this function.
+
+## Map load
+
+Current block begins:
+
+`SurveyorView.vue:1255`
+
+Immediately after base styling and before local field layers finish installing:
+
+```js
+mapHealth.value = auditCatMapStyle(map)
+environmentController = createEnvironmentLayers({
+  map,
+  api: API,
+  getTimeline: () => timelineWindow.value,
+  onStatus: status => { environmentStatus.value = status },
+  onSelect: feature => { selectedEnvironment.value = feature }
+})
+await environmentController.install(layerSettings.value)
 ```
 
-Actions:
+Make the `load` callback async.
 
-- Add note here;
-- Drop field marker here;
-- create user wildlife observation from current location only when explicitly chosen;
-- copy/open provider source where available.
+Delete current inline NLCD creation:
 
-Do not silently convert external data into user evidence.
+`SurveyorView.vue:1275-1278`
+
+because `environmentLayers.js` owns it.
+
+After all custom layers exist, keep calling current `applyLayerVisibility()`.
+
+## Timeline
+
+Watch `timelineWindow`.
+
+If wildlife is enabled:
+
+```js
+environmentController?.refreshViewport(layerSettings.value)
+```
+
+Debouncing happens inside controller.
+
+## Unmount
+
+Call:
+
+```js
+environmentController?.destroy()
+```
+
+before `map.remove()`.
+
+## Map shell
+
+Current map shell is one very long line:
+
+`SurveyorView.vue:1450`
+
+Do not rewrite unrelated controls.
+
+Add inside the shell:
+- map-health badge;
+- `<MapLegend ... />`.
+
+Add after the shell / alongside existing inspectors:
+- `<EnvironmentalInspector v-if="selectedEnvironment" ... />`.
 
 ---
 
-# 13. LAYER DRAWER REBUILD
+# 11. LAYER DRAWER — REPLACE THE 14-LINE FILE
 
-Current `LayerDrawer.vue` has a placeholder Wildlife section.
+Replace:
 
-Replace it with real capability-driven sections.
+`frontend/src/components/surveyor/LayerDrawer.vue:1-14`
 
-Recommended structure:
+Props:
 
-```text
-MY SEARCH
-✓ Markers / notes / zones / lines
-✓ Object connections
-✓ Trail cameras + cones
-  Previous camera placements
-✓ Candidate reports
-
-ENVIRONMENT
-✓ Cat-view base geography
-✓ Annual NLCD land cover
-✓ Streams / waterbodies
-  Wetlands
-✓ County / state boundaries
-
-WILDLIFE DATA
-  Coyotes
-  Red fox
-  Gray fox
-  Bobcats
-  Raccoons
-  Deer
-  [time window follows Surveyor timeline]
+```js
+defineProps({
+  modelValue: { type: Object, required: true },
+  counts: { type: Object, default: () => ({}) },
+  providerStatus: { type: Object, default: () => ({}) }
+})
 ```
 
-Show provider health:
+Sections:
 
-```text
-NC OneMap        ready
-NWI              off
-iNaturalist      ready
-Census           degraded
+## MY SEARCH
+Keep current five controls unchanged.
+
+## ENVIRONMENT
+- Annual NLCD · 2025
+- Streams / waterbodies · NC OneMap
+- Wetlands · USFWS NWI
+- County / state boundaries · Census
+
+## WILDLIFE DATA
+Master:
+- Public wildlife observations · iNaturalist
+
+Species toggles:
+- Coyote
+- Red fox
+- Gray fox
+- Bobcat
+- Raccoon
+- Deer
+
+Only show species toggles when wildlife master is enabled.
+
+Show compact provider status text:
+- ready
+- loading
+- degraded
+- unavailable
+
+Do not add a second modal/settings flow.
+
+---
+
+# 12. SNAPPING — TWO-LINE CHANGE
+
+Current:
+
+`frontend/src/surveyor/snapEngine.js:45-53`
+
+Change water recognition from:
+
+```js
+/water|stream|river|canal|drain/
 ```
 
-Do not create dead toggles for providers that have no backend implementation.
+to:
+
+```js
+/water|stream|river|canal|drain|hydro/
+```
+
+Add authoritative preference:
+
+When two candidates are within threshold and one comes from source/layer containing:
+`survey-hydro`
+
+prefer that hydro candidate over a generic base-map water candidate unless the generic candidate is >4 screen pixels closer.
+
+Do not otherwise rewrite snapping.
+
+---
+
+# 13. ENVIRONMENTAL INSPECTOR
+
+Add:
+
+`frontend/src/components/surveyor/EnvironmentalInspector.vue`
+
+Props:
+```js
+feature
+```
+
+Emits:
+```text
+close
+add-note
+add-marker
+```
+
+Render by `feature.kind`.
+
+## hydrography
+Show:
+- name;
+- Stream/river or Waterbody;
+- `NC OneMap hydrography`.
+
+## boundary
+Show:
+- county/state name;
+- `U.S. Census TIGERweb`.
+
+## wetland
+If only raster identify is unavailable, do **not** fake an inspector.
+No wetland click handling is required in this slice.
+
+## wildlife
+Show:
+- common/scientific name;
+- `Observed <date>`;
+- `Added <date>` when different/available;
+- quality grade;
+- coordinate accuracy if supplied;
+- `Approximate / obscured location` when geoprivacy is obscured;
+- provider link.
+
+Buttons:
+- Add note here
+- Drop field marker here
+
+Those actions create normal existing Surveyor drafts/objects. Do not persist external observations automatically.
 
 ---
 
 # 14. MAP LEGEND
 
-Add a compact legend that can collapse.
+Add:
 
-It should explain only currently visible map semantics.
+`frontend/src/components/surveyor/MapLegend.vue`
 
-Examples:
+Keep it tiny.
 
+Props:
+```js
+layers
+```
+
+Collapsed by default on mobile.
+
+Only list visible semantics:
 - woodland;
 - developed;
 - water;
-- wetland;
-- county boundary;
-- current camera;
-- historical camera;
-- searched;
-- needs search;
-- cat corridor;
-- external wildlife observation.
+- wetland when enabled;
+- county line when enabled;
+- external wildlife when enabled;
+- current/historical camera when relevant;
+- searched / needs-search if objects are enabled.
 
-Do not make the legend a permanent giant panel.
+No full provider documentation in the legend.
 
 ---
 
-# 15. CAT-VIEWED SEARCH ZONES
+# 15. WILDLIFE MAP LAYER
 
-Preserve current user zone support and ensure the following are selectable/styled:
+In `environmentLayers.js`:
 
-## Search coverage
-- searched;
-- needs search;
-- needs re-check;
-- low priority.
-
-## Search interpretation
-- known cat highway;
-- probable animal corridor;
-- wildlife hotspot;
-- likely shelter zone;
-- dog territory;
-- high human activity;
-- private / no access;
-- permission obtained;
-- avoid disturbing.
-
-Where current values exist under slightly different names, migrate/alias rather than destroying existing objects.
-
-Use patterned/hatch/outline treatments. Avoid opaque blocks.
-
-Suggested semantics:
-
+Source:
 ```text
-searched            quiet diagonal hatch
-needs search        amber dotted hatch
-needs re-check      stronger dotted outline
-cat highway         narrow directional corridor
-wildlife hotspot    stipple
-dog territory       red-orange boundary
-private/no access   neutral crosshatch
+survey-wildlife
 ```
 
----
+Use one GeoJSON source.
 
-# 16. SEARCH COVERAGE FRESHNESS
-
-The repository already tracks Surveyor object dates/search sessions.
-
-Make searched coverage age visually.
-
-Suggested states:
-
+Feature properties:
 ```text
-fresh      <= 3 days
-recent     <= 14 days
-stale      <= 45 days
-old        > 45 days
+kind=wildlife
+species_key
+common_name
+scientific_name
+observed_at
+added_at
+provider
+provider_record_id
+quality_grade
+geoprivacy
+accuracy_m
+url
 ```
 
-Do not erase old searched zones.
+Layer:
+- small circle/icon;
+- color by species;
+- opacity 0.82 open location;
+- opacity 0.55 obscured;
+- no heatmap in this slice unless trivial after point layer is complete.
 
-Fade/hatch them progressively.
+External wildlife markers must look different from user-created wildlife evidence.
 
-Inspector should expose:
-
-`Last searched 18 days ago · now stale`
-
-If exact search-session linkage exists, show it.
+Do not call them hotspots, territories, risk, or routes.
 
 ---
 
-# 17. TRAIL CAMERA EXPERIENCE
+# 16. HYDROGRAPHY MAP LAYERS
 
-Preserve current camera models / placements / cones.
+In `environmentLayers.js`:
 
-Close any remaining usability gaps.
-
-A current camera must expose:
-
+Sources:
 ```text
-name
-heading
-field of view
-useful range
-installed_at
-model
-power
-notes
+survey-hydro-streams
+survey-hydro-waterbodies
 ```
 
-On-map interaction:
-
-- move current camera;
-- rotate heading;
-- change FOV;
-- change range;
-- inspector shows current placement metadata.
-
-Historical placement behavior:
-
-- moving/deactivating a camera never destroys placement history;
-- old camera point/cone becomes faded;
-- history toggle reveals previous placements;
-- older placements fade more than newer historical placements;
-- selecting a historical placement shows date range;
-- historical placement cannot silently mutate current placement.
-
----
-
-# 18. CORKBOARD LINKS
-
-Preserve existing Surveyor object links and make line semantics visually obvious.
-
-Styles:
-
+Layers:
 ```text
-observed movement       solid arrow
-hypothesized movement   dashed arrow
-association             dotted line
-possible corridor       double/directional dashed
-evidence for            solid thin
-evidence against        crossed/contrasting relation
+survey-hydro-waterbodies-fill
+survey-hydro-waterbodies-outline
+survey-hydro-streams-line
+survey-hydro-stream-labels
 ```
 
-Endpoints must stay attached to linked objects after object movement.
+Suggested styling:
+- streams: #6f9ca6, 1.2–2.8 px by zoom;
+- waterbody fill: #bfd6dc, opacity ~0.55;
+- outline: #789fa7;
+- labels minzoom 11.
 
-Support snapping endpoints to:
-- pins;
-- cameras;
-- zones;
-- other eligible field objects.
-
-Connections remain Surveyor-authored interpretation, never external-provider truth.
+Put hydrography **below Surveyor user objects/cameras**, above land-cover raster.
 
 ---
 
-# 19. SNAPPING
+# 17. BOUNDARIES
 
-Current `snapEngine.js` already supports roads/trails/waterways/user objects.
+Reuse SearchMap code only.
 
-Harden it for the new environment layers.
+Do not create a backend endpoint.
 
-Snap menu:
-
+Layer ids:
 ```text
-Roads
-Trails
-Waterways
-Zone boundaries
-Pins
-Trail cameras
+survey-county-lines
+survey-county-labels
+survey-state-lines
 ```
 
-Rules:
+Avoid ids used by candidate SearchMap to prevent conceptual confusion.
 
-- snap to the visible geometry from either base vector style or normalized hydrography;
-- prefer explicit NC hydrography over generic base water when both are within threshold;
-- show a visible snap target + type;
-- preserve user's drawn geometry as Archie Radar data;
-- store optional metadata describing which provider/feature was snapped to;
-- never edit authoritative provider geometry.
+Timeout 3.5s.
+Cache 7d.
+Failure status must settle to `unavailable`, never `loading` forever.
 
 ---
 
-# 20. SEARCH SESSION / SURVEYOR JOURNAL
+# 18. CSS — EDIT ONLY SURVEYOR BLOCK + APPEND
 
-These systems already exist. Do not rebuild them.
+Current Surveyor block begins around:
 
-Ensure environmental context can enrich them.
+`frontend/src/style.css:516`
 
-Search-session summary should be able to expose:
+Existing map shell around:
+`533-537`.
 
-- start/end;
-- duration;
-- method;
-- distance;
-- linked notes/evidence;
-- areas searched;
-- cameras serviced;
-- unresolved field tasks.
+Add styles for:
+- `.map-health-badge`
+- `.map-health-badge.degraded`
+- `.map-health-badge.failed`
+- `.surveyor-map-legend`
+- `.environment-inspector`
+- `.provider-status`
+- wildlife species grid
+- environment layer labels.
 
-Journal entry types continue to include:
+Mobile:
+- inspector becomes bottom sheet;
+- legend collapses;
+- Layers remains >=44x44;
+- no horizontal overflow at 320 px;
+- do not cover `.mobile-field-bar`.
 
-- search sessions;
-- sightings/evidence;
-- camera changes;
-- object links;
-- access changes;
-- candidate actions;
-- wildlife observations created by the user;
-- attachments.
-
-External iNaturalist observations do **not** become permanent Journal entries merely because they were displayed.
-
-Only a user action such as `Add note here` or `Create field marker` creates persistent local history.
+Do not restyle the whole application.
 
 ---
 
-# 21. EVIDENCE LEDGER
+# 19. SEARCH COVERAGE FRESHNESS
 
-The current attachments/events/object system already provides the foundation.
+Existing helper already exists:
 
-Ensure any evidence object can link:
+`frontend/src/surveyor/zoneState.js`
 
-- image;
-- audio;
-- video;
-- notes;
-- candidate case/post;
-- camera;
-- zone;
-- another evidence object.
+and current Surveyor already computes:
+`searchFreshness(object)`
 
-Inspector should expose unresolved/linked relationships without turning the map into a graph browser.
+Do not invent a second freshness system.
 
-A user must be able to answer:
-
-`Show everything related to this location/object.`
-
-Use current object link/event models where possible.
-
----
-
-# 22. PROPERTY / ACCESS LEDGER
-
-Preserve and improve existing access records.
-
-Supported field state should include:
+Only adjust map paint expressions for searched zones to make current freshness visible:
 
 ```text
-unknown
-no answer
-permission granted
-partial permission
-permission denied
-do not contact
+fresh   <=3d      normal
+recent  <=14d     ~0.78 opacity
+stale   <=45d     ~0.52 opacity
+old     >45d      ~0.32 opacity
 ```
 
-Additional context:
+If existing `searchFreshness` returns different named buckets, use those existing names rather than changing the helper unless necessary.
 
-- dog count;
-- outdoor cat count;
-- camera permission;
-- last contact date;
-- notes.
+Inspector wording:
+`Last searched 18 days ago · stale`
 
-Map badges remain subtle.
-
-`Dog lives here` remains a useful independent environment marker even when no structured access record exists.
+This is optional P1 after geography/wildlife are working.
 
 ---
 
-# 23. THREE-PART SURVEYOR FIELD WORKFLOW
+# 20. TRAIL CAMERAS / LINKS — AUDIT, DO NOT REBUILD
 
-The intended field workflow is:
+No new camera model.
 
-## A. Search Sessions
-Record what was physically searched and when.
+Acceptance only:
+- current cones remain visible above environment layers;
+- historical placement remains faded;
+- environmental layers do not swallow click targets;
+- moving camera still preserves history;
+- object links remain attached and visible;
+- corkboard line patterns remain readable against NLCD/water.
 
-## B. Evidence Ledger
-Record what was observed/captured/reported and how it relates to other evidence.
-
-## C. Property / Access Ledger
-Record where the searcher can/cannot go and recurring contextual hazards such as dogs/outdoor cats.
-
-These are already represented in current main. This packet should integrate them with the improved geography rather than inventing parallel systems.
-
----
-
-# 24. TIME AS A FIRST-CLASS FILTER
-
-Preserve `SurveyTimeline.vue`.
-
-The timeline must affect:
-
-- user observations;
-- evidence;
-- camera placements;
-- search sessions;
-- searched zones where date semantics apply;
-- external wildlife observations.
-
-Presets remain:
-
-```text
-Now
-Tonight
-7 days
-30 days
-Since Archie disappeared
-Custom
-All dates
-```
-
-For external iNaturalist data, use the observation date as the primary temporal field.
+Do not rewrite camera geometry or link persistence in Slice 8.
 
 ---
 
-# 25. MAP OBJECT UNCERTAINTY
+# 21. BACKEND TEST FILE
 
-Preserve the epistemic distinction.
+Add:
 
-User-authored objects/zones should support:
+`backend/tests/test_surveyor_environment.py`
 
-```text
-observed
-inferred
-hypothesis
-planning
-```
+Only focused tests:
 
-Recommended styling:
+1. invalid bbox rejected;
+2. bbox >2° rejected;
+3. NC OneMap response normalizes stream/waterbody FeatureCollections;
+4. hydro cache reuses identical rounded bbox;
+5. iNaturalist normalization keeps `observed_at` distinct from `added_at`;
+6. obscured geoprivacy survives normalization;
+7. wildlife cache key includes species + date range;
+8. upstream timeout returns bounded 502/degraded response.
 
-```text
-observed     solid
-inferred     lightly dashed
-hypothesis   dotted
-planning     hatch
-```
-
-Do not collapse confidence and epistemic state into one field.
+Mock `httpx`; never call live providers during tests.
 
 ---
 
-# 26. MOBILE FIELD UX
+# 22. MANUAL ACCEPTANCE — 10 MINUTES MAX
 
-Surveyor must remain field-usable on a phone.
-
-Acceptance widths:
-
-- 320 px portrait;
-- typical Android portrait;
-- phone landscape;
-- desktop.
-
-Mobile behavior:
-
-- map remains primary surface;
-- tool bar remains reachable with one hand;
-- Layers is always reachable;
-- selected object/external feature opens bottom-sheet style inspector;
-- no permanent desktop sidebars consuming half the map;
-- touch targets >= 44 px;
-- drawing/snapping controls do not overlap the mobile bottom bar;
-- environmental legend collapses;
-- timeline remains usable.
-
-Do not optimize only for desktop GIS interaction.
-
----
-
-# 27. PERFORMANCE / REQUEST DISCIPLINE
-
-External provider data must not turn pan/zoom into a request storm.
-
-Requirements:
-
-- debounce viewport loads;
-- cancel stale requests;
-- bbox rounding for cache keys;
-- server cache / SQLite cache where appropriate;
-- provider timeouts;
-- bounded result counts;
-- only load detailed layers at useful zooms;
-- do not request wildlife observations while wildlife layer is disabled;
-- do not load wetlands while disabled;
-- landcover raster should not trigger JS-side feature parsing.
-
-Environmental provider failure must not break:
-- trail cameras;
-- drawing;
-- local objects;
-- journal;
-- candidate layer.
-
----
-
-# 28. BACKEND API SHAPE
-
-Prefer a dedicated router/module rather than adding another large block to `backend/app/main.py`.
-
-Recommended:
-
-```text
-backend/app/surveyor/environment.py
-backend/app/surveyor/providers/
-  __init__.py
-  nconemap.py
-  inaturalist.py
-  census.py
-  wetlands.py
-```
-
-Suggested endpoints:
-
-```text
-GET /api/surveyor/environment/status
-
-GET /api/surveyor/environment/hydrography
-GET /api/surveyor/environment/boundaries
-GET /api/surveyor/environment/wildlife
-```
-
-Optional:
-- keep NLCD/NWI raster tiles client-side if CORS and reliability are acceptable;
-- otherwise proxy only where necessary.
-
-Every endpoint must return provider metadata and an explicit degraded/error state instead of malformed empty success.
-
----
-
-# 29. FRONTEND FILE BOUNDARIES
-
-Keep `SurveyorView.vue` from becoming an unmaintainable mega-component.
-
-Prefer extracting provider/state concerns.
-
-Suggested:
-
-```text
-frontend/src/surveyor/environmentLayers.js
-frontend/src/surveyor/catMapStyle.js
-frontend/src/surveyor/mapHealth.js
-frontend/src/surveyor/environmentProviders.js
-
-frontend/src/components/surveyor/EnvironmentalInspector.vue
-frontend/src/components/surveyor/MapLegend.vue
-frontend/src/components/surveyor/LayerDrawer.vue
-```
-
-Do not refactor unrelated current field workflow merely for aesthetics.
-
----
-
-# 30. CURRENT BLANK / FEATURELESS MAP ACCEPTANCE
-
-This is P0.
-
-On a clean page load centered near the Archie search anchor, before enabling optional wildlife/wetland layers, the user must be able to visually identify:
-
-- at least one named road when at neighborhood/town zoom;
-- visible local road network;
-- waterway/waterbody geometry where present;
-- woodland/developed/open-land differentiation;
-- current city/place labels;
-- county line context at appropriate zoom;
-- state boundary if viewport reaches it.
-
-If those details cannot load, show a clear degraded/error indicator.
-
-A featureless neutral canvas is a failure.
-
-Do not mark this slice complete based only on user-created pins rendering.
-
----
-
-# 31. EXTERNAL DATA SOURCES / PROVENANCE LOCK
-
-Use trustworthy published services.
-
-Approved starting sources for this slice:
-
-## Base vectors
-OpenFreeMap / OpenStreetMap-derived vector style already used by Surveyor.
-
-## Land cover
-USGS / MRLC Annual NLCD WMS.
-
-## North Carolina streams/waterbodies
-NC OneMap Major Hydrography feature services.
-
-## Wetlands
-USFWS National Wetlands Inventory REST/WMS services.
-
-## County/state boundaries
-U.S. Census TIGERweb state/county services.
-
-## Wildlife observations
-iNaturalist public observations API.
-
-Do not add:
-- anonymous scraped wildlife maps;
-- random forum sightings;
-- unsourced predator heat maps.
-
-Every non-base provider must have visible provenance.
-
----
-
-# 32. DO NOT OVER-INTERPRET ENVIRONMENTAL DATA
-
-Hard rule.
-
-External layers tell us things like:
-
-`A public coyote observation was recorded here on this date.`
-
-They do **not** automatically tell us:
-
-`Coyotes control this territory.`
-
-Likewise:
-
-- NLCD forest != guaranteed cat shelter;
-- wetland != impassable;
-- public observations != population density;
-- a cluster of iNaturalist points != a known wildlife hotspot;
-- a stream line != guaranteed current water flow.
-
-Keep source facts and Surveyor interpretation visually/semantically distinct.
-
----
-
-# 33. DO NOT IMPLEMENT YET
-
-Defer:
-
-- automated predator-risk scoring;
-- automatic Archie-route prediction;
-- automatic cat-highway inference;
-- AI-generated search zones;
-- route optimization;
-- automatic trail-camera placement;
-- Movebank unless a clearly useful local public study is identified later;
-- generic social/community accounts;
-- real-time location sharing.
-
-The field map should become dependable before analytical automation is layered on top.
-
----
-
-# 34. FOCUSED TESTING
-
-Follow `AGENTS.md`: focused checks, no expensive suite churn.
-
-Backend tests:
-
-- hydro provider bbox normalization;
-- external provider timeout/degraded output;
-- iNaturalist observed date mapping;
-- iNaturalist geoprivacy handling;
-- cache key correctness;
-- no provider request when layer disabled where backend state applies.
-
-Frontend/pure helper tests if harness exists:
-
-- base style health classification;
-- environment visibility state;
-- external observation normalization;
-- timeline-to-provider query conversion.
-
-Manual map acceptance is more important than chasing broad unrelated test coverage.
-
-Do not repeatedly reinstall npm or run unrelated full suites.
-
----
-
-# 35. MANUAL ACCEPTANCE
+Do not turn manual acceptance into an exploratory QA project.
 
 ## First load
+Open Surveyor.
 
-Open Surveyor on a clean browser profile.
+Pass if:
+- roads visible;
+- road/place labels visible;
+- water visible;
+- woodland/developed distinction visible;
+- map is not blank;
+- local Surveyor objects remain visible.
 
-Verify:
-- geographic context appears without opening Layers;
-- roads/place labels/water are legible;
-- woodland/developed context is visible;
-- map does not sit on Loading boundaries forever;
-- local objects render above geography.
-
-## Layer drawer
-
+## Layers
 Toggle:
 - NLCD;
-- hydrography;
-- wetlands;
+- hydro;
 - boundaries;
-- wildlife species.
+- wetlands.
 
-Verify one failed provider does not blank the map.
+Pass if each toggles without blanking the map.
 
 ## Wildlife
+Enable Coyote.
 
-Enable coyotes + foxes.
-
-Verify:
-- observations have provider attribution;
-- observation date is distinct from date-added when both exist;
-- external marker is visibly different from user wildlife evidence;
-- time slider filters observations;
-- obscured/private semantics are respected.
+Pass if:
+- bounded iNaturalist request returns/render points when observations exist;
+- click shows provenance;
+- observed date is primary;
+- external point looks different from local wildlife evidence.
 
 ## Snapping
+Draw one line near an NC OneMap stream.
 
-Draw:
-- corridor snapped to a road;
-- line snapped to NC hydrography;
-- line endpoint snapped to a trail camera;
-- polygon snapped partly to a zone boundary.
-
-Verify snap indicator identifies the target type.
-
-## Camera
-
-Move one trail camera.
-
-Verify:
-- new active placement;
-- old faded historical placement;
-- history remains selectable;
-- connections remain attached.
-
-## Journal
-
-Start/end a short search session.
-Create evidence and a note from an environmental feature.
-Verify only explicitly created local records appear in Journal.
+Pass if snap indicator says WATERWAY and snaps.
 
 ## Mobile
+Check one portrait viewport.
 
-Repeat Layers, marker placement, camera selection, and environmental inspector on portrait and landscape phone widths.
-
----
-
-# 36. DEFINITION OF DONE
-
-Slice 8 is complete when:
-
-- Surveyor no longer presents a featureless geographic canvas;
-- base geography is useful on first load;
-- cat-view map styling is hardened beyond best-effort regex coloring;
-- Annual NLCD is useful/default environmental context with graceful failure;
-- NC OneMap hydrography is integrated;
-- NWI wetlands are available as an optional layer;
-- Census county/state context is non-blocking;
-- iNaturalist wildlife observations are available with provenance/geoprivacy/date correctness;
-- LayerDrawer exposes real capability-driven environmental controls;
-- environmental features have an inspector;
-- environmental providers cannot break core Surveyor tools;
-- snap engine can use authoritative hydrography;
-- search-zone/camera/link/current Surveyor systems remain intact;
-- mobile field use remains practical;
-- focused tests/checks pass;
-- changes are committed and pushed to `main`;
-- DietPi deployment follows `AGENTS.md` only if the execution environment actually has device access.
+Pass if:
+- Layers reachable;
+- map usable;
+- environmental inspector readable;
+- no horizontal overflow.
 
 ---
 
-# 37. IMPLEMENTATION ORDER
+# 23. FOCUSED COMMANDS ONLY
 
-1. verify latest main and current live map failure;
-2. add base-map health/degraded state;
-3. harden cat-view base style so road/water/place geography is always visible;
-4. default environmental layer settings + merge legacy saved settings;
-5. harden Annual NLCD;
-6. add dedicated Surveyor environment backend router;
-7. NC OneMap hydrography;
-8. Census county/state context;
-9. NWI wetlands;
-10. iNaturalist provider + caching/geoprivacy/time;
-11. LayerDrawer capability/provider health;
-12. EnvironmentalInspector;
-13. MapLegend;
-14. snap-engine integration with hydrography;
-15. search coverage freshness styles;
-16. camera/history/corkboard visual audit against environmental layers;
-17. timeline integration;
-18. mobile pass;
-19. focused tests;
-20. manual acceptance;
-21. commit + push main;
-22. deploy to DietPi only if device access is genuinely available.
+Backend:
+
+```bash
+cd backend
+python -m pytest tests/test_surveyor_environment.py -q
+```
+
+Frontend:
+- do **not** run `npm install`;
+- if `node_modules` already exists, run:
+
+```bash
+npm run build
+```
+
+Otherwise skip local frontend build and let Docker Compose build during deployment.
+
+Optional syntax sanity only if useful:
+
+```bash
+node --check src/surveyor/environmentLayers.js
+```
+
+Do not run unrelated full suites unless one of these changes breaks shared code.
 
 ---
 
-# 38. END-OF-RUN REPORT
+# 24. IMPLEMENTATION ORDER
 
-Return:
+Do exactly this order:
+
+1. `catMapStyle.js` hardened style + audit.
+2. Surveyor base map health badge.
+3. `environmentLayers.js` with NLCD + Census reuse.
+4. NC OneMap backend + frontend hydro layer.
+5. LayerDrawer environment controls.
+6. NWI raster.
+7. iNaturalist backend + point layer.
+8. EnvironmentalInspector.
+9. MapLegend.
+10. snapEngine hydro preference.
+11. mobile CSS.
+12. focused tests.
+13. one manual acceptance pass.
+14. commit/push `main`.
+15. deploy per `AGENTS.md` only if actual DietPi SSH/Tailscale access exists.
+
+Do not start P1 polish before P0 first-load geography works.
+
+---
+
+# 25. DEFINITION OF DONE
+
+Done when:
+
+- Surveyor is geographically useful before user objects exist;
+- base map does not silently degrade to an empty canvas;
+- roads, labels, water, woodland/developed context are visible;
+- NLCD defaults on;
+- NC OneMap streams/waterbodies work;
+- Census county/state context works non-blockingly;
+- NWI wetlands can be toggled on;
+- iNaturalist wildlife can be toggled by species;
+- iNaturalist provenance/geoprivacy/date semantics are correct;
+- environment provider failure does not break local Surveyor tools;
+- hydrography participates in snapping;
+- camera cones/history/links remain usable;
+- mobile map remains field-usable;
+- focused test file passes;
+- changes are on `main`.
+
+---
+
+# 26. DO NOT IMPLEMENT
+
+Not in this slice:
+
+- route optimization;
+- predator-risk scoring;
+- automatic cat-highway inference;
+- AI search-zone generation;
+- automatic camera placement;
+- Movebank;
+- real-time social sharing;
+- DB persistence of external wildlife observations;
+- generic plugin/provider framework;
+- environment settings UI beyond LayerDrawer.
+
+---
+
+# 27. REPOSITORY NOTE
+
+At packet-writing time GitHub still reports default branch:
+`feature/surveyor-v1`
+
+That branch is stale/behind `main`.
+
+Per `AGENTS.md`, implementation and deployment use `main`.
+
+If repo-admin permission is available, set GitHub default branch to `main`.
+If not, report it and continue on `main`.
+
+---
+
+# 28. END REPORT
+
+Return only:
 
 ```text
-SLICE 8 STATUS
+SLICE 8
 
 Base SHA:
 Final SHA:
 
-BASE GEOGRAPHY
-OpenFreeMap health:
-Road hierarchy:
-Water:
-Woodland/developed context:
-Labels:
-Blank-map fallback:
+Base geography: pass/fail
+NLCD: pass/fail
+NC OneMap hydro: pass/fail
+Census boundaries: pass/fail
+NWI wetlands: pass/fail
+iNaturalist: pass/fail
+Hydro snapping: pass/fail
+Mobile: pass/fail
+Focused tests:
+Frontend build: pass/skipped
 
-ENVIRONMENT
-Annual NLCD:
-NC OneMap hydrography:
-NWI wetlands:
-Census boundaries:
-
-WILDLIFE
-iNaturalist:
-Species enabled:
-Geoprivacy:
-Observed/date-added semantics:
-Provider cache:
-
-FIELD TOOLS
-Zones:
-Snapping:
-Trail cameras:
-Camera history:
-Corkboard links:
-Search coverage freshness:
-Environmental inspector:
-Legend:
-
-MOBILE:
-FOCUSED TESTS:
-MANUAL ACCEPTANCE:
-
-REPOSITORY
-Default branch status:
-main SHA:
-
-DEPLOYMENT
+Default branch:
 DietPi deployment:
 
-KNOWN LIMITATIONS:
+Known limitations:
 ```
-
-If repository settings cannot be changed:
-
-`Default branch status: feature/surveyor-v1 remains configured in GitHub; main is authoritative per AGENTS.md`
-
-If this environment cannot reach DietPi:
-
-`DietPi deployment: not attempted from this environment`
