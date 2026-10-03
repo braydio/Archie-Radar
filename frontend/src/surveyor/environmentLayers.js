@@ -52,11 +52,11 @@ export function createEnvironmentLayers({ map, api, getTimeline, onStatus, onSel
     map.addSource('annual-landcover-source', { type: 'raster', tileSize: 256, attribution: 'Annual NLCD · 2025 · USGS/MRLC', tiles: [
       'https://dmsdata.cr.usgs.gov/geoserver/mrlc_Land-Cover-Native_conus_year_data/wms?SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=Land-Cover-Native_conus_year_data&STYLES=&FORMAT=image/png&TRANSPARENT=TRUE&SRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&TIME=2025-01-01T00:00:00Z'
     ] })
-    addLayer({ id: 'annual-landcover', type: 'raster', source: 'annual-landcover-source', paint: { 'raster-opacity': 0.22 } }, belowLabels)
+    addLayer({ id: 'annual-landcover', type: 'raster', source: 'annual-landcover-source', paint: { 'raster-opacity': ['interpolate', ['linear'], ['zoom'], 9, 0.22, 13, 0.20, 15, 0.12, 17, 0.04, 18, 0] } }, belowLabels)
     map.addSource('survey-wetlands-source', { type: 'raster', tileSize: 256, attribution: 'USFWS National Wetlands Inventory', tiles: [
       'https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&layers=show:0&f=image'
     ] })
-    addLayer({ id: 'survey-wetlands', type: 'raster', source: 'survey-wetlands-source', minzoom: 10, paint: { 'raster-opacity': 0.26 } }, belowLabels)
+    addLayer({ id: 'survey-wetlands', type: 'raster', source: 'survey-wetlands-source', minzoom: 10, paint: { 'raster-opacity': ['interpolate', ['linear'], ['zoom'], 10, 0.26, 14, 0.20, 16, 0.10, 18, 0.04] } }, belowLabels)
     map.addSource('survey-hydro-streams', { type: 'geojson', data: empty() })
     map.addSource('survey-hydro-waterbodies', { type: 'geojson', data: empty() })
     map.addSource('survey-wildlife', { type: 'geojson', data: empty(), cluster: true, clusterRadius: 35, clusterMaxZoom: 13 })
@@ -71,9 +71,9 @@ export function createEnvironmentLayers({ map, api, getTimeline, onStatus, onSel
       'circle-opacity': ['case', ['==', ['get', 'geoprivacy'], 'obscured'], 0.55, 0.82], 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 1.5
     } })
     map.addSource('survey-county-source', { type: 'geojson', data: empty() }); map.addSource('survey-state-source', { type: 'geojson', data: empty() })
-    addLayer({ id: 'survey-county-lines', type: 'line', source: 'survey-county-source', paint: { 'line-color': '#52645d', 'line-opacity': ['interpolate', ['linear'], ['zoom'], 6, .10, 9, .26, 12, .34], 'line-width': ['interpolate', ['linear'], ['zoom'], 6, .45, 10, 1.15, 13, 1.6], 'line-dasharray': [3, 3] } })
-    addLayer({ id: 'survey-county-labels', type: 'symbol', source: 'survey-county-source', minzoom: 8.6, layout: { 'text-field': ['coalesce', ['get', 'BASENAME'], ['get', 'NAME']], 'text-size': ['interpolate', ['linear'], ['zoom'], 8.6, 9, 11, 11], 'text-transform': 'uppercase', 'text-letter-spacing': .09 }, paint: { 'text-color': '#6f7c76', 'text-opacity': .45, 'text-halo-color': '#f4f1e9', 'text-halo-width': 1.2 } })
-    addLayer({ id: 'survey-state-lines', type: 'line', source: 'survey-state-source', paint: { 'line-color': '#263a32', 'line-opacity': .48, 'line-width': ['interpolate', ['linear'], ['zoom'], 5, 1.1, 10, 2, 13, 2.5] } })
+    addLayer({ id: 'survey-county-lines', type: 'line', source: 'survey-county-source', maxzoom: 15, paint: { 'line-color': '#52645d', 'line-opacity': ['interpolate', ['linear'], ['zoom'], 6, .10, 9, .26, 12, .34, 13, .12, 15, 0], 'line-width': ['interpolate', ['linear'], ['zoom'], 6, .45, 10, 1.15, 13, 1.6], 'line-dasharray': [3, 3] } })
+    addLayer({ id: 'survey-county-labels', type: 'symbol', source: 'survey-county-source', minzoom: 8.6, maxzoom: 15, layout: { 'text-field': ['coalesce', ['get', 'BASENAME'], ['get', 'NAME']], 'text-size': ['interpolate', ['linear'], ['zoom'], 8.6, 9, 11, 11], 'text-transform': 'uppercase', 'text-letter-spacing': .09 }, paint: { 'text-color': '#6f7c76', 'text-opacity': ['interpolate', ['linear'], ['zoom'], 9, .45, 13, .16, 15, 0], 'text-halo-color': '#f4f1e9', 'text-halo-width': 1.2 } })
+    addLayer({ id: 'survey-state-lines', type: 'line', source: 'survey-state-source', maxzoom: 13, paint: { 'line-color': '#263a32', 'line-opacity': .48, 'line-width': ['interpolate', ['linear'], ['zoom'], 5, 1.1, 10, 2, 13, 2.5] } })
     const clickIds = ['survey-hydro-streams-line', 'survey-hydro-waterbodies-fill', 'survey-hydro-waterbodies-outline', 'survey-hydro-stream-labels', 'survey-wildlife-points', 'survey-county-lines', 'survey-county-labels', 'survey-state-lines']
     for (const id of clickIds) { map.on('click', id, click); listeners.push(['click', id, click]) }
     const onEnter = () => { map.getCanvas().style.cursor = isPlacementMode() ? 'crosshair' : 'pointer' }, onLeave = () => { map.getCanvas().style.cursor = isPlacementMode() ? 'crosshair' : '' }

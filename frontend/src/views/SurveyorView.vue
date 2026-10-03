@@ -49,6 +49,8 @@ const SNAP_STORAGE = 'archie-radar-surveyor-snap'
 const defaultLayers = { objects: true, links: true, cameras: true, cameraHistory: false, candidates: true, landcover: true, hydrography: true, boundaries: true, wetlands: false, wildlife: false, wildlifeSpecies: { coyote: false, red_fox: false, gray_fox: false, bobcat: false, raccoon: false, deer: false } }
 const layerSettings = ref((() => { try { const saved = JSON.parse(localStorage.getItem(LAYER_STORAGE) || '{}'); return { ...defaultLayers, ...saved, wildlifeSpecies: { ...defaultLayers.wildlifeSpecies, ...(saved.wildlifeSpecies && !Array.isArray(saved.wildlifeSpecies) ? saved.wildlifeSpecies : {}) } } } catch { return { ...defaultLayers } } })())
 const layerDrawerOpen = ref(false)
+const zoomLevel = ref(12)
+const zoomDetail = computed(() => zoomLevel.value < 14 ? 'Neighborhood' : zoomLevel.value <= 16 ? 'Field detail' : 'Close detail')
 const mobileMoreOpen = ref(false)
 const mapEl = ref(null)
 const searchConfig = ref(null)
@@ -171,7 +173,7 @@ function applyLayerVisibility(settings = layerSettings.value) {
 watch(layerSettings, settings => {
   applyLayerVisibility(settings)
 }, { deep: true })
-watch(() => activeTool.value, tool => { if (map?.getCanvas()) map.getCanvas().style.cursor = tool === 'pin' && pendingMarkerType.value ? 'crosshair' : '' })
+watch(() => activeTool.value, tool => { if (map?.getCanvas()) map.getCanvas().style.cursor = ['pin','camera','note','access','move-camera','move-object'].includes(tool) ? 'crosshair' : '' })
 watch(() => selected.value?.id, id => { attachments.value = []; tasks.value = []; refreshCameraSource(); if (id) { loadAttachments(id); loadTasks(id) } })
 watch(activeSession, session => { if (session && restoreSearchPending.value) { searchResultOpen.value = true; restoreSearchPending.value = false } })
 function inTimeline(value) {
@@ -258,11 +260,19 @@ function fitInitialHomeContext() {
     const point = object.geometry?.type === 'Point' ? object.geometry.coordinates : [object.centroid_lon, object.centroid_lat]
     if (!Array.isArray(point) || !validCoordinatePair(point[0], point[1])) return null
     return { point: [Number(point[0]), Number(point[1])], distance: miles(home, [Number(point[0]), Number(point[1])]) }
-  }).filter(item => item && item.distance <= 3).sort((a, b) => a.distance - b.distance).slice(0, 8)
-  if (!nearby.length) { map.setCenter(home); map.setZoom(13.2); return }
+  }).filter(item => item && item.distance <= 2).sort((a, b) => a.distance - b.distance).slice(0, 8)
+  if (!nearby.length) { map.setCenter(home); map.setZoom(14.8); return }
   const bounds = new maplibregl.LngLatBounds(home, home)
   for (const item of nearby) bounds.extend(item.point)
-  map.fitBounds(bounds, { padding: window.matchMedia('(max-width: 760px)').matches ? 42 : 64, maxZoom: 13.5, duration: 0 })
+  map.fitBounds(bounds, { padding: window.matchMedia('(max-width: 760px)').matches ? 42 : 64, maxZoom: 15.5, duration: 0 })
+}
+
+function focusHome(radiusMiles = null) {
+  const home = [Number(searchConfig.value?.home_longitude), Number(searchConfig.value?.home_latitude)]
+  if (!map || !validCoordinatePair(home[0], home[1])) return
+  if (radiusMiles == null) { map.easeTo({ center: home, zoom: 16, duration: 450 }); return }
+  const latDelta = radiusMiles / 69, lonDelta = radiusMiles / (69 * Math.max(0.1, Math.cos(home[1] * Math.PI / 180)))
+  map.fitBounds([[home[0] - lonDelta, home[1] - latDelta], [home[0] + lonDelta, home[1] + latDelta]], { padding: 48, duration: 450, maxZoom: 20 })
 }
 
 async function loadCameras() {
@@ -774,7 +784,16 @@ function editSelectedAccess() {
 }
 
 async function createCamera(coordinates, context = '') {
+  if (map && map.getZoom() < 17) map.easeTo({ center: coordinates, zoom: 17, duration: 350 })
   draftObject.value = { kind: 'camera', geometry: { type: 'Point', coordinates }, initialForm: context ? { notes: `${context}\nReference context only; not local field evidence.` } : null }
+}
+
+function beginMovePlacement() {
+  if (selected.value?.object_type === 'trail_camera' && map?.getZoom() < 17) {
+    const coordinates = selected.value.geometry?.coordinates
+    if (coordinates?.length === 2) map.easeTo({ center: coordinates, zoom: 17, duration: 350 })
+  }
+  activeTool.value = selected.value?.object_type === 'trail_camera' ? 'move-camera' : 'move-object'
 }
 
 function createNote(coordinates, context = '', provenance = environmentContext.value) {
@@ -1319,8 +1338,10 @@ onMounted(async () => {
   window.addEventListener('archie:photo-location', showPhotoGps)
   map = new maplibregl.Map({
     container: mapEl.value, style: 'https://tiles.openfreemap.org/styles/positron',
-    center: searchConfig.value ? [searchConfig.value.home_longitude, searchConfig.value.home_latitude] : [-79.117282, 35.845701], zoom: 12, attributionControl: true
+    center: searchConfig.value ? [searchConfig.value.home_longitude, searchConfig.value.home_latitude] : [-79.117282, 35.845701], zoom: 12, maxZoom: 20, renderWorldCopies: false, dragRotate: false, pitchWithRotate: false, attributionControl: true
   })
+  map.touchZoomRotate.disableRotation()
+  map.on('zoom', () => { zoomLevel.value = map.getZoom() })
   map.on('contextmenu', onMapContextMenu)
   const baseTimeout = setTimeout(() => { if (mapHealth.value.status === 'loading') mapHealth.value = { ...mapHealth.value, status: 'failed' } }, 12000)
   map.on('error', event => {
@@ -1335,6 +1356,7 @@ onMounted(async () => {
   canvasContainer.addEventListener('pointerup', cancelLongPress)
   canvasContainer.addEventListener('pointercancel', cancelLongPress)
   map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right')
+  map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'imperial' }), 'bottom-left')
   map.on('load', async () => {
     clearTimeout(baseTimeout)
     applyCatMapStyle(map)
@@ -1380,14 +1402,14 @@ onMounted(async () => {
       'fill-color': '#477b7a', 'fill-opacity': ['*', ['coalesce', ['get', 'opacity'], 0.3], 0.18]
     } })
     map.addLayer({ id: 'camera-cones-outline', type: 'line', source: 'camera-cones', paint: {
-      'line-color': '#477b7a', 'line-width': ['case', ['==', ['get', 'current'], true], 1.5, 1],
+      'line-color': '#477b7a', 'line-width': ['case', ['==', ['get', 'current'], true], 2, 1],
       'line-opacity': ['coalesce', ['get', 'opacity'], 0.3], 'line-dasharray': ['case', ['==', ['get', 'current'], true], ['literal', [1, 0]], ['literal', [2, 2]]]
     } })
     map.addLayer({ id: 'trail-camera-history-points', type: 'circle', source: 'camera-history-points', paint: {
       'circle-radius': 5, 'circle-color': '#477b7a', 'circle-opacity': ['coalesce', ['get', 'opacity'], 0.3], 'circle-stroke-color': '#f6f4e8', 'circle-stroke-width': 1.5
     } })
     map.addLayer({ id: 'selected-camera-handles', type: 'circle', source: 'selected-camera-handles', paint: {
-      'circle-radius': 14, 'circle-color': ['match', ['get', 'handle'], 'center', '#f6f4e8', '#d66a16'],
+      'circle-radius': ['match', ['get', 'handle'], 'center', 14, 12], 'circle-color': ['match', ['get', 'handle'], 'center', '#f6f4e8', '#d66a16'],
       'circle-stroke-color': '#264d40', 'circle-stroke-width': 2
     } })
     map.addLayer({ id: 'candidate-reports-point', type: 'circle', source: 'candidate-reports', filter: ['!', ['has', 'point_count']], paint: {
@@ -1438,7 +1460,7 @@ onMounted(async () => {
       layout: { 'text-field': ['concat', ['case', ['>', ['coalesce', ['get', 'dog_count'], 0], 0], ['concat', 'D', ['to-string', ['coalesce', ['get', 'dog_count'], 0]]], ''], ['case', ['>', ['coalesce', ['get', 'outdoor_cat_count'], 0], 0], ['concat', ' · C', ['to-string', ['coalesce', ['get', 'outdoor_cat_count'], 0]]], ''], ['case', ['==', ['get', 'camera_permission'], 'yes'], ' · CAM', '']],
         'text-size': 9, 'text-offset': [1, 1.05], 'text-allow-overlap': false }, paint: { 'text-color': '#34483c', 'text-halo-color': '#fffaf0', 'text-halo-width': 1.5 } })
     map.addLayer({ id: 'trail-camera-points', type: 'circle', source: 'surveyor-objects', filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'object_type'], 'trail_camera']], paint: {
-      'circle-radius': 9, 'circle-color': '#477b7a', 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2
+      'circle-radius': 9, 'circle-color': '#477b7a', 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 2.5
     } })
     map.addLayer({ id: 'surveyor-labels', type: 'symbol', source: 'surveyor-objects', filter: ['==', ['geometry-type'], 'Point'], layout: {
       'text-field': ['get', 'name'], 'text-offset': [0, 1.25], 'text-size': 12, 'text-anchor': 'top'
@@ -1468,10 +1490,10 @@ onMounted(async () => {
       if (!feature) return
       showCandidateCluster(feature)
     })
-    map.on('mouseenter', 'surveyor-points', () => { map.getCanvas().style.cursor = activeTool.value === 'pin' && pendingMarkerType.value ? 'crosshair' : 'pointer' })
-    map.on('mouseleave', 'surveyor-points', () => { map.getCanvas().style.cursor = activeTool.value === 'pin' && pendingMarkerType.value ? 'crosshair' : '' })
-    map.on('mouseenter', 'trail-camera-points', () => { map.getCanvas().style.cursor = activeTool.value === 'pin' && pendingMarkerType.value ? 'crosshair' : 'pointer' })
-    map.on('mouseleave', 'trail-camera-points', () => { map.getCanvas().style.cursor = activeTool.value === 'pin' && pendingMarkerType.value ? 'crosshair' : '' })
+    map.on('mouseenter', 'surveyor-points', () => { map.getCanvas().style.cursor = ['pin','camera','note','access','move-camera','move-object'].includes(activeTool.value) ? 'crosshair' : 'pointer' })
+    map.on('mouseleave', 'surveyor-points', () => { map.getCanvas().style.cursor = ['pin','camera','note','access','move-camera','move-object'].includes(activeTool.value) ? 'crosshair' : '' })
+    map.on('mouseenter', 'trail-camera-points', () => { map.getCanvas().style.cursor = ['pin','camera','note','access','move-camera','move-object'].includes(activeTool.value) ? 'crosshair' : 'pointer' })
+    map.on('mouseleave', 'trail-camera-points', () => { map.getCanvas().style.cursor = ['pin','camera','note','access','move-camera','move-object'].includes(activeTool.value) ? 'crosshair' : '' })
     map.on('click', onMapClick)
     registerSurveyorIcons(map).then(({ registered }) => {
       if (!registered.length || !map.getLayer('surveyor-points')) return
@@ -1553,19 +1575,19 @@ onBeforeUnmount(() => {
     <div v-if="photoLocation" class="located-address-banner photo-gps-banner"><div><p class="eyebrow">PHOTO GPS · TEMPORARY MAP FOCUS</p><strong>{{ photoLocation.latitude.toFixed(5) }}, {{ photoLocation.longitude.toFixed(5) }}</strong><span>Map object location was not changed.</span></div><button class="dismiss-location-focus" aria-label="Dismiss photo location" @click="dismissPhotoGps">×</button></div>
     <div class="surveyor-workspace">
       <SurveyorToolbar :active-tool="activeTool" :can-undo="history.canUndo.value" :can-redo="history.canRedo.value" @tool="activateTool" @more="mobileMoreOpen=!mobileMoreOpen" @undo="undoLast" @redo="redoLast" />
-      <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><MapLegend :layers="layerSettings" /><div v-if="mapHealth.status !== 'ready'" class="map-health-badge" :class="mapHealth.status === 'degraded' ? 'degraded' : 'failed'" role="status">{{ mapHealth.status === 'loading' ? 'Loading geography…' : mapHealth.status === 'degraded' ? 'Base geography degraded' : 'Base geography unavailable' }}<button v-if="mapHealth.status !== 'loading'" @click="retryBaseMap">Reload map</button></div><button class="map-layer-control" type="button" :aria-expanded="layerDrawerOpen" @click="layerDrawerOpen=!layerDrawerOpen">Overlays</button><div v-if="pendingMarkerType && activeTool === 'pin'" class="marker-placement-badge"><i :style="{ backgroundColor: OBJECT_TYPES[pendingMarkerType]?.color }">{{ OBJECT_TYPES[pendingMarkerType]?.icon.slice(0,1).toUpperCase() }}</i><span>{{ OBJECT_TYPES[pendingMarkerType]?.label.toUpperCase() }} · Tap map to place</span><button type="button" @click="markerPickerOpen=true">Change</button></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','access','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? '' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : activeTool === 'access' ? 'Tap a property to record access details' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option v-for="(zone, key) in ZONE_TYPES" :key="key" :value="key">{{ zone.label }}</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
+      <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><MapLegend :layers="layerSettings" /><div v-if="mapHealth.status !== 'ready'" class="map-health-badge" :class="mapHealth.status === 'degraded' ? 'degraded' : 'failed'" role="status">{{ mapHealth.status === 'loading' ? 'Loading geography…' : mapHealth.status === 'degraded' ? 'Base geography degraded' : 'Base geography unavailable' }}<button v-if="mapHealth.status !== 'loading'" @click="retryBaseMap">Reload map</button></div><div class="map-view-controls"><button type="button" @click="focusHome()">Home</button><button type="button" @click="focusHome(1)">1 mi</button><button type="button" @click="focusHome(2)">2 mi</button><button class="map-layer-control" type="button" :aria-expanded="layerDrawerOpen" @click="layerDrawerOpen=!layerDrawerOpen">Overlays</button></div><span class="map-detail-state">{{ zoomDetail }}</span><div v-if="pendingMarkerType && activeTool === 'pin'" class="marker-placement-badge"><i :style="{ backgroundColor: OBJECT_TYPES[pendingMarkerType]?.color }">{{ OBJECT_TYPES[pendingMarkerType]?.icon.slice(0,1).toUpperCase() }}</i><span>{{ OBJECT_TYPES[pendingMarkerType]?.label.toUpperCase() }} · Tap map to place</span><button type="button" @click="markerPickerOpen=true">Change</button></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','access','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? '' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : activeTool === 'access' ? 'Tap a property to record access details' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option v-for="(zone, key) in ZONE_TYPES" :key="key" :value="key">{{ zone.label }}</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
       <div v-if="layerDrawerOpen" class="layer-drawer-backdrop" @click="layerDrawerOpen=false"></div><LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" :provider-status="environmentStatus" @update:model-value="layerSettings = $event" @retry-provider="environmentController?.retry($event)" @close="layerDrawerOpen = false" />
       <EnvironmentalInspector v-if="selectedEnvironment" :feature="selectedEnvironment" @close="selectedEnvironment=null" @add-note="createFromEnvironmentalFeature('note')" @add-marker="createFromEnvironmentalFeature('marker')" />
       <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(metersToFeet(selectedHistoricalPlacement.range_meters)) }} ft</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
       <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" @add-outing="addToOuting({ title: `Review ${selectedCandidate.name || 'candidate case'}`, candidate_case_id: selectedCandidate.case_id || selectedCandidate.id })" />
-      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" @add-outing="addObjectToOuting(selected)" @add-task-outing="addTaskToOuting($event, selected.id)" />
+      <ObjectInspector v-else-if="selected" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="beginMovePlacement" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" @add-outing="addObjectToOuting(selected)" @add-task-outing="addTaskToOuting($event, selected.id)" />
     </div>
 
     <div v-if="mobileMoreOpen" class="mobile-more-menu"><button @click="activateTool('line'); mobileMoreOpen=false">Line</button><button @click="activateTool('link'); mobileMoreOpen=false">Link</button><button @click="activateTool('access'); mobileMoreOpen=false">Property / access</button><button @click="undoLast" :disabled="!history.canUndo.value">Undo</button><button @click="redoLast" :disabled="!history.canRedo.value">Redo</button><button disabled>Measure · coming soon</button><button v-if="!activeSession" @click="openPreflight(); mobileMoreOpen=false">Start search</button><button v-else @click="endSearch">End search</button></div>
     <MobileInspectorSheet :open="Boolean(selected || selectedCandidate || selectedHistoricalPlacement)" @close="selected=null; selectedCandidate=null; selectedHistoricalPlacement=null">
       <template v-if="selectedCandidate"><p class="eyebrow">CANDIDATE REPORT · {{ selectedCandidate.source }}</p><h2>{{ selectedCandidate.name || 'Found cat report' }}</h2><p>{{ selectedCandidate.location_text }}</p><a class="primary candidate-open-link" :href="`/#post-${selectedCandidate.case_id || selectedCandidate.id}`">Open Candidate</a><button class="secondary-button" @click="createEvidenceFromCandidate">Create evidence marker</button><button class="secondary-button" @click="addToOuting({ title: `Review ${selectedCandidate.name || 'candidate case'}`, candidate_case_id: selectedCandidate.case_id || selectedCandidate.id })">＋ Add to outing</button></template>
       <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(metersToFeet(selectedHistoricalPlacement.range_meters)) }} ft</p></template>
-      <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" @add-outing="addObjectToOuting(selected)" @add-task-outing="addTaskToOuting($event, selected.id)" />
+      <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="beginMovePlacement" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" @add-outing="addObjectToOuting(selected)" @add-task-outing="addTaskToOuting($event, selected.id)" />
     </MobileInspectorSheet>
     <div v-if="markerPickerOpen" class="marker-picker-layer"><MarkerTypePicker @select="chooseMarkerType" @close="closeMarkerPicker" /></div>
     <div v-if="objectStack.length" class="field-sheet-backdrop object-stack-backdrop" @click.self="objectStack=[]"><ObjectStackSheet :objects="objectStack" @select="chooseStackedObject" @close="objectStack=[]" /></div>

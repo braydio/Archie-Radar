@@ -30,14 +30,15 @@ function lineSegments(geometry) {
 
 export function createMapFeatureSnapper(map, getSettings, setTarget, threshold = 12) {
   return event => {
+    const snapThreshold = map.getZoom() >= 16 ? 9 : threshold
     const settings = getSettings()
     const screenPoint = [event.containerX, event.containerY]
-    const bounds = [[screenPoint[0] - threshold, screenPoint[1] - threshold], [screenPoint[0] + threshold, screenPoint[1] + threshold]]
+    const bounds = [[screenPoint[0] - snapThreshold, screenPoint[1] - snapThreshold], [screenPoint[0] + snapThreshold, screenPoint[1] + snapThreshold]]
     let features = []
     try { features = map.queryRenderedFeatures(bounds) } catch { setTarget(null); return undefined }
     let best = null
     const accept = (candidate, coordinate, kind, authoritativeHydro = false) => {
-      if (candidate.distance > threshold) return
+      if (candidate.distance > snapThreshold) return
       const preferred = !best || (authoritativeHydro && !best.authoritativeHydro && candidate.distance <= best.distance + 4) ||
         (!authoritativeHydro && best.authoritativeHydro && candidate.distance < best.distance - 4) ||
         (authoritativeHydro === best?.authoritativeHydro && candidate.distance < best.distance)

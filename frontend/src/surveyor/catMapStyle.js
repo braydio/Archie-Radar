@@ -16,7 +16,12 @@ export function applyCatMapStyle(map) {
         continue
       }
       if (layer.type === 'symbol') {
-        if (match(identity, /poi|shop|restaurant|transit|station|address|housenumber|amenity|building/)) {
+        if (match(identity, /housenumber|house_number|address/)) {
+          map.setLayoutProperty(layer.id, 'visibility', 'visible')
+          try { map.setLayerZoomRange(layer.id, 16, 24) } catch {}
+          try { map.setLayoutProperty(layer.id, 'text-size', 10.5) } catch {}
+          for (const [property, value] of Object.entries({ 'text-color': '#6b6256', 'text-halo-color': '#faf7ef', 'text-halo-width': 1.3, 'text-opacity': 0.82 })) try { map.setPaintProperty(layer.id, property, value) } catch {}
+        } else if (match(identity, /poi|shop|restaurant|transit|station|amenity|building/)) {
           map.setLayoutProperty(layer.id, 'visibility', 'none')
         } else {
           map.setPaintProperty(layer.id, 'text-color', match(identity, /road|transport/ ) ? '#6f6d66' : paint.label)
@@ -32,19 +37,38 @@ export function applyCatMapStyle(map) {
           map.setPaintProperty(layer.id, 'fill-color', paint.forest)
           map.setPaintProperty(layer.id, 'fill-opacity', 0.66)
         } else if (match(identity, /building/)) {
-          map.setPaintProperty(layer.id, 'fill-color', paint.developed)
-          map.setPaintProperty(layer.id, 'fill-opacity', 0.42)
+          map.setPaintProperty(layer.id, 'fill-color', '#d8d0c1')
+          map.setPaintProperty(layer.id, 'fill-opacity', ['interpolate', ['linear'], ['zoom'], 14, 0.30, 16, 0.58, 18, 0.72])
+          try { map.setPaintProperty(layer.id, 'fill-outline-color', '#a99f90') } catch {}
         } else if (match(identity, /industrial|commercial/)) {
           map.setPaintProperty(layer.id, 'fill-color', '#e7e0d6')
           map.setPaintProperty(layer.id, 'fill-opacity', 0.42)
         }
       } else if (layer.type === 'line') {
-        if (match(identity, /boundary|admin/)) {
+        if (match(identity, /fence|wall|barrier|hedge/)) {
+          try { map.setLayerZoomRange(layer.id, 16, 24) } catch {}
+          map.setPaintProperty(layer.id, 'line-color', match(identity, /hedge/) ? '#78896f' : '#7f8278')
+          map.setPaintProperty(layer.id, 'line-width', ['interpolate', ['linear'], ['zoom'], 16, 0.6, 19, 1.1])
+          map.setPaintProperty(layer.id, 'line-opacity', 0.7)
+        } else if (match(identity, /building|structure/)) {
+          map.setPaintProperty(layer.id, 'line-color', '#a99f90')
+          map.setPaintProperty(layer.id, 'line-width', ['interpolate', ['linear'], ['zoom'], 15, 0.6, 19, 1.2])
+          map.setPaintProperty(layer.id, 'line-opacity', 0.75)
+        } else if (match(identity, /boundary|admin/)) {
           map.setPaintProperty(layer.id, 'line-opacity', 0.08)
-        } else if (match(identity, /water|river|stream|canal/)) {
+        } else if (match(identity, /water|river|stream|canal|ditch|drain/)) {
           map.setPaintProperty(layer.id, 'line-color', '#8db4bd')
           map.setPaintProperty(layer.id, 'line-opacity', 0.86)
-          map.setPaintProperty(layer.id, 'line-width', ['interpolate', ['linear'], ['zoom'], 7, 0.8, 13, 2.1, 16, 3.1])
+          map.setPaintProperty(layer.id, 'line-width', ['interpolate', ['linear'], ['zoom'], 7, 0.8, 14, 1.2, 17, 2.2, 19, 3])
+        } else if (match(identity, /service|driveway|parking_aisle|parking-aisle/)) {
+          map.setPaintProperty(layer.id, 'line-color', '#c7bca9')
+          map.setPaintProperty(layer.id, 'line-width', ['interpolate', ['linear'], ['zoom'], 14, 0.7, 18, 2.2])
+          map.setPaintProperty(layer.id, 'line-opacity', 0.82)
+        } else if (match(identity, /footway|path|trail|track|pedestrian|steps/)) {
+          map.setPaintProperty(layer.id, 'line-color', '#8d826d')
+          map.setPaintProperty(layer.id, 'line-width', ['interpolate', ['linear'], ['zoom'], 14, 0.7, 18, 1.8])
+          map.setPaintProperty(layer.id, 'line-opacity', 0.8)
+          try { map.setPaintProperty(layer.id, 'line-dasharray', [1.4, 1.2]) } catch {}
         } else if (match(identity, /motorway|trunk/)) {
           map.setPaintProperty(layer.id, 'line-color', paint.major)
           map.setPaintProperty(layer.id, 'line-opacity', 0.78)
@@ -81,7 +105,7 @@ export function auditCatMapStyle(map) {
     const identity = `${layer.id || ''} ${layer['source-layer'] || ''}`.toLowerCase()
     return /road|transportation|highway|water|river|lake|stream|place|label|name/.test(identity)
   }).map(layer => layer.source).filter(Boolean))]
-  return { status: roads && water && labels ? 'ready' : 'degraded', roads, water, labels, natural, baseSourceIds }
+  return { status: roads && water && labels ? 'ready' : 'degraded', roads, water, labels, natural, buildings: has(/building|structure/), addresses: has(/housenumber|house_number|address/), paths: has(/footway|path|trail|track|pedestrian/), baseSourceIds }
 }
 
 export const CAT_MAP_PALETTE = paint
