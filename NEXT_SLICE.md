@@ -47,6 +47,9 @@ frontend/src/views/CandidateCaseView.vue            223 lines
 frontend/src/views/CandidatesView.vue                review-page orientation
 frontend/src/components/surveyor/SearchSessionBar.vue duplicate overlay control
 frontend/src/components/surveyor/MarkerTypePicker.vue NEW · marker-first placement
+frontend/src/components/FacebookGroupsPanel.vue        Facebook sync observability
+backend/app/connectors/regional_24petconnect.py       inactive-link correctness
+backend/tests/test_regional_24petconnect.py            focused 24Pet regression
 ```
 
 Do not touch other files unless a named anchor no longer exists.
@@ -462,6 +465,340 @@ Unavailable
 ```
 
 Do not turn wetlands or wildlife on by default merely to avoid the word unavailable.
+
+---
+
+# 1G. P0 — FACEBOOK SYNC MUST EXPLAIN WHAT HAPPENED
+
+Current:
+```text
+frontend/src/components/FacebookGroupsPanel.vue:1-174
+frontend/src/views/CandidatesView.vue:635
+frontend/src/style.css:96-122
+```
+
+The backend already exposes enough telemetry. Do not add DB fields or migrations.
+
+Available run fields:
+```text
+status
+requested_group_count
+successful_group_count
+posts_seen
+posts_new
+posts_updated
+posts_filtered
+exact_duplicates
+crossposts_combined
+started_at
+completed_at
+error_summary
+groups[]
+```
+
+Available group receipt fields:
+```text
+status
+scanned
+cat_related
+posts_new
+already_known
+crossposts_combined
+parser_warning
+error
+group.last_success_at
+```
+
+The UI currently surfaces only:
+`scanned · new · cross-posts`
+
+That makes "1 new" impossible to interpret.
+
+## FacebookGroupsPanel.vue
+
+Add computed totals from `latestRun.groups`:
+```js
+catRelated = sum(receipt.cat_related)
+alreadyKnown = sum(receipt.already_known)
+failedGroups = count(status === 'failed')
+warningGroups = count(status === 'parser_warning')
+finishedGroups = count(status in ['success','failed','parser_warning','disabled'])
+```
+
+Do not add backend aggregation for values already present in group receipts.
+
+### Prominent run state
+
+Replace the plain:
+`Last sync · complete`
+
+with a visually distinct state banner:
+
+```text
+✓ Facebook sync complete
+4 / 4 groups completed
+```
+
+Statuses:
+- queued → neutral/blue `Queued`
+- syncing → active/blue `Syncing · 2/4 groups finished`
+- complete → green `Sync complete`
+- partial → amber `Partial sync`
+- failed → red `Sync failed`
+
+Use text + icon/symbol + color. Never color alone.
+
+### Main receipt metrics
+
+Always show a compact responsive metric row for a completed/partial/failed run:
+
+```text
+86 scanned
+13 cat-related
+1 new
+12 already in Radar
+73 filtered
+2 cross-posts merged
+```
+
+Only render metrics that are available/nonzero except:
+- scanned;
+- new;
+- successful groups.
+
+`already in Radar` = sum of group `already_known`.
+
+Do not present these values as an arithmetic partition unless the backend guarantees that relationship. They are diagnostics.
+
+### Interpret "only 1 new"
+
+Add one concise human sentence based on run state:
+
+Complete, all groups successful, low new count:
+```text
+Collector completed normally. 1 unique candidate was new; 12 cat-related reports were already in Radar.
+```
+
+Complete and no cat-related:
+```text
+Collector completed normally. It scanned 86 rendered posts but found no cat-related candidates.
+```
+
+Partial:
+```text
+Only 3 of 4 groups completed. Open group receipts to see which group needs attention.
+```
+
+Failed:
+```text
+The Facebook scan did not complete successfully. Open group receipts for the failure.
+```
+
+Do not guess why a post was filtered beyond the existing parser/error information.
+
+### Group receipts
+
+Keep receipts collapsible, but:
+- default them open for `partial` or `failed`;
+- each row gets visible ✓ / ! / × state;
+- render:
+  ```text
+  Group name
+  ✓ Success
+  28 scanned · 7 cat-related · 1 new · 6 already known · 1 cross-post merged
+  ```
+- warning/error text remains directly below;
+- while syncing, show each group's live `queued / syncing / success / failed` state.
+
+### Sync timing
+
+Show:
+- completed relative time;
+- duration when both timestamps exist.
+
+Do not show raw seconds if duration > 90s; format compactly.
+
+## Candidate feed must refresh automatically
+
+Current panel polling learns when a sync completes, but `CandidatesView` does not automatically reload the candidate feed.
+
+Add emit:
+```text
+sync-finished
+```
+
+In `FacebookGroupsPanel.vue`:
+- establish the current run id/status as baseline on first refresh;
+- emit only when a **newly observed run** reaches `complete|partial|failed`, or a run transitions from `queued|syncing` to terminal;
+- do not emit for the historical last sync merely because the component mounted.
+
+In `CandidatesView.vue`:
+```vue
+<FacebookGroupsPanel ... @sync-finished="handleFacebookSyncFinished" />
+```
+
+Handler:
+```js
+async function handleFacebookSyncFinished(run) {
+  await Promise.all([load(), loadQueueStats(), loadFilterOptions()])
+  facebookSyncNotice.value = run
+}
+```
+
+Render a compact dismissible notice near the main review controls so completion remains visible even if Sources is collapsed:
+
+Examples:
+```text
+✓ Facebook sync complete · 1 new · 4/4 groups
+! Facebook sync partial · 1 new · 3/4 groups
+× Facebook sync failed
+```
+
+Auto-dismiss after ~12 seconds or allow manual dismiss.
+Do not use browser notifications.
+
+### Important diagnostic outcome
+
+After this change, seeing `1 new` must immediately answer:
+- how many groups actually completed;
+- how many posts were scanned;
+- how many were cat-related;
+- how many were already known;
+- whether parser/auth/group errors occurred.
+
+This is the primary acceptance criterion.
+
+---
+
+# 1H. P0 — 24PETCONNECT: KEEP THE PHOTO, NEVER LINK A DEAD LISTING
+
+Current concrete issues:
+
+```text
+backend/app/connectors/regional_24petconnect.py
+  active(row) detail check
+
+frontend/src/components/CandidateCard.vue
+  sourceLink falls back to listing_url even when source_link_kind === 'unavailable'
+
+frontend/src/components/CandidateCard.vue
+  source-history anchors render whenever record.source_url exists
+
+frontend/src/components/SearchMap.vue
+  source popup semantics are already in this packet; unavailable must also suppress links
+```
+
+The photo and source link are independent.
+
+**A useful 24PetConnect image may remain displayed after the source listing becomes inactive.**
+Do not remove the image merely because the listing link is dead.
+
+## Connector: explicit inactive animal
+
+In `Regional24PetConnectConnector.fetch() -> active(row)`:
+
+Current flow parses:
+```python
+state, reason = self.parse_animal_lifecycle(text, row.source_id or "")
+```
+
+When `state == "inactive"`, return the row with:
+
+```python
+raw = {
+    **row.raw,
+    "listing_state": "inactive",
+    "listing_state_reason": reason,
+    "listing_state_checked_at": checked_at,
+    "source_link_kind": "unavailable",
+    "detail_url": None,
+}
+return row.model_copy(update={
+    "source_url": row.raw.get("listing_url") or row.source_url,
+    "raw": raw,
+})
+```
+
+Keep:
+- `image_url`;
+- animal id;
+- description/location/history.
+
+Do not delete an inactive source record. Candidate case history and its useful image remain valuable.
+
+If a detail link 404s/redirects/mismatches but the animal is still present on the saved result page:
+- keep existing active-as-seen lifecycle behavior;
+- mark `source_link_kind="unavailable"`;
+- never advertise the broken exact URL.
+
+## CandidateCard: unavailable means NO anchor
+
+Change 24Pet sourceLink logic:
+
+```js
+if (post.source_link_kind === 'unavailable') return null
+```
+
+Then:
+- no clickable source button when unavailable;
+- show a small non-link status:
+  - `24PetConnect listing inactive` when case/source lifecycle says inactive;
+  - otherwise `24PetConnect link unavailable`;
+- keep `Copy Animal ID`.
+
+In source history:
+- only render anchor when `record.source_link_kind !== 'unavailable'`;
+- unavailable row instead renders:
+  `Listing inactive` or `Link unavailable`;
+- if that row supplies the displayed image, keep:
+  `Current photo`.
+
+This makes the state understandable:
+```text
+Current photo · Listing inactive
+```
+is valid.
+
+## SearchMap
+
+When `source_link_kind === 'unavailable'`:
+- render no source anchor;
+- show `24PetConnect listing inactive` / `link unavailable` text;
+- Animal ID remains visible where available.
+
+Never fall back to a saved ViewAnimals URL merely to keep a button on screen when the normalized source-link state is unavailable.
+
+## Candidate source selection
+
+Do not change `choose_primary_case_image()`: inactive records may still supply the best image.
+
+Do not promote inactive records for:
+- current custody;
+- current location;
+- current record.
+
+Existing lifecycle selection already excludes inactive records from current location/custody/current-record preference. Preserve that behavior.
+
+## Regression tests
+
+Expand:
+`backend/tests/test_regional_24petconnect.py`
+
+Add:
+
+1. explicit adopted/reunited/inactive detail:
+   - row retained;
+   - image retained;
+   - `listing_state == inactive`;
+   - `source_link_kind == unavailable`;
+   - `detail_url is None`.
+
+2. broken exact detail URL with current search-result row:
+   - row retained;
+   - image retained when listing supplied one;
+   - source link unavailable.
+
+No new schema/migration.
 
 ---
 
@@ -1043,27 +1380,29 @@ One portrait pass: Layers + environment inspector + QuickAdd usable without over
 
 # 19. IMPLEMENTATION ORDER
 
-1. single Overlays control + truthful off/zoom/species statuses;
-2. load search config + home/nearby initial viewport;
-3. surface Tonight readiness bar using existing outing plan;
-4. Marker type-first picker + placement cue + stale-subtype fix;
-5. Candidates/Surveyor one-line workflow orientation;
-6. stale-setting closure + network refresh discipline;
-7. environment layer order;
-8. bbox bucket correctness;
-9. hydro naming/pagination/partial failure;
-10. wildlife pagination/clustering;
-11. base health + retry;
-12. inspector exclusivity + safe environmental marker action;
-13. boundary inspection;
-14. centralized zone types + picker fix;
-15. candidate provenance cleanup;
-16. pointer/mobile polish;
-17. focused backend tests;
-18. one frontend build if dependencies already exist;
-19. manual acceptance;
-20. commit/push `main`;
-21. deploy per `AGENTS.md` only if real DietPi access exists.
+1. Facebook sync observability + automatic candidate-feed refresh;
+2. 24Pet inactive/dead-link suppression while retaining photos;
+3. single Overlays control + truthful off/zoom/species statuses;
+4. load search config + home/nearby initial viewport;
+5. surface Tonight readiness bar using existing outing plan;
+6. Marker type-first picker + placement cue + stale-subtype fix;
+7. Candidates/Surveyor one-line workflow orientation;
+8. stale-setting closure + network refresh discipline;
+9. environment layer order;
+10. bbox bucket correctness;
+11. hydro naming/pagination/partial failure;
+12. wildlife pagination/clustering;
+13. base health + retry;
+14. inspector exclusivity + safe environmental marker action;
+15. boundary inspection;
+16. centralized zone types + picker fix;
+17. candidate provenance cleanup;
+18. pointer/mobile polish;
+19. focused backend tests;
+20. one frontend build if dependencies already exist;
+21. manual acceptance;
+22. commit/push `main`;
+23. deploy per `AGENTS.md` only if real DietPi access exists.
 
 ---
 
@@ -1086,6 +1425,11 @@ The disabled `Measure · coming soon` control is not part of 8B.
 
 # 21. DONE WHEN
 
+- Facebook sync clearly shows success/partial/failure, group completion, scanned/cat-related/new/already-known counts, and per-group receipts;
+- candidate review feed automatically refreshes when a newly observed Facebook sync finishes;
+- "1 new" is diagnostically understandable without inspecting logs;
+- inactive/unavailable 24PetConnect records may retain photos but never render dead source links;
+- 24Pet source history explicitly distinguishes "Current photo" from "Listing inactive/link unavailable";
 - Surveyor opens framed around home + nearby local field markers;
 - HOME is visually identifiable without dominating the map;
 - only one user-facing Overlays control exists;
