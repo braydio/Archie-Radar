@@ -6,7 +6,7 @@ import { TerraDraw, TerraDrawLineStringMode, TerraDrawPolygonMode, TerraDrawSele
 import { TerraDrawMapLibreGLAdapter } from 'terra-draw-maplibre-gl-adapter'
 import { applyCatMapStyle, auditCatMapStyle } from '../surveyor/catMapStyle.js'
 import { createEnvironmentLayers } from '../surveyor/environmentLayers.js'
-import { PIN_TYPES } from '../surveyor/objectTypes.js'
+import { PIN_TYPES, OBJECT_TYPES, ZONE_TYPES } from '../surveyor/objectTypes.js'
 import { useRoute } from 'vue-router'
 import { createMapFeatureSnapper } from '../surveyor/snapEngine.js'
 import SurveyTimeline from '../components/surveyor/SurveyTimeline.vue'
@@ -28,6 +28,7 @@ import SearchSessionMedia from '../components/surveyor/SearchSessionMedia.vue'
 import SearchSessionDetail from '../components/surveyor/SearchSessionDetail.vue'
 import OutingPreflight from '../components/surveyor/OutingPreflight.vue'
 import QuickAddMenu from '../components/surveyor/QuickAddMenu.vue'
+import MarkerTypePicker from '../components/surveyor/MarkerTypePicker.vue'
 import ObjectStackSheet from '../components/surveyor/ObjectStackSheet.vue'
 import DraftRecoveryPrompt from '../components/surveyor/DraftRecoveryPrompt.vue'
 import { cameraConePolygon, cameraHandlePoints, destinationPoint } from '../surveyor/cameraGeometry.js'
@@ -50,6 +51,8 @@ const layerSettings = ref((() => { try { const saved = JSON.parse(localStorage.g
 const layerDrawerOpen = ref(false)
 const mobileMoreOpen = ref(false)
 const mapEl = ref(null)
+const searchConfig = ref(null)
+let initialViewportApplied = false
 const objects = ref([])
 const candidates = ref([])
 const cameras = ref([])
@@ -74,6 +77,8 @@ const sessionMethod = ref('walking')
 const outingPlan = ref(null)
 const preflightOpen = ref(false)
 const outingPreflight = ref(null)
+const readiness = computed(() => outingPlan.value?.readiness || {})
+const readinessRemaining = computed(() => Number(readiness.value.prep_remaining || 0) + Number(readiness.value.packing_remaining || 0))
 const trackCoords = ref([])
 const trackTimes = ref([])
 const locationWarning = ref('')
@@ -91,6 +96,10 @@ const error = ref('')
 const mapHealth = ref({ status: 'loading', roads: false, water: false, labels: false, natural: false })
 const environmentStatus = ref({})
 const selectedEnvironment = ref(null)
+const markerPickerOpen = ref(false)
+const pendingMarkerType = ref(null)
+const environmentContext = ref('')
+const environmentName = ref('')
 let environmentController = null
 const title = ref('')
 const subtype = ref('sighting')
@@ -130,6 +139,7 @@ let candidateMapRequest = null
 let surveyorCoreLoaded = false
 
 const types = PIN_TYPES
+const zoneColorMatch = ['match', ['get', 'subtype'], ...Object.entries(ZONE_TYPES).flatMap(([key, value]) => [key, value.color]), '#75866e']
 function finiteOptional(value) {
   if (value === null || value === undefined || value === '') return undefined
   const numeric = Number(value)
@@ -161,6 +171,7 @@ function applyLayerVisibility(settings = layerSettings.value) {
 watch(layerSettings, settings => {
   applyLayerVisibility(settings)
 }, { deep: true })
+watch(() => activeTool.value, tool => { if (map?.getCanvas()) map.getCanvas().style.cursor = tool === 'pin' && pendingMarkerType.value ? 'crosshair' : '' })
 watch(() => selected.value?.id, id => { attachments.value = []; tasks.value = []; refreshCameraSource(); if (id) { loadAttachments(id); loadTasks(id) } })
 watch(activeSession, session => { if (session && restoreSearchPending.value) { searchResultOpen.value = true; restoreSearchPending.value = false } })
 function inTimeline(value) {
@@ -210,6 +221,7 @@ async function loadObjects() {
       const center = focusObject.geometry.type === 'Point' ? focusObject.geometry.coordinates : [focusObject.centroid_lon, focusObject.centroid_lat]
       if (center?.length === 2 && center.every(value => Number.isFinite(Number(value)))) map?.flyTo({ center: center.map(Number), zoom: Math.max(map.getZoom(), 14) })
     }
+    fitInitialHomeContext()
   } catch (err) { error.value = err.message }
   finally { loading.value = false; surveyorCoreLoaded = true }
   const defer = window.requestIdleCallback || (callback => window.setTimeout(callback, 350))
@@ -220,6 +232,37 @@ async function loadObjects() {
   loadOutingPlan()
   loadTaskLayer()
   loadAccessRecords()
+}
+
+async function loadSearchConfig() {
+  try {
+    const response = await fetch(`${API}/api/search-config`)
+    if (!response.ok) throw new Error(`Search config ${response.status}`)
+    searchConfig.value = await response.json()
+  } catch { searchConfig.value = null }
+}
+
+function fitInitialHomeContext() {
+  if (initialViewportApplied || !map || !searchConfig.value) return
+  initialViewportApplied = true
+  const home = [Number(searchConfig.value.home_longitude), Number(searchConfig.value.home_latitude)]
+  if (!validCoordinatePair(home[0], home[1])) return
+  const explicitFocus = route.query.object || locatedAddress.value || photoLocation.value || route.query.focus || activeSession.value
+  if (explicitFocus) return
+  const miles = ([lng1, lat1], [lng2, lat2]) => {
+    const rad = Math.PI / 180, dLat = (lat2 - lat1) * rad, dLng = (lng2 - lng1) * rad
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLng / 2) ** 2
+    return 3958.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  }
+  const nearby = objects.value.map(object => {
+    const point = object.geometry?.type === 'Point' ? object.geometry.coordinates : [object.centroid_lon, object.centroid_lat]
+    if (!Array.isArray(point) || !validCoordinatePair(point[0], point[1])) return null
+    return { point: [Number(point[0]), Number(point[1])], distance: miles(home, [Number(point[0]), Number(point[1])]) }
+  }).filter(item => item && item.distance <= 3).sort((a, b) => a.distance - b.distance).slice(0, 8)
+  if (!nearby.length) { map.setCenter(home); map.setZoom(13.2); return }
+  const bounds = new maplibregl.LngLatBounds(home, home)
+  for (const item of nearby) bounds.extend(item.point)
+  map.fitBounds(bounds, { padding: window.matchMedia('(max-width: 760px)').matches ? 42 : 64, maxZoom: 13.5, duration: 0 })
 }
 
 async function loadCameras() {
@@ -702,8 +745,9 @@ async function createLink(targetId) {
   } })
 }
 
-async function createPin(coordinates) {
-  draftObject.value = { kind: 'pin', geometry: { type: 'Point', coordinates }, subtype: subtype.value }
+async function createPin(coordinates, markerType = pendingMarkerType.value) {
+  if (!markerType) return
+  draftObject.value = { kind: 'pin', geometry: { type: 'Point', coordinates }, subtype: markerType }
 }
 
 async function accessSaved(record) {
@@ -729,12 +773,12 @@ function editSelectedAccess() {
   accessDraftRecord.value = accessRecords.value.find(item => item.map_object_id === selected.value.id) || null
 }
 
-async function createCamera(coordinates) {
-  draftObject.value = { kind: 'camera', geometry: { type: 'Point', coordinates } }
+async function createCamera(coordinates, context = '') {
+  draftObject.value = { kind: 'camera', geometry: { type: 'Point', coordinates }, initialForm: context ? { notes: `${context}\nReference context only; not local field evidence.` } : null }
 }
 
-function createNote(coordinates) {
-  draftObject.value = { kind: 'note', geometry: { type: 'Point', coordinates }, subtype: 'field_note' }
+function createNote(coordinates, context = '', provenance = environmentContext.value) {
+  draftObject.value = { kind: 'note', geometry: { type: 'Point', coordinates }, subtype: 'field_note', defaultName: context ? `Note near ${context}` : '', initialForm: context ? { notes: `${provenance}\nReference context only; not local field evidence.`.trim() } : null }
 }
 
 async function saveDraft(payload) {
@@ -767,7 +811,7 @@ async function saveDraft(payload) {
     title.value = object.name || ''; subtype.value = object.subtype || ''; notes.value = object.notes || ''
   }
   if (draftDrawId.value != null) draw?.removeFeatures([draftDrawId.value])
-  draftObject.value = null; restoredObjectForm.value = null; draftDrawId.value = null; activeTool.value = 'select'; draw?.setMode('select'); refreshSource(); refreshCameraSource()
+  draftObject.value = null; restoredObjectForm.value = null; draftDrawId.value = null; pendingMarkerType.value = null; activeTool.value = 'select'; draw?.setMode('select'); refreshSource(); refreshCameraSource()
 }
 
 function recordCreatedObject(payload, object) {
@@ -785,7 +829,7 @@ function recordCreatedObject(payload, object) {
 
 function cancelDraft() {
   if (draftDrawId.value != null) draw?.removeFeatures([draftDrawId.value])
-  draftObject.value = null; restoredObjectForm.value = null; draftDrawId.value = null; activeTool.value = 'select'; draw?.setMode('select')
+  draftObject.value = null; restoredObjectForm.value = null; draftDrawId.value = null; pendingMarkerType.value = null; activeTool.value = 'select'; draw?.setMode('select')
 }
 
 function cancelAccessDraft() { clearSurveyorDraft('access'); accessDraftCoordinates.value = null; accessDraftRecord.value = null; restoredAccessForm.value = null }
@@ -902,6 +946,7 @@ function chooseObject(event) {
 }
 
 function selectMapObject(id) {
+  selectedEnvironment.value = null; selectedHistoricalPlacement.value = null; selectedCandidate.value = null; candidateCluster.value = null
   selected.value = objects.value.find(object => object.id === Number(id)) || null
   if (selected.value) { title.value = selected.value.name || ''; subtype.value = selected.value.subtype || ''; notes.value = selected.value.notes || '' }
   const camera = cameras.value.find(item => item.map_object_id === selected.value?.id)
@@ -916,7 +961,7 @@ function chooseHistoricalPlacement(event) {
   if (map.queryRenderedFeatures(event.point, { layers: ['trail-camera-points', 'surveyor-points', 'surveyor-zones-fill', 'surveyor-lines'] }).length) { chooseObject(event); return }
   const feature = event.features?.[0]
   if (!feature) return
-  selected.value = null; selectedCandidate.value = null
+  selected.value = null; selectedCandidate.value = null; selectedEnvironment.value = null; candidateCluster.value = null
   selectedHistoricalPlacement.value = { ...feature.properties, coordinates: feature.geometry.coordinates }
   refreshCameraSource()
 }
@@ -1055,7 +1100,7 @@ function showCandidateCluster(feature) {
 function openClusterCandidate(id) {
   const post = candidates.value.find(item => item.id === Number(id))
   if (!post) return
-  candidateCluster.value = null; selected.value = null; selectedCandidate.value = post
+  candidateCluster.value = null; selected.value = null; selectedHistoricalPlacement.value = null; selectedEnvironment.value = null; selectedCandidate.value = post
 }
 async function createEvidenceForCandidate(id) {
   const post = candidates.value.find(item => item.id === Number(id))
@@ -1144,7 +1189,8 @@ function onMapClick(event) {
   }
   if (!['pin', 'note', 'camera', 'access'].includes(activeTool.value)) return
   const overlays = map.queryRenderedFeatures(event.point, { layers: ['surveyor-points', 'trail-camera-points', 'camera-history-points', 'selected-camera-handles', 'candidate-reports-point'] })
-  if (overlays.length) return
+  const externalContext = map.queryRenderedFeatures(event.point, { layers: ['survey-hydro-streams-line', 'survey-hydro-waterbodies-fill', 'survey-hydro-waterbodies-outline', 'survey-wildlife-points', 'survey-county-lines', 'survey-county-labels', 'survey-state-lines'] })
+  if (overlays.length || externalContext.length) return
   const coordinates = [event.lngLat.lng, event.lngLat.lat]
   if (activeTool.value === 'access') { accessDraftCoordinates.value = coordinates; return }
   const create = activeTool.value === 'note' ? createNote : activeTool.value === 'camera' ? createCamera : createPin
@@ -1158,17 +1204,22 @@ function openQuickAdd(coordinates, clientX, clientY) {
 
 function chooseQuickAdd(kind, coordinates) {
   quickAdd.value = null; suppressMapClick.value = false
+  const provenance = environmentContext.value
+  const provenanceName = environmentName.value
+  environmentContext.value = ''
+  environmentName.value = ''
   if (kind === 'access') { accessDraftCoordinates.value = coordinates; return }
-  if (kind === 'camera') { createCamera(coordinates); return }
-  if (kind === 'note') { createNote(coordinates); return }
+  if (kind === 'camera') { createCamera(coordinates, provenance); return }
+  if (kind === 'note') { createNote(coordinates, provenance ? provenanceName : '', provenance); return }
   const evidence = kind === 'evidence'
   const pinType = kind === 'other' ? 'sighting' : kind
   draftObject.value = { kind: evidence ? 'evidence' : 'pin', geometry: { type: 'Point', coordinates },
     subtype: evidence ? 'reported_observation' : pinType,
     defaultName: ({ sighting: 'Sighting', possible_sighting: 'Possible sighting', camera_hit: 'Camera hit', coyote: 'Coyote observation', fox: 'Fox observation', dog_lives_here: 'Dog', outdoor_cat: 'Outdoor cat', food_station: 'Food station' })[pinType] || 'Field observation',
-    properties: activeSession.value ? { search_session_id: activeSession.value.id } : {} }
+    properties: activeSession.value ? { search_session_id: activeSession.value.id } : {},
+    initialForm: provenance ? { notes: `${provenance}\nReference context only; not local field evidence.` } : null }
 }
-function closeQuickAdd() { quickAdd.value = null; suppressMapClick.value = false }
+function closeQuickAdd() { quickAdd.value = null; suppressMapClick.value = false; environmentContext.value = ''; environmentName.value = '' }
 
 function onMapContextMenu(event) {
   event.originalEvent?.preventDefault?.()
@@ -1196,11 +1247,24 @@ function onPointerMove(event) {
 }
 
 function activateTool(tool) {
+  if (tool === 'pin') { markerPickerOpen.value = true; return }
   if (tool === 'link') linkStartId.value = null
   activeTool.value = tool
   if (tool === 'zone') draw?.setMode('polygon')
   else if (tool === 'line') draw?.setMode('linestring')
   else draw?.setMode('select')
+}
+
+function chooseMarkerType(type) {
+  pendingMarkerType.value = type
+  markerPickerOpen.value = false
+  activeTool.value = 'pin'
+  selected.value = null; selectedCandidate.value = null; selectedHistoricalPlacement.value = null; selectedEnvironment.value = null; objectStack.value = []
+  draw?.setMode('select')
+}
+function closeMarkerPicker() {
+  markerPickerOpen.value = false
+  if (!pendingMarkerType.value) activeTool.value = 'select'
 }
 
 function chooseStackedObject(id) {
@@ -1247,22 +1311,23 @@ async function restoreFieldDraft() {
 
 function discardFieldDraft() { clearSurveyorDraft(); draftRecovery.value = null }
 
-onMounted(() => {
+onMounted(async () => {
+  await loadSearchConfig()
   document.addEventListener('visibilitychange', onVisibilityChange)
   document.addEventListener('keydown', onHistoryKeydown)
   window.addEventListener('archie:location-focus', applyLocationFocus)
   window.addEventListener('archie:photo-location', showPhotoGps)
   map = new maplibregl.Map({
     container: mapEl.value, style: 'https://tiles.openfreemap.org/styles/positron',
-    center: [-79.117282, 35.845701], zoom: 12, attributionControl: true
+    center: searchConfig.value ? [searchConfig.value.home_longitude, searchConfig.value.home_latitude] : [-79.117282, 35.845701], zoom: 12, attributionControl: true
   })
   map.on('contextmenu', onMapContextMenu)
   const baseTimeout = setTimeout(() => { if (mapHealth.value.status === 'loading') mapHealth.value = { ...mapHealth.value, status: 'failed' } }, 12000)
   map.on('error', event => {
     const sourceUrl = event?.error?.url || event?.source?.url || ''
-    if (event?.sourceId === 'survey-wetlands-source') environmentStatus.value = { ...environmentStatus.value, wetlands: 'degraded' }
-    if (event?.sourceId === 'annual-landcover-source') environmentStatus.value = { ...environmentStatus.value, landcover: 'degraded' }
-    if (!map?.isStyleLoaded() && (!sourceUrl || sourceUrl.includes('openfreemap'))) mapHealth.value = { ...mapHealth.value, status: 'degraded' }
+    if (event?.sourceId === 'survey-wetlands-source') environmentController?.reportFailure('wetlands')
+    if (event?.sourceId === 'annual-landcover-source') environmentController?.reportFailure('landcover')
+    if (mapHealth.value.baseSourceIds?.includes(event?.sourceId) || /openfreemap/i.test(sourceUrl) || (!map?.isStyleLoaded() && !sourceUrl)) mapHealth.value = { ...mapHealth.value, status: 'degraded' }
   })
   const canvasContainer = map.getCanvasContainer()
   canvasContainer.addEventListener('pointerdown', onPointerDown)
@@ -1274,8 +1339,13 @@ onMounted(() => {
     clearTimeout(baseTimeout)
     applyCatMapStyle(map)
     mapHealth.value = auditCatMapStyle(map)
-    environmentController = createEnvironmentLayers({ map, api: API, getTimeline: () => timelineWindow.value, onStatus: value => { environmentStatus.value = value }, onSelect: value => { if (activeTool.value === 'select') { selected.value = null; selectedCandidate.value = null; selectedEnvironment.value = value } } })
+    environmentController = createEnvironmentLayers({ map, api: API, getTimeline: () => timelineWindow.value, isPlacementMode: () => activeTool.value === 'pin' && Boolean(pendingMarkerType.value), onStatus: value => { environmentStatus.value = value }, onSelect: value => { if (activeTool.value === 'select') { selected.value = null; selectedCandidate.value = null; selectedHistoricalPlacement.value = null; objectStack.value = []; candidateCluster.value = null; selectedEnvironment.value = value } } })
     await environmentController.install(layerSettings.value)
+    const home = [Number(searchConfig.value?.home_longitude ?? -79.117282), Number(searchConfig.value?.home_latitude ?? 35.845701)]
+    map.addSource('survey-home', { type: 'geojson', data: { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: home } } })
+    map.addLayer({ id: 'survey-home-halo', type: 'circle', source: 'survey-home', paint: { 'circle-radius': 10, 'circle-color': '#f4eee1', 'circle-opacity': .94, 'circle-stroke-color': '#34483d', 'circle-stroke-width': 1.5 } })
+    map.addLayer({ id: 'survey-home-point', type: 'circle', source: 'survey-home', paint: { 'circle-radius': 4, 'circle-color': '#34483d', 'circle-stroke-color': '#fffaf0', 'circle-stroke-width': 1 } })
+    map.addLayer({ id: 'survey-home-label', type: 'symbol', source: 'survey-home', layout: { 'text-field': 'HOME', 'text-size': 9, 'text-offset': [0, 1.6], 'text-allow-overlap': true }, paint: { 'text-color': '#34483d', 'text-halo-color': '#fffaf0', 'text-halo-width': 1.5 } })
     const snapper = createMapFeatureSnapper(map, () => snapSettings.value, target => { snapTarget.value = target })
     draw = new TerraDraw({ adapter: new TerraDrawMapLibreGLAdapter({ map }), modes: [
       new TerraDrawSelectMode(), new TerraDrawPolygonMode({ snapping: { toCustom: snapper } }),
@@ -1330,11 +1400,11 @@ onMounted(() => {
       'text-field': ['get', 'point_count_abbreviated'], 'text-size': 11
     }, paint: { 'text-color': '#ffffff' } })
     map.addLayer({ id: 'surveyor-zones-fill', type: 'fill', source: 'surveyor-objects', filter: ['==', ['geometry-type'], 'Polygon'], paint: {
-      'fill-color': ['match', ['get', 'subtype'], 'needs_search', '#dfad58', 'searched', '#667d69', 'known_cat_highway', '#58836f', 'wildlife_hotspot', '#9b7f61', '#75866e'],
+      'fill-color': zoneColorMatch,
       'fill-opacity': ['case', ['==', ['get', 'search_freshness'], 'stale'], 0.04, ['==', ['get', 'search_freshness'], 'aging'], 0.1, ['==', ['get', 'epistemic_state'], 'planning'], 0.08, ['==', ['get', 'confidence'], 'uncertain'], 0.09, 0.17]
     } })
     map.addLayer({ id: 'surveyor-zones-outline', type: 'line', source: 'surveyor-objects', filter: ['==', ['geometry-type'], 'Polygon'], paint: {
-      'line-color': ['match', ['get', 'subtype'], 'needs_search', '#c4943f', 'searched', '#667d69', 'known_cat_highway', '#58836f', '#75866e'],
+      'line-color': zoneColorMatch,
       'line-width': 1.8, 'line-opacity': ['case', ['==', ['get', 'search_freshness'], 'stale'], 0.38, ['==', ['get', 'search_freshness'], 'aging'], 0.68, 0.95],
       'line-dasharray': ['match', ['get', 'epistemic_state'], 'hypothesis', ['literal', [1, 2]], 'inferred', ['literal', [4, 2]], 'planning', ['literal', [2, 2]], ['literal', [1, 0]]]
     } })
@@ -1398,10 +1468,10 @@ onMounted(() => {
       if (!feature) return
       showCandidateCluster(feature)
     })
-    map.on('mouseenter', 'surveyor-points', () => { map.getCanvas().style.cursor = 'pointer' })
-    map.on('mouseleave', 'surveyor-points', () => { map.getCanvas().style.cursor = '' })
-    map.on('mouseenter', 'trail-camera-points', () => { map.getCanvas().style.cursor = 'pointer' })
-    map.on('mouseleave', 'trail-camera-points', () => { map.getCanvas().style.cursor = '' })
+    map.on('mouseenter', 'surveyor-points', () => { map.getCanvas().style.cursor = activeTool.value === 'pin' && pendingMarkerType.value ? 'crosshair' : 'pointer' })
+    map.on('mouseleave', 'surveyor-points', () => { map.getCanvas().style.cursor = activeTool.value === 'pin' && pendingMarkerType.value ? 'crosshair' : '' })
+    map.on('mouseenter', 'trail-camera-points', () => { map.getCanvas().style.cursor = activeTool.value === 'pin' && pendingMarkerType.value ? 'crosshair' : 'pointer' })
+    map.on('mouseleave', 'trail-camera-points', () => { map.getCanvas().style.cursor = activeTool.value === 'pin' && pendingMarkerType.value ? 'crosshair' : '' })
     map.on('click', onMapClick)
     registerSurveyorIcons(map).then(({ registered }) => {
       if (!registered.length || !map.getLayer('surveyor-points')) return
@@ -1435,13 +1505,18 @@ function onHistoryKeydown(event) {
   event.preventDefault()
   if (event.shiftKey) redoLast(); else undoLast()
 }
-function retryBaseMap() { window.location.reload() }
+async function retryBaseMap() { if (activeSession.value) await saveSessionCheckpoint(); window.location.reload() }
 function createFromEnvironmentalFeature(kind) {
   const coordinates = selectedEnvironment.value?.properties?.inspection_coordinates || selectedEnvironment.value?.geometry?.coordinates
   if (!coordinates) return
+  const properties = selectedEnvironment.value.properties || {}
+  const subject = properties.common_name || properties.name || properties.feature_type || 'environmental feature'
+  const dateText = properties.observed_at ? `; observed ${properties.observed_at}` : ''
+  environmentContext.value = `Reference context — ${properties.provider || 'External map'}; ${subject}${dateText}${properties.url ? `; ${properties.url}` : ''}.`
+  environmentName.value = subject
   selectedEnvironment.value = null
-  if (kind === 'note') createNote(coordinates)
-  else chooseQuickAdd('other', coordinates)
+  if (kind === 'note') createNote(coordinates, subject)
+  else openQuickAdd(coordinates, window.innerWidth / 2, window.innerHeight / 2)
 }
 
 onBeforeUnmount(() => {
@@ -1466,16 +1541,20 @@ onBeforeUnmount(() => {
 <template>
   <main class="surveyor-page">
     <header class="surveyor-topbar">
-      <div><p class="eyebrow">FIELD MAP · {{ objects.length }} OBJECTS</p><h1>Surveyor</h1></div>
-    <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="openPreflight" @end="endSearch" @update:method="sessionMethod=$event" @layers="layerDrawerOpen=!layerDrawerOpen" @media="sessionMediaOpen=true" @observation="quickObservation" @note="quickNote" />
+      <div><p class="eyebrow">FIELD MAP · {{ objects.length }} OBJECTS</p><h1>Surveyor</h1><small class="surveyor-flow-line">Plan tonight → map what matters → start search → log what you find</small></div>
+    <SearchSessionBar :active-session="activeSession" :method="sessionMethod" :distance="sessionDistance()" :loading="loading" @start="openPreflight" @end="endSearch" @update:method="sessionMethod=$event" @media="sessionMediaOpen=true" @observation="quickObservation" @note="quickNote" />
     </header>
+    <button v-if="!activeSession" class="night-readiness-bar" type="button" @click="preflightOpen=true">
+      <span class="night-readiness-copy"><strong v-if="outingPlan && readiness.ready_to_leave">TONIGHT · READY</strong><strong v-else-if="outingPlan">TONIGHT · {{ readinessRemaining }} things left</strong><strong v-else>TONIGHT</strong><small v-if="outingPlan && readiness.ready_to_leave">{{ readiness.packed_items || 0 }} packed · {{ readiness.stop_count || 0 }} stops</small><small v-else-if="outingPlan">{{ readiness.prep_remaining || 0 }} setup · {{ readiness.packing_remaining || 0 }} unpacked · {{ readiness.stop_count || 0 }} stops</small><small v-else>Build tonight's checklist · Prep · pack · gameplan</small></span>
+      <span class="night-readiness-action">{{ outingPlan ? readiness.ready_to_leave ? 'Review plan' : 'Open plan' : 'Plan tonight' }}</span>
+    </button>
     <p v-if="error" class="surveyor-error">{{ error }}</p><p v-if="locationWarning" class="location-warning">{{ locationWarning }}</p>
-    <div v-if="locatedAddress" class="located-address-banner"><div><p class="eyebrow">LOCATED ADDRESS</p><strong>{{ locatedAddress.displayName }}</strong><span>{{ locatedAddress.distance_miles }} mi {{ locatedAddress.bearing_label }} of home</span></div><button class="secondary-button" @click="saveLocatedPin">Save pin</button><button class="secondary-button" @click="createNeedsSearchAtLocation">Create needs-search area</button><button class="dismiss-location-focus" aria-label="Dismiss located address" @click="dismissLocationFocus">×</button></div>
+    <div v-if="locatedAddress" class="located-address-banner"><div><p class="eyebrow">LOCATED ADDRESS</p><strong>{{ locatedAddress.displayName }}</strong><span>{{ locatedAddress.distance_miles }} mi {{ locatedAddress.bearing_label }} of home</span></div><button class="secondary-button" @click="saveLocatedPin">Save marker</button><button class="secondary-button" @click="createNeedsSearchAtLocation">Create needs-search area</button><button class="dismiss-location-focus" aria-label="Dismiss located address" @click="dismissLocationFocus">×</button></div>
     <div v-if="photoLocation" class="located-address-banner photo-gps-banner"><div><p class="eyebrow">PHOTO GPS · TEMPORARY MAP FOCUS</p><strong>{{ photoLocation.latitude.toFixed(5) }}, {{ photoLocation.longitude.toFixed(5) }}</strong><span>Map object location was not changed.</span></div><button class="dismiss-location-focus" aria-label="Dismiss photo location" @click="dismissPhotoGps">×</button></div>
     <div class="surveyor-workspace">
       <SurveyorToolbar :active-tool="activeTool" :can-undo="history.canUndo.value" :can-redo="history.canRedo.value" @tool="activateTool" @more="mobileMoreOpen=!mobileMoreOpen" @undo="undoLast" @redo="redoLast" />
-      <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><MapLegend :layers="layerSettings" /><div v-if="mapHealth.status !== 'ready'" class="map-health-badge" :class="mapHealth.status === 'degraded' ? 'degraded' : 'failed'" role="status">{{ mapHealth.status === 'loading' ? 'Loading geography…' : mapHealth.status === 'degraded' ? 'Base geography degraded · Retry' : 'Base geography unavailable · Retry' }}<button v-if="mapHealth.status !== 'loading'" @click="retryBaseMap">Retry</button></div><button class="map-layer-control" type="button" :aria-expanded="layerDrawerOpen" @click="layerDrawerOpen=!layerDrawerOpen">Layers</button><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','access','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? 'Choose a marker type, then tap the map' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : activeTool === 'access' ? 'Tap a property to record access details' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option value="searched">Searched</option><option value="needs_search">Needs search</option><option value="needs_recheck">Needs re-check</option><option value="known_cat_highway">Known cat highway</option><option value="wildlife_hotspot">Wildlife hotspot</option><option value="likely_shelter">Likely shelter</option><option value="dog_territory">Dog territory</option><option value="private_no_access">Private / no access</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
-      <div v-if="layerDrawerOpen" class="layer-drawer-backdrop" @click="layerDrawerOpen=false"></div><LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" :provider-status="environmentStatus" @update:model-value="layerSettings = $event" @close="layerDrawerOpen = false" />
+      <section class="surveyor-map-shell"><div ref="mapEl" class="surveyor-map"></div><MapLegend :layers="layerSettings" /><div v-if="mapHealth.status !== 'ready'" class="map-health-badge" :class="mapHealth.status === 'degraded' ? 'degraded' : 'failed'" role="status">{{ mapHealth.status === 'loading' ? 'Loading geography…' : mapHealth.status === 'degraded' ? 'Base geography degraded' : 'Base geography unavailable' }}<button v-if="mapHealth.status !== 'loading'" @click="retryBaseMap">Reload map</button></div><button class="map-layer-control" type="button" :aria-expanded="layerDrawerOpen" @click="layerDrawerOpen=!layerDrawerOpen">Overlays</button><div v-if="pendingMarkerType && activeTool === 'pin'" class="marker-placement-badge"><i :style="{ backgroundColor: OBJECT_TYPES[pendingMarkerType]?.color }">{{ OBJECT_TYPES[pendingMarkerType]?.icon.slice(0,1).toUpperCase() }}</i><span>{{ OBJECT_TYPES[pendingMarkerType]?.label.toUpperCase() }} · Tap map to place</span><button type="button" @click="markerPickerOpen=true">Change</button></div><div v-if="snapTarget" class="snap-indicator" :style="{ left: `${snapTarget.x}px`, top: `${snapTarget.y}px` }"><i></i><small>{{ snapTarget.kind.replace('_', ' ').toUpperCase() }}</small></div><div v-if="['pin','note','camera','access','move-camera','move-object'].includes(activeTool)" class="map-hint">{{ activeTool === 'pin' ? '' : activeTool === 'camera' ? 'Tap the map to place a trail camera' : activeTool === 'access' ? 'Tap a property to record access details' : ['move-camera','move-object'].includes(activeTool) ? 'Tap the new object location' : 'Tap the map to add a field note' }}</div><div v-if="activeTool === 'link'" class="map-hint">{{ linkStartId ? 'Choose the second object to connect' : 'Choose the first object to connect' }}</div><select v-if="activeTool === 'link'" v-model="linkType" class="pin-type-picker"><option value="observed_movement">Observed movement</option><option value="hypothesized_movement">Hypothesized movement</option><option value="association">Association</option><option value="possible_corridor">Possible corridor</option><option value="evidence_for">Evidence for</option><option value="evidence_against">Evidence against</option><option value="custom">Custom connection</option></select><select v-if="activeTool === 'zone'" v-model="zoneSubtype" class="pin-type-picker"><option v-for="(zone, key) in ZONE_TYPES" :key="key" :value="key">{{ zone.label }}</option></select><div v-if="['zone','line'].includes(activeTool)" class="snap-controls"><button @click="snapMenuOpen = !snapMenuOpen">Snap {{ snapMenuOpen ? '▴' : '▾' }}</button><div v-if="snapMenuOpen" class="snap-menu"><label><input v-model="snapSettings.roads" type="checkbox" /> Roads</label><label><input v-model="snapSettings.trails" type="checkbox" /> Trails</label><label><input v-model="snapSettings.waterways" type="checkbox" /> Waterways</label><label><input v-model="snapSettings.objects" type="checkbox" /> Pins</label><label><input v-model="snapSettings.cameras" type="checkbox" /> Trail cameras</label><label><input v-model="snapSettings.zoneBoundaries" type="checkbox" /> Zone boundaries</label></div></div></section>
+      <div v-if="layerDrawerOpen" class="layer-drawer-backdrop" @click="layerDrawerOpen=false"></div><LayerDrawer v-if="layerDrawerOpen" :model-value="layerSettings" :counts="{ objects: objects.length, links: links.length, cameras: cameras.length, candidates: candidates.length }" :provider-status="environmentStatus" @update:model-value="layerSettings = $event" @retry-provider="environmentController?.retry($event)" @close="layerDrawerOpen = false" />
       <EnvironmentalInspector v-if="selectedEnvironment" :feature="selectedEnvironment" @close="selectedEnvironment=null" @add-note="createFromEnvironmentalFeature('note')" @add-marker="createFromEnvironmentalFeature('marker')" />
       <aside v-if="selectedHistoricalPlacement" class="surveyor-inspector"><div class="inspector-heading"><div><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2></div><button aria-label="Close history" @click="selectedHistoricalPlacement=null">×</button></div><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · range {{ Math.round(metersToFeet(selectedHistoricalPlacement.range_meters)) }} ft</p><p class="inspector-meta">Historical placements cannot be edited as the active camera.</p></aside>
       <CandidateInspector v-if="selectedCandidate" :candidate="selectedCandidate" @close="selectedCandidate=null" @evidence="createEvidenceFromCandidate" @add-outing="addToOuting({ title: `Review ${selectedCandidate.name || 'candidate case'}`, candidate_case_id: selectedCandidate.case_id || selectedCandidate.id })" />
@@ -1488,10 +1567,11 @@ onBeforeUnmount(() => {
       <template v-else-if="selectedHistoricalPlacement"><p class="eyebrow">HISTORICAL CAMERA PLACEMENT</p><h2>{{ selectedHistoricalPlacement.name }}</h2><p>{{ new Date(selectedHistoricalPlacement.installed_at).toLocaleDateString() }} – {{ selectedHistoricalPlacement.removed_at ? new Date(selectedHistoricalPlacement.removed_at).toLocaleDateString() : 'Current' }}</p><p>Heading {{ Math.round(selectedHistoricalPlacement.heading_degrees) }}° · FOV {{ Math.round(selectedHistoricalPlacement.fov_degrees) }}° · {{ Math.round(metersToFeet(selectedHistoricalPlacement.range_meters)) }} ft</p></template>
       <ObjectInspector v-else-if="selected" :key="`mobile-${selected.id}`" v-model:title="title" v-model:subtype="subtype" v-model:notes="notes" v-model:camera-heading="cameraHeading" v-model:camera-fov="cameraFov" v-model:camera-range="cameraRange" v-model:attachment-caption="attachmentCaption" :selected="selected" :types="types" :attachments="attachments" :access-record="accessRecords.find(item => item.map_object_id === selected.id) || null" :evidence-draft="restoredEvidenceForm" :tasks="tasks" :camera-history="cameras.find(item => item.map_object_id === selected.id)?.history || []" :uploading="uploadingAttachment" :saving="saving" :api="API" :active-tool="activeTool" @close="selected=null" @save="saveSelected" @save-historical="saveSelected(true)" @move="activeTool=selected.object_type === 'trail_camera' ? 'move-camera' : 'move-object'" @deactivate="deleteSelected" @delete="deleteSelected" @edit-geometry="beginGeometryEdit" @save-geometry="finishGeometryEdit(true)" @cancel-geometry="finishGeometryEdit(false)" @upload="uploadAttachment" @delete-attachment="deleteAttachment" @media-error="error=$event" @media-location="showPhotoGps({ detail: $event })" @create-task="createTask" @update-task="updateTask" @save-evidence="saveEvidence" @save-checklist="saveChecklist" @edit-access="editSelectedAccess" @mark-searched="markSearchedAgain" @mark-needs-recheck="markNeedsRecheck" @open-session="sessionDetailId=$event" @add-outing="addObjectToOuting(selected)" @add-task-outing="addTaskToOuting($event, selected.id)" />
     </MobileInspectorSheet>
+    <div v-if="markerPickerOpen" class="marker-picker-layer"><MarkerTypePicker @select="chooseMarkerType" @close="closeMarkerPicker" /></div>
     <div v-if="objectStack.length" class="field-sheet-backdrop object-stack-backdrop" @click.self="objectStack=[]"><ObjectStackSheet :objects="objectStack" @select="chooseStackedObject" @close="objectStack=[]" /></div>
     <QuickAddMenu v-if="quickAdd" :coordinates="quickAdd.coordinates" :position="quickAdd.position" @select="chooseQuickAdd" @close="closeQuickAdd" />
     <CandidateClusterSheet v-if="candidateCluster" :cluster="candidateCluster" @close="candidateCluster=null" @open="openClusterCandidate" @evidence="createEvidenceForCandidate" @zoom="zoomCandidateCluster" />
-    <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :default-name="draftObject.defaultName || ''" :initial-form="restoredObjectForm" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
+    <div v-if="draftObject" class="field-sheet-backdrop"><DraftObjectSheet :kind="draftObject.kind" :geometry="draftObject.geometry" :default-subtype="draftObject.subtype" :default-name="draftObject.defaultName || ''" :initial-form="draftObject.initialForm || restoredObjectForm" :camera-defaults="{ heading: cameraHeading, fov: cameraFov, range: cameraRange }" @save="saveDraft($event).catch(err => error=err.message)" @cancel="cancelDraft" /></div>
     <div v-if="accessDraftCoordinates" class="field-sheet-backdrop"><AccessEditor :coordinates="accessDraftCoordinates" :record="accessDraftRecord" :initial-form="restoredAccessForm" :api="API" @save="accessSaved($event).catch(err => error=err.message)" @cancel="cancelAccessDraft" /></div>
     <div v-if="sessionMediaOpen && activeSession" class="field-sheet-backdrop"><SearchSessionMedia :api="API" :session-id="activeSession.id" @close="sessionMediaOpen=false" /></div>
     <div v-if="sessionDetailId" class="field-sheet-backdrop"><SearchSessionDetail :api="API" :session-id="sessionDetailId" @close="sessionDetailId=null" @show-route="showSessionRoute" @show-coverage="showSessionCoverage" @add-note="addSessionNote" @add-evidence="addSessionEvidence" @create-coverage="createSessionCoverage" @create-followup="createSessionFollowup" /></div>

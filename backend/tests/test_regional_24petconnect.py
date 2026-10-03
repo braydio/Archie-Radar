@@ -72,7 +72,7 @@ def test_animal_specific_terminal_state_is_preserved():
 
 
 def test_broken_detail_url_does_not_remove_valid_result_row(monkeypatch):
-    listing = '''<article><div>Animal id: A123</div><div>Status: Found</div>
+    listing = '''<article><div>Animal id: A123</div><img alt="Image: A123" src="/a123.jpg"><div>Status: Found</div>
       <div>Location Found: Chapel Hill</div><a href="/DetailsMain/DRHM/A123">Details</a></article>'''
 
     class Response:
@@ -100,3 +100,28 @@ def test_broken_detail_url_does_not_remove_valid_result_row(monkeypatch):
     assert rows[0].raw['listing_state'] == 'active'
     assert rows[0].raw['source_link_kind'] == 'unavailable'
     assert rows[0].source_url == 'https://24petconnect.com/ViewAnimals/77'
+    assert rows[0].image_url == 'https://24petconnect.com/a123.jpg'
+
+
+def test_explicit_inactive_detail_keeps_photo_and_suppresses_link(monkeypatch):
+    listing = '''<article><div>Animal id: A123</div><img alt="Image: A123" src="/a123.jpg"><div>Status: Found</div>
+      <div>Location Found: Chapel Hill</div><a href="/DetailsMain/DRHM/A123">Details</a></article>'''
+
+    class Response:
+        def __init__(self, url, text): self.url, self.text = url, text
+        def raise_for_status(self): pass
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def get(self, url, **kwargs):
+            if '/ViewAnimals/' in url: return Response(url, listing)
+            return Response('https://24petconnect.com/DetailsMain/DRHM/A123', 'Animal ID A123. Status: Adopted.')
+
+    monkeypatch.setattr('app.connectors.regional_24petconnect.httpx.AsyncClient', lambda **kwargs: Client())
+    rows = asyncio.run(Regional24PetConnectConnector('https://24petconnect.com/ViewAnimals/77').fetch())
+    assert len(rows) == 1
+    assert rows[0].image_url == 'https://24petconnect.com/a123.jpg'
+    assert rows[0].raw['listing_state'] == 'inactive'
+    assert rows[0].raw['source_link_kind'] == 'unavailable'
+    assert rows[0].raw['detail_url'] is None

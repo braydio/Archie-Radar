@@ -162,7 +162,7 @@ watch(() => route.params.caseId, load)
           <button v-if="item.external_ids?.length > 1" type="button" class="copy-id-button copy-all-ids" @click="copyIdentifier(item.external_ids.map(identifier => `${identifier.label} ${identifier.value}`).join('\n'), 'All IDs')">Copy all IDs</button>
           <small v-if="copied">{{ copied }}</small>
         </div>
-        <p v-if="item.current_location?.location_text">{{ item.current_location.location_text }}<template v-if="item.current_location.distance_from_home_miles != null"> · {{ item.current_location.distance_is_approximate ? '~' : '' }}{{ Number(item.current_location.distance_from_home_miles).toFixed(1) }} mi from home</template><small v-if="item.current_location.record_id"> · source record #{{ item.current_location.record_id }}</small></p>
+        <p v-if="item.current_location?.location_text">{{ item.current_location.location_text }}<template v-if="item.current_location.distance_from_home_miles != null"> · {{ item.current_location.distance_is_approximate ? '~' : '' }}{{ Number(item.current_location.distance_from_home_miles).toFixed(1) }} mi from home</template></p>
         <div class="case-location-actions"><button v-if="item.current_location?.map_latitude != null" type="button" class="secondary-button" @click="openCurrentLocation">Open location in Surveyor</button><button type="button" class="secondary-button" :disabled="outingAdded" @click="addToOuting">{{ outingAdded ? 'Added to outing' : '＋ Add to outing' }}</button></div>
         <div class="review-actions case-review-actions">
           <button class="possible" @click="review('possible')">Possible Archie</button>

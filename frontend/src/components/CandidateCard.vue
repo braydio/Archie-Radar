@@ -99,11 +99,14 @@ export default {
       return `${prefix}${Number(locationDistance.value).toFixed(1)} mi${direction} of home${suffix}`
     })
     const sourceIs24Pet = computed(() => String(props.post.source || '').includes('24petconnect'))
+    const currentSourceRecord = computed(() => props.post.source_records?.find(record => record.post_id === props.post.current_record_id))
+    const sourceListingState = computed(() => props.post.listing_state || currentSourceRecord.value?.listing_state || (!props.post.current_record_id ? props.post.source_records?.find(record => record.listing_state === 'inactive')?.listing_state : undefined))
+    const sourceLinkKind = computed(() => props.post.source_link_kind || currentSourceRecord.value?.source_link_kind || (sourceIs24Pet.value && !props.post.current_record_id && props.post.source_records?.some(record => record.listing_state === 'inactive') ? 'unavailable' : ''))
     const sourceLink = computed(() => sourceIs24Pet.value
-      ? (props.post.source_link_kind === 'exact_detail' ? (props.post.detail_url || props.post.source_url) : (props.post.listing_url || props.post.source_url))
+      ? (sourceLinkKind.value === 'unavailable' ? null : sourceLinkKind.value === 'exact_detail' ? (props.post.detail_url || props.post.source_url) : (props.post.listing_url || props.post.source_url))
       : props.post.source_url)
     const sourceLinkLabel = computed(() => sourceIs24Pet.value
-      ? (props.post.source_link_kind === 'exact_detail' ? 'View on 24PetConnect ↗' : 'Open 24PetConnect ↗')
+      ? (sourceLinkKind.value === 'exact_detail' ? 'View on 24PetConnect ↗' : 'Open 24PetConnect ↗')
       : 'Open source ↗')
 
     const traitTokens = computed(() => {
@@ -169,7 +172,7 @@ export default {
 
     return {
       imageUnavailable, candidateImage, displayedImage, selectedImage, caseImages, priorityClass, photoPct, hasPhoto, sourceAccent, candidateHeading, candidateSubheading, identityIds,
-      sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText, sourceLink, sourceLinkLabel, sourceIs24Pet,
+      sourcePostedAt, eventAt, addedAt, title, usefulTitle, detailsAvailable, mapHref, distanceText, sourceLink, sourceLinkLabel, sourceIs24Pet, sourceListingState, sourceLinkKind,
       traitTokens, primaryTraitTokens, reasonSummary, colorClass, facebookAppearances,
       sourceLabel, statusLabel, dateOnly, exactDate, relativeTime, review, locate, focusMap, locationText, currentLocation, copyAnimalId
     }
@@ -196,7 +199,8 @@ export default {
       <div class="title-row">
         <h2 v-if="usefulTitle">{{ title }}</h2>
         <a v-if="sourceLink" class="original-link prominent" :href="sourceLink" target="_blank" rel="noopener">{{ sourceLinkLabel }}</a>
-        <button v-if="sourceIs24Pet && post.source_link_kind !== 'exact_detail'" type="button" class="copy-id-button" @click="copyAnimalId">Copy Animal ID</button>
+        <span v-if="sourceIs24Pet && !sourceLink" class="source-link-status">{{ sourceListingState === 'inactive' ? '24PetConnect listing inactive' : '24PetConnect link unavailable' }}</span>
+        <button v-if="sourceIs24Pet && sourceLinkKind !== 'exact_detail'" type="button" class="copy-id-button" @click="copyAnimalId">Copy Animal ID</button>
       </div>
 
       <div v-if="identityIds.length || post.record_count > 1" class="case-identity-row">
@@ -263,7 +267,7 @@ export default {
           </dl>
           <div v-if="currentLocation" class="location-provenance"><h3>Location provenance</h3><p>Current location from source record #{{ currentLocation.record_id }}</p><p>Precision: {{ currentLocation.precision || 'unknown' }}</p><p>{{ currentLocation.location_text }}</p></div>
           <a v-if="mapHref" class="detail-link" :href="mapHref" target="_blank" rel="noopener">Open external map ↗</a>
-          <p v-if="sourceIs24Pet" class="inspector-meta">Source link: {{ post.source_link_kind === 'exact_detail' ? 'exact animal detail' : post.source_link_kind === 'search_results' ? 'saved search results' : post.source_link_kind || 'unavailable' }}</p>
+          <p v-if="sourceIs24Pet" class="inspector-meta">Source link: {{ sourceLinkKind === 'exact_detail' ? 'exact animal detail' : sourceLinkKind === 'search_results' ? 'saved search results' : sourceLinkKind || 'unavailable' }}</p>
         </section>
         <section v-if="post.source_records?.length > 1" class="more-detail-section source-history">
           <h3>Source history</h3>
@@ -273,7 +277,9 @@ export default {
             <span v-if="record.source_id">{{ record.identifier_label }} {{ record.source_id }}</span>
             <small>{{ record.custody_label || statusLabel(record.status) }}<template v-if="record.source_platform"> · via {{ record.source_platform }}</template></small>
             <em v-if="displayedImage?.source_post_id === record.post_id">Current photo</em>
-            <a v-if="record.source_url" :href="record.source_link_kind === 'exact_detail' ? (record.detail_url || record.source_url) : (record.listing_url || record.source_url)" target="_blank" rel="noopener">{{ record.source_link_kind === 'exact_detail' ? 'View animal ↗' : record.source_platform === '24PetConnect' ? 'Open 24PetConnect ↗' : 'Open record ↗' }}</a>
+            <span v-if="displayedImage?.source_post_id === record.post_id && record.source_link_kind === 'unavailable'">{{ record.listing_state === 'inactive' ? 'Listing inactive' : 'Link unavailable' }}</span>
+            <span v-else-if="record.source_link_kind === 'unavailable'">{{ record.listing_state === 'inactive' ? 'Listing inactive' : 'Link unavailable' }}</span>
+            <a v-else-if="record.source_url" :href="record.source_link_kind === 'exact_detail' ? (record.detail_url || record.source_url) : (record.listing_url || record.source_url)" target="_blank" rel="noopener">{{ record.source_link_kind === 'exact_detail' ? 'View animal ↗' : record.source_platform === '24PetConnect' ? 'Open 24PetConnect ↗' : 'Open record ↗' }}</a>
           </article>
         </section>
         <section v-if="facebookAppearances.length" class="more-detail-section source-history">

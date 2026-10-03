@@ -146,9 +146,13 @@ class Regional24PetConnectConnector(Connector):
                     if not re.search(rf"\b{re.escape(row.source_id or '')}\b", text, re.I):
                         return unavailable_link()
                     state, reason = self.parse_animal_lifecycle(text, row.source_id or "")
+                    checked_at = datetime.now(timezone.utc).isoformat()
+                    if state == "inactive":
+                        raw = {**row.raw, "listing_state": "inactive", "listing_state_reason": reason,
+                            "listing_state_checked_at": checked_at, "source_link_kind": "unavailable", "detail_url": None}
+                        return row.model_copy(update={"source_url": row.raw.get("listing_url") or row.source_url, "raw": raw})
                     return row.model_copy(update={"raw": {**row.raw, "listing_state": state,
-                        "listing_state_reason": reason,
-                        "listing_state_checked_at": datetime.now(timezone.utc).isoformat()}})
+                        "listing_state_reason": reason, "listing_state_checked_at": checked_at}})
                 except Exception:
                     # A failed detail check must not erase a valid search-result row.
                     return unavailable_link()

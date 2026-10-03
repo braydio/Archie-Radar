@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, watch } from 'vue'
-import { PIN_GROUPS, OBJECT_TYPES } from '../../surveyor/objectTypes.js'
+import { PIN_GROUPS, OBJECT_TYPES, ZONE_TYPES } from '../../surveyor/objectTypes.js'
 import { feetToMeters, metersToFeet } from '../../surveyor/units.js'
 import { clearSurveyorDraft, storeSurveyorDraft } from '../../surveyor/draftStorage.js'
 
@@ -27,7 +27,8 @@ function cancel() { clearSurveyorDraft('object'); emit('cancel') }
 <template>
   <form class="field-sheet" @submit.prevent="submit">
     <header><div><p class="eyebrow">SURVEYOR · DRAFT</p><h2>{{ title }}</h2></div><button type="button" aria-label="Cancel" @click="cancel">×</button></header>
-    <label v-if="kind === 'pin' || kind === 'zone'">Type<select v-model="form.subtype"><optgroup v-for="group in PIN_GROUPS" :key="group.key" :label="group.label"><option v-for="type in group.types" :key="type" :value="type">{{ OBJECT_TYPES[type].label }}</option></optgroup><option v-if="kind === 'zone'" value="needs_search">Needs search</option></select></label>
+    <label v-if="kind === 'pin'">Type<select v-model="form.subtype"><optgroup v-for="group in PIN_GROUPS" :key="group.key" :label="group.label"><option v-for="type in group.types" :key="type" :value="type">{{ OBJECT_TYPES[type].label }}</option></optgroup></select></label>
+    <label v-else-if="kind === 'zone'">Zone type<select v-model="form.subtype"><option v-for="(zone, key) in ZONE_TYPES" :key="key" :value="key">{{ zone.label }}</option></select></label>
     <template v-if="kind === 'evidence'"><label>Evidence type<select v-model="form.evidenceType"><option value="visual_sighting">Visual sighting</option><option value="photo">Photo</option><option value="audio">Audio</option><option value="reported_observation">Reported observation</option><option value="other">Other</option></select></label><label>Source<select v-model="form.sourceType"><option value="firsthand">Firsthand</option><option value="camera">Camera</option><option value="public_report">Public report</option><option value="neighbor_report">Neighbor report</option><option value="other">Other</option></select></label></template>
     <label v-if="kind === 'line'">Corridor type<select v-model="form.subtype"><option value="known_cat_highway">Known cat highway</option><option value="probable_animal_corridor">Probable animal corridor</option><option value="possible_corridor">Possible corridor</option><option value="custom">Custom corridor</option></select></label>
     <label>Name<input v-model="form.name" maxlength="180" :placeholder="kind === 'note' ? 'Field note' : kind === 'camera' ? 'Camera name' : 'Optional name'" /></label>

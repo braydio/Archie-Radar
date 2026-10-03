@@ -52,6 +52,8 @@ export default {
     const uploading = ref(false)
     const error = ref('')
     const scanSummary = ref(null)
+    const facebookSyncNotice = ref(null)
+    let facebookNoticeTimer = null
     const filtersOpen = ref(false)
     const filterSectionOpen = ref({ area: true, appearance: true, markings: false, identification: false, queue: false })
     const defaultsExpanded = ref(false)
@@ -338,6 +340,13 @@ export default {
       await Promise.all([loadQueueStats(), loadFilterOptions()])
     }
 
+    async function handleFacebookSyncFinished(run) {
+      await Promise.all([load(), loadQueueStats(), loadFilterOptions()])
+      facebookSyncNotice.value = run
+      if (facebookNoticeTimer) clearTimeout(facebookNoticeTimer)
+      facebookNoticeTimer = window.setTimeout(() => { facebookSyncNotice.value = null }, 12000)
+    }
+
     async function ingest() {
       loading.value = true
       error.value = ''
@@ -500,11 +509,12 @@ export default {
     onBeforeUnmount(() => {
       candidateRequestVersion += 1
       candidateFeedController?.abort()
+      if (facebookNoticeTimer) clearTimeout(facebookNoticeTimer)
       document.removeEventListener('pointerdown', handleOutside)
     })
 
     return {
-      API, posts, referencePhotos, searchConfig, queueStats, loading, uploading, error, scanSummary,
+      API, posts, referencePhotos, searchConfig, queueStats, loading, uploading, error, scanSummary, facebookSyncNotice,
       filtersOpen, setupOpen, sourcesOpen, showMap, focusedCaseId, focusedLocation, filterSheet, filterButton, state, sort,
       filterSectionOpen, defaultsExpanded, defaultTraitCount, filterSummaries,
       source, facebookGroupId, status, sex, photoFilter, ageDays, minScore, maxDistance, hideDuplicates, color, pattern, coat,
@@ -512,7 +522,7 @@ export default {
       notBefore, traitMode, queueTabs, sourceOptions, statusOptions, setupNeededCount, activeSourceCount, mappedCount,
       nonDefaultApplied, selectedDraftTraits, refreshBusy, refreshReceipt, isDefaultDraft, appliedFilters,
       ingest, review, uploadReference, deleteReference, setQueue, changeSort, toggleMap, toggleSources, toggleSetup,
-      applySelections, clearSelections, applyDefaults, openFilters, refreshSource, locateCandidate
+      applySelections, clearSelections, applyDefaults, openFilters, refreshSource, locateCandidate, handleFacebookSyncFinished
     }
   }
 }
@@ -524,13 +534,14 @@ export default {
       <div class="brand-copy">
         <p class="eyebrow">ARCHIE RADAR</p>
         <h1>Lost-cat review</h1>
-        <p class="lede">#1 is the next report to review. Archie-like traits are prioritized by default without hiding uncertain reports.</p>
+        <p class="lede">Review #1 first → classify it → open anything promising → add field follow-up to Tonight.</p>
       </div>
       <div class="header-actions">
         <span v-if="queueStats.high_priority_new" class="priority-summary"><strong>{{ queueStats.high_priority_new }}</strong> strong-signal new</span>
         <button class="primary scan-button" @click="ingest" :disabled="loading">{{ loading ? 'Scanning…' : 'Scan now' }}</button>
       </div>
     </header>
+    <div class="review-flow-strip"><span>1 Review new reports</span><span>2 Mark Possible / Hold / Not Archie</span><span>3 Send field work to Tonight</span></div>
 
     <nav class="queue-tabs" aria-label="Review queues">
       <button v-for="tab in queueTabs" :key="tab.value" :class="{ active: state === tab.value }" @click="setQueue(tab.value)"><span>{{ tab.label }}</span><strong>{{ tab.count }}</strong></button>
@@ -543,6 +554,7 @@ export default {
       <button class="control-button" :class="{ active: sourcesOpen }" @click="toggleSources">Sources · {{ activeSourceCount }} active<span v-if="setupNeededCount" class="setup-count">{{ setupNeededCount }} setup</span></button>
       <button class="control-button setup-button" :class="{ active: setupOpen }" @click="toggleSetup">Archie profile · {{ referencePhotos.length }} photos</button>
     </section>
+    <div v-if="facebookSyncNotice" class="facebook-sync-notice" role="status"><span>{{ facebookSyncNotice.status === 'complete' ? '✓' : facebookSyncNotice.status === 'partial' ? '!' : '×' }} Facebook sync {{ facebookSyncNotice.status }}<template v-if="facebookSyncNotice.status !== 'failed'"> · {{ facebookSyncNotice.posts_new || 0 }} new · {{ facebookSyncNotice.successful_group_count || 0 }}/{{ facebookSyncNotice.requested_group_count || 0 }} groups</template></span><button type="button" aria-label="Dismiss Facebook sync notice" @click="facebookSyncNotice = null">×</button></div>
 
     <div v-if="nonDefaultApplied.length" class="applied-filter-strip" aria-label="Applied non-default filters">
       <span>Applied:</span><b v-for="chip in nonDefaultApplied" :key="chip">{{ chip }}</b>
@@ -632,7 +644,7 @@ export default {
           <p v-if="item.detail">{{ item.detail }}</p><small v-if="refreshReceipt[item.key] && !refreshReceipt[item.key]?.error">{{ refreshReceipt[item.key].total ?? 0 }} seen · {{ refreshReceipt[item.key].created ?? 0 }} new</small>
         </article>
       </div>
-      <FacebookGroupsPanel :api="API" @updated="loadFilterOptions" @review-new="setQueue('new')" />
+      <FacebookGroupsPanel :api="API" @updated="loadFilterOptions" @review-new="setQueue('new')" @sync-finished="handleFacebookSyncFinished" />
       <details v-if="scanSummary" class="scan-summary"><summary>Last scan receipt</summary><div class="scan-grid"><div v-for="(result, name) in scanSummary" :key="name" :class="['scan-source', { failed: result?.error }]"><strong>{{ name.replaceAll('_', ' ') }}</strong><span v-if="result?.error">error</span><span v-else>{{ result?.total ?? 0 }} seen · {{ result?.created ?? 0 }} new</span></div></div></details>
     </section>
 

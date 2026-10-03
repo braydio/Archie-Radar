@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = defineProps({ api: { type: String, required: true } })
-const emit = defineEmits(['review-new', 'updated'])
+const emit = defineEmits(['review-new', 'updated', 'sync-finished'])
 const groups = ref([])
 const status = ref({ paired: false, last_sync: null })
 const run = ref(null)
@@ -16,11 +16,35 @@ const cutoffChoice = ref('2026-06-01')
 const customCutoff = ref('2026-06-01')
 let pollTimer = null
 let refreshing = false
+let runBaselineSet = false
+let observedRunId = null
+let observedRunStatus = null
 
 const enabledCount = computed(() => groups.value.filter(group => group.enabled).length)
 const latestRun = computed(() => run.value || status.value.last_sync)
 const serverReady = computed(() => Boolean(status.value.server_session_ready))
 const collectorReady = computed(() => status.value.collector_mode === 'server' ? serverReady.value : Boolean(status.value.paired))
+const receipts = computed(() => latestRun.value?.groups || [])
+const catRelated = computed(() => receipts.value.reduce((sum, row) => sum + Number(row.cat_related || 0), 0))
+const alreadyKnown = computed(() => receipts.value.reduce((sum, row) => sum + Number(row.already_known || 0), 0))
+const failedGroups = computed(() => receipts.value.filter(row => row.status === 'failed').length)
+const warningGroups = computed(() => receipts.value.filter(row => row.status === 'parser_warning').length)
+const finishedGroups = computed(() => receipts.value.filter(row => ['success', 'failed', 'parser_warning', 'disabled'].includes(row.status)).length)
+const runStateLabel = computed(() => ({ queued: 'Queued', syncing: `Syncing · ${finishedGroups.value}/${latestRun.value?.requested_group_count || 0} groups finished`, complete: 'Sync complete', partial: 'Partial sync', failed: 'Sync failed' })[latestRun.value?.status] || 'Sync status unknown')
+const runStateSymbol = computed(() => ({ queued: '○', syncing: '↻', complete: '✓', partial: '!', failed: '×' })[latestRun.value?.status] || '•')
+function receiptLine(row) { return `${row.scanned || 0} scanned · ${row.cat_related || 0} cat-related · ${row.posts_new || 0} new${row.already_known ? ` · ${row.already_known} already known` : ''}${row.crossposts_combined ? ` · ${row.crossposts_combined} cross-post merged` : ''}` }
+function syncInterpretation(run) {
+  if (run.status === 'failed') return 'The Facebook scan did not complete successfully. Open group receipts for the failure.'
+  if (run.status === 'partial') return `Only ${run.successful_group_count || 0} of ${run.requested_group_count || 0} groups completed. Open group receipts to see which group needs attention.`
+  if (run.status === 'complete' && !catRelated.value) return `Collector completed normally. It scanned ${run.posts_seen || 0} rendered posts but found no cat-related candidates.`
+  if (run.status === 'complete') return `Collector completed normally. ${run.posts_new || 0} unique ${run.posts_new === 1 ? 'candidate was' : 'candidates were'} new; ${catRelated.value} cat-related reports were already in Radar.`
+  return ''
+}
+function runDuration(run) {
+  if (!run.started_at || !run.completed_at) return ''
+  const seconds = Math.max(0, Math.round((new Date(run.completed_at) - new Date(run.started_at)) / 1000))
+  return seconds < 90 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+}
 
 async function request(path, options = {}) {
   const response = await fetch(`${props.api}${path}`, options)
@@ -40,10 +64,18 @@ async function refresh() {
     groups.value = groupRows
     if (previousGroupIds !== groupRows.map(group => group.id).sort().join(',')) emit('updated')
     status.value = connectorStatus
-    if (connectorStatus.last_sync) run.value = connectorStatus.last_sync
-    if (run.value && ['queued', 'syncing'].includes(run.value.status)) {
-      const current = await request(`/api/facebook/sync/${run.value.id}`)
-      run.value = current
+    let nextRun = connectorStatus.last_sync || run.value
+    if (nextRun && ['queued', 'syncing'].includes(nextRun.status)) nextRun = await request(`/api/facebook/sync/${nextRun.id}`)
+    run.value = nextRun
+    if (nextRun) {
+      if (!runBaselineSet) { runBaselineSet = true; observedRunId = nextRun.id; observedRunStatus = nextRun.status }
+      else {
+        const terminal = ['complete', 'partial', 'failed'].includes(nextRun.status)
+        const newlyObserved = nextRun.id !== observedRunId
+        const transitioned = nextRun.id === observedRunId && ['queued', 'syncing'].includes(observedRunStatus) && terminal
+        if (terminal && (newlyObserved || transitioned)) emit('sync-finished', nextRun)
+        observedRunId = nextRun.id; observedRunStatus = nextRun.status
+      }
     }
   } catch (cause) { error.value = cause.message }
   finally { refreshing = false }
@@ -98,6 +130,8 @@ async function syncNow() {
   loading.value = true; error.value = ''
   try {
     run.value = await request('/api/facebook/sync', { method: 'POST' })
+    runBaselineSet = true; observedRunId = run.value.id; observedRunStatus = run.value.status
+    if (['complete', 'partial', 'failed'].includes(run.value.status)) emit('sync-finished', run.value)
     window.dispatchEvent(new CustomEvent('archie-facebook-sync-started'))
     await refresh()
   } catch (cause) { error.value = cause.message }
@@ -111,7 +145,11 @@ async function copyToken() {
 function syncTime(value) {
   if (!value) return 'Not synced yet'
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000))
-  return minutes < 1 ? 'Just now' : `${minutes}m ago`
+  if (minutes < 1) return 'Just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 48) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
 }
 
 onMounted(() => {
@@ -144,10 +182,12 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
     </div>
 
     <div v-if="latestRun" class="facebook-run-summary">
-      <strong>Last sync · {{ latestRun.status.replaceAll('_', ' ') }}</strong>
-      <span>{{ latestRun.posts_seen || 0 }} posts scanned · {{ latestRun.posts_new || 0 }} new candidates · {{ latestRun.crossposts_combined || 0 }} cross-posts combined</span>
+      <div class="facebook-run-state" :class="`state-${latestRun.status}`"><strong><span aria-hidden="true">{{ runStateSymbol }}</span> {{ runStateLabel }}</strong><span v-if="latestRun.status === 'complete'">{{ latestRun.successful_group_count || 0 }} / {{ latestRun.requested_group_count || 0 }} groups completed</span></div>
+      <div v-if="['complete','partial','failed'].includes(latestRun.status)" class="facebook-run-metrics"><span>{{ latestRun.posts_seen || 0 }} scanned</span><span v-if="catRelated">{{ catRelated }} cat-related</span><span>{{ latestRun.posts_new || 0 }} new</span><span v-if="alreadyKnown">{{ alreadyKnown }} already in Radar</span><span v-if="latestRun.posts_filtered">{{ latestRun.posts_filtered }} filtered</span><span v-if="latestRun.crossposts_combined">{{ latestRun.crossposts_combined }} cross-posts merged</span></div>
+      <p v-if="syncInterpretation(latestRun)">{{ syncInterpretation(latestRun) }}</p>
+      <small v-if="latestRun.completed_at">Completed {{ syncTime(latestRun.completed_at) }}<template v-if="runDuration(latestRun)"> · {{ runDuration(latestRun) }}</template></small>
       <button v-if="latestRun.posts_new" class="inline-button" type="button" @click="emit('review-new')">Review {{ latestRun.posts_new }} new</button>
-      <details v-if="latestRun.groups?.length"><summary>Group receipts</summary><div v-for="receipt in latestRun.groups" :key="receipt.group.id" class="facebook-receipt"><b>{{ receipt.group.group_name }}</b><span>{{ receipt.status }} · {{ receipt.scanned }} scanned · {{ receipt.posts_new }} new · {{ receipt.crossposts_combined }} combined</span><small v-if="receipt.error || receipt.parser_warning">{{ receipt.error || receipt.parser_warning }}</small></div></details>
+      <details v-if="latestRun.groups?.length" :open="['partial','failed'].includes(latestRun.status)"><summary>Group receipts · {{ finishedGroups }}/{{ latestRun.requested_group_count || latestRun.groups.length }} completed<template v-if="failedGroups"> · {{ failedGroups }} failed</template><template v-if="warningGroups"> · {{ warningGroups }} warnings</template></summary><div v-for="receipt in latestRun.groups" :key="receipt.group.id" class="facebook-receipt"><b>{{ receipt.status === 'success' ? '✓' : receipt.status === 'failed' ? '×' : receipt.status === 'parser_warning' ? '!' : receipt.status === 'syncing' ? '↻' : '○' }} {{ receipt.group.group_name }}</b><strong>{{ receipt.status.replaceAll('_', ' ') }}</strong><span>{{ receiptLine(receipt) }}</span><small v-if="receipt.error || receipt.parser_warning">{{ receipt.error || receipt.parser_warning }}</small></div></details>
       <small v-if="latestRun.error_summary" class="facebook-error-summary">{{ latestRun.error_summary }}</small>
     </div>
 

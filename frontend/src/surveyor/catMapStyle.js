@@ -77,7 +77,11 @@ export function auditCatMapStyle(map) {
   const water = has(/water|river|lake|stream/)
   const labels = layers.some(layer => layer.type === 'symbol' && /place|road|water|label|name/.test(`${layer.id || ''} ${layer['source-layer'] || ''}`.toLowerCase()))
   const natural = has(/wood|forest|grass|meadow|park|landcover/)
-  return { status: roads && water && labels ? 'ready' : 'degraded', roads, water, labels, natural }
+  const baseSourceIds = [...new Set(layers.filter(layer => {
+    const identity = `${layer.id || ''} ${layer['source-layer'] || ''}`.toLowerCase()
+    return /road|transportation|highway|water|river|lake|stream|place|label|name/.test(identity)
+  }).map(layer => layer.source).filter(Boolean))]
+  return { status: roads && water && labels ? 'ready' : 'degraded', roads, water, labels, natural, baseSourceIds }
 }
 
 export const CAT_MAP_PALETTE = paint

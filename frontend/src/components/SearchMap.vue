@@ -147,6 +147,12 @@ export default {
             posted: post.posted_at || '',
             reported: post.reported_at || '',
             source_url: post.source_url || '',
+            source_link_kind: post.source_link_kind || post.source_records?.find(record => record.post_id === post.current_record_id)?.source_link_kind || (post.source_records?.some(record => record.listing_state === 'inactive') ? 'unavailable' : ''),
+            listing_url: post.listing_url || '',
+            detail_url: post.detail_url || '',
+            source_platform: post.source_platform || '',
+            source_id: post.source_id || post.external_ids?.find(identifier => identifier.kind === 'animal_id')?.value || '',
+            listing_state: post.listing_state || post.source_records?.find(record => record.post_id === post.current_record_id)?.listing_state || '',
             traits: (post.archie_trait_matches || []).slice(0, 4).join(' · ')
           },
           geometry: { type: 'Point', coordinates: [Number(post.map_longitude), Number(post.map_latitude)] }
@@ -448,7 +454,11 @@ export default {
 
     function popupHtml(propsData, coords) {
       const score = Number(propsData.score || 0)
-      const original = safeHref(propsData.source_url)
+      const is24Pet = propsData.source_platform === '24PetConnect' || /24petconnect/i.test(propsData.source || '')
+      const sourceCandidate = propsData.source_link_kind === 'unavailable' ? '' : propsData.source_link_kind === 'exact_detail' ? (propsData.detail_url || propsData.source_url) : (propsData.listing_url || propsData.source_url)
+      const original = safeHref(sourceCandidate)
+      const sourceLabel = is24Pet ? (propsData.source_link_kind === 'exact_detail' ? 'View on 24PetConnect ↗' : 'Open 24PetConnect ↗') : 'Open source ↗'
+      const unavailable = is24Pet && propsData.source_link_kind === 'unavailable'
       const when = propsData.time ? relativeTime(propsData.time) : ''
       const postedExact = propsData.posted ? exactDate(propsData.posted) : ''
       const reportedExact = propsData.reported ? exactDate(propsData.reported) : ''
@@ -469,7 +479,9 @@ export default {
           ${propsData.precision === 'city' ? '<span class="popup-approx">≈ city-level location</span>' : ''}
           ${propsData.location ? `<p>${escapeHtml(propsData.location)}</p>` : ''}
           ${propsData.traits ? `<div class="popup-traits"><span class="popup-trait">${escapeHtml(propsData.traits)}</span></div>` : ''}
-          <div class="map-popup-links"><a href="#post-${escapeHtml(propsData.id)}">View card</a>${original ? `<a href="${original}" target="_blank" rel="noopener">Original ↗</a>` : ''}</div>
+          ${unavailable ? `<span class="source-link-status">${propsData.listing_state === 'inactive' ? '24PetConnect listing inactive' : '24PetConnect link unavailable'}</span>` : ''}
+          ${is24Pet && propsData.source_id ? `<span>Animal ID ${escapeHtml(propsData.source_id)}</span>` : ''}
+          <div class="map-popup-links"><a href="#post-${escapeHtml(propsData.id)}">View card</a>${original ? `<a href="${original}" target="_blank" rel="noopener">${escapeHtml(sourceLabel)}</a>` : ''}</div>
         </div>`
     }
 

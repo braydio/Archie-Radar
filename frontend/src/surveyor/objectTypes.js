@@ -26,3 +26,13 @@ export const PIN_GROUPS = ['search', 'environment', 'wildlife', 'evidence'].map(
   types: Object.keys(OBJECT_TYPES).filter(type => OBJECT_TYPES[type].group === key)
 }))
 export const PIN_TYPES = Object.entries(OBJECT_TYPES).map(([value, definition]) => ({ value, label: definition.label, ...definition }))
+
+export const ZONE_TYPES = {
+  searched: { label: 'Searched', color: '#667d69' }, needs_search: { label: 'Needs search', color: '#dfad58' },
+  needs_recheck: { label: 'Needs re-check', color: '#c99746' }, low_priority: { label: 'Low priority', color: '#909b8d' },
+  known_cat_highway: { label: 'Known cat highway', color: '#58836f' }, probable_animal_corridor: { label: 'Probable animal corridor', color: '#688c78' },
+  wildlife_hotspot: { label: 'Wildlife hotspot', color: '#9b7f61' }, likely_shelter: { label: 'Likely shelter zone', color: '#7e755c' },
+  dog_territory: { label: 'Dog territory', color: '#ad6652' }, high_human_activity: { label: 'High human activity', color: '#9a7a56' },
+  private_no_access: { label: 'Private / no access', color: '#777777' }, permission_obtained: { label: 'Permission obtained', color: '#4f8162' },
+  avoid_disturbing: { label: 'Avoid disturbing', color: '#8f6b74' }
+}
