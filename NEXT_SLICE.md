@@ -468,6 +468,404 @@ Do not turn wetlands or wildlife on by default merely to avoid the word unavaila
 
 ---
 
+# 1I. P0 — CLOSE-RANGE FIELD DETAIL FOR THE 1–2 MILE WORK AREA
+
+Surveyor is primarily a neighborhood field map, not a county overview.
+
+The normal icon/camera workload is expected to live within roughly **1–2 miles of home**. At that scale the user must be able to place a camera relative to the correct house, driveway, path, tree-line edge, fence/barrier, creek crossing, and neighboring structure.
+
+Current problems:
+
+```text
+frontend/src/views/SurveyorView.vue:1255-1258
+  hardcoded zoom 12
+
+existing home-fit instruction in §1A
+  maxZoom 13.5 / fallback ~13.2 is still too regional
+
+frontend/src/surveyor/catMapStyle.js:18-20
+  hides address / housenumber symbols
+
+catMapStyle.js
+  building footprints are faint and have no deliberate close-range outline
+
+environment rasters
+  remain visually strong when close structural detail matters more
+```
+
+Do not add a separate "detail overlay" the user must remember to turn on.
+Make close-range detail emerge automatically with zoom.
+
+## A. Initial home/work-area zoom
+
+Update §1A implementation values:
+
+Home + nearby objects:
+- use nearest up to 8 local Surveyor objects within **2 miles**, not 3;
+- fit bounds with `maxZoom: 15.5`;
+- if resulting bounds are tiny, do not zoom beyond 15.5 on initial page load;
+- if no nearby objects, home fallback zoom **14.8**;
+- explicit object/location focus may zoom closer.
+
+Goal:
+first page load should normally show a useful neighborhood/walkable work area, not half the county.
+
+Add compact map actions:
+
+```text
+Home
+1 mi
+2 mi
+```
+
+Place next to the single Overlays control, not in another toolbar.
+
+Behavior:
+- Home → center home at zoom ~16;
+- 1 mi → fit a 1-mile radius around home;
+- 2 mi → fit a 2-mile radius around home.
+
+Use the loaded `searchConfig.home_latitude/home_longitude`.
+Do not add backend calls.
+
+These are deliberate user actions; unlike initial-fit logic, they may reset the viewport.
+
+## B. Zoom ceiling / navigation
+
+Map initialization in `SurveyorView.vue`:
+
+```js
+new maplibregl.Map({
+  ...
+  maxZoom: 20,
+  renderWorldCopies: false
+})
+```
+
+Do not cap normal manual zoom at 15.x. Camera placement needs zoom 17–20.
+
+Keep north-up behavior simple:
+- `dragRotate: false`;
+- `pitchWithRotate: false`;
+- `map.touchZoomRotate.disableRotation()`.
+
+Do not add 3D/pitch in this slice.
+
+## C. Scale bar
+
+At `SurveyorView.vue:1272` beside current NavigationControl add:
+
+```js
+map.addControl(new maplibregl.ScaleControl({
+  maxWidth: 120,
+  unit: 'imperial'
+}), 'bottom-left')
+```
+
+The scale bar must remain readable on mobile and must not sit under the mobile field bar/timeline.
+
+Use CSS positioning only if necessary.
+
+## D. BUILDINGS / HOMES / ADDRESSES ARE CORE GEOGRAPHY
+
+Current `catMapStyle.js` hides:
+```js
+/poi|shop|restaurant|transit|station|address|housenumber|amenity|building/
+```
+
+Change symbol handling.
+
+Still hide:
+```text
+poi
+shop
+restaurant
+transit
+station
+amenity
+```
+
+Do **not** hide:
+```text
+address
+housenumber
+```
+
+Building-name symbols may remain hidden unless they carry actual address/house-number information.
+
+### House numbers / addresses
+
+For symbol layers matching:
+```text
+housenumber|house_number|address
+```
+
+- set visible;
+- `map.setLayerZoomRange(layer.id, 16, 24)` when supported;
+- text size ~10–11;
+- text color #6b6256;
+- halo #faf7ef, width ~1.3;
+- opacity ~0.82;
+- allow normal collision detection; do not force every house number to overlap.
+
+If the underlying OpenFreeMap/OSM data does not contain a house number, do not invent one.
+
+### Building footprints
+
+For fill layers matching `building|structure`:
+
+```js
+fill-color: '#d8d0c1'
+fill-opacity: ['interpolate',['linear'],['zoom'],14,0.30,16,0.58,18,0.72]
+fill-outline-color: '#a99f90'
+```
+
+If `fill-outline-color` is unsupported on a layer, skip just that property.
+
+For building line/outline layers:
+- line color #a99f90;
+- line width 0.6 at z15 → 1.2 at z19;
+- opacity 0.75.
+
+Buildings should be clearly visible at z15+ without visually overpowering Surveyor markers.
+
+## E. DRIVEWAYS / SERVICE ROADS / WALKABLE PATHS
+
+In `catMapStyle.js`, add high-zoom transport classes before the generic road branch.
+
+### Service / driveway
+Match:
+```text
+service|driveway|parking_aisle|parking-aisle
+```
+
+Style:
+- color #c7bca9;
+- line width z14 0.7 → z18 2.2;
+- opacity 0.82;
+- if semantic layer separation exists, minzoom ~14.
+
+### Footpath / trail
+Match:
+```text
+footway|path|trail|track|pedestrian|steps
+```
+
+Style:
+- color #8d826d;
+- width z14 0.7 → z18 1.8;
+- opacity 0.8;
+- dashed when the source/style permits.
+
+Do not classify a motorway/primary/secondary as trail because a layer id also contains generic `transport`.
+
+Order matching from most specific to most general.
+
+## F. FENCES / WALLS / BARRIERS / HEDGES
+
+Where OpenFreeMap exposes semantic line layers matching:
+```text
+fence|wall|barrier|hedge
+```
+
+Show them only at close zoom:
+- zoom range ~16+;
+- color #7f8278;
+- width 0.6 → 1.1;
+- opacity ~0.7;
+- hedge may use muted green #78896f.
+
+These are useful cat/field boundaries.
+
+Do not add a new external fence provider.
+
+## G. SMALL WATER + DRAINAGE DETAIL
+
+Current water styling is acceptable regionally but close-range needs small channels.
+
+At z15+ retain:
+- stream;
+- ditch;
+- drain;
+- canal;
+- intermittent water lines if present in source.
+
+Line width:
+- z14 ~1.2;
+- z17 ~2.2;
+- z19 ~3.
+
+NC OneMap hydrography remains authoritative when available and already participates in snapping.
+
+Do not hide generic base water when NC OneMap is unavailable.
+
+## H. ENVIRONMENT OVERLAYS MUST FADE AT FIELD ZOOM
+
+In `frontend/src/surveyor/environmentLayers.js`:
+
+Annual NLCD opacity should be zoom-dependent:
+
+```js
+'raster-opacity': [
+  'interpolate', ['linear'], ['zoom'],
+  9, 0.22,
+  13, 0.20,
+  15, 0.12,
+  17, 0.04,
+  18, 0.0
+]
+```
+
+NWI wetlands:
+
+```js
+'raster-opacity': [
+  'interpolate', ['linear'], ['zoom'],
+  10, 0.26,
+  14, 0.20,
+  16, 0.10,
+  18, 0.04
+]
+```
+
+County labels/lines:
+- fade strongly after z13;
+- hide by z15 if easiest with `maxzoom`.
+
+State lines:
+- hide by z13.
+
+At field zoom, the map priority is:
+```text
+buildings + house numbers + driveways + paths + water
+→ Surveyor objects/cameras
+→ environmental texture
+→ administrative geography
+```
+
+## I. FIELD-DETAIL ZOOM STATE
+
+Add one compact computed/readout, not another settings panel:
+
+```text
+Neighborhood
+Field detail
+Close detail
+```
+
+Suggested:
+- <14 = Neighborhood
+- 14–16 = Field detail
+- >16 = Close detail
+
+It may live adjacent to the scale bar or Home/1mi/2mi controls.
+
+Do not expose raw `Zoom 17.34` as the main label.
+
+## J. CAMERA PLACEMENT / EDITING SHOULD ENTER PRECISION SCALE
+
+When placing a **new** camera:
+- after map tap, open camera draft as now;
+- keep map at current location;
+- if zoom <17, ease to ~17 around the clicked location before/while draft opens.
+
+When selecting/editing an existing current trail camera:
+- if user chooses Move/Edit placement and zoom <17, ease to at least 17;
+- camera center/heading/range handles remain visible.
+
+When a camera is selected at z17+:
+- center handle remains ~14 px touch target;
+- heading/range handles minimum ~12 px;
+- cone outline increases from current 1.5 px to ~2 px for current placement;
+- current camera point gets a stronger contrasting halo/stroke;
+- historical placement remains faded/dashed and must not visually compete.
+
+Do not enlarge stored camera range or geometry. This is display/edit ergonomics only.
+
+## K. PRECISE OBJECT PLACEMENT FEEDBACK
+
+For active Marker / Camera / Note / Access placement:
+- desktop cursor = crosshair;
+- retain the type-first marker badge from §1E;
+- after click, show a brief ~350 ms pulse/ring at exact selected coordinate before opening the sheet if straightforward;
+- never move the selected coordinate to a nearby label/address automatically.
+
+For drawing/snap:
+- current snap indicator remains;
+- at zoom >=16, reduce snap threshold from 12 px to ~9 px for more precise choice among close roads/objects;
+- cameras/objects still use touch-friendly hit targets separately from snap threshold.
+
+Implement threshold as:
+```js
+const threshold = map.getZoom() >= 16 ? 9 : 12
+```
+inside `createMapFeatureSnapper`, rather than adding a user setting.
+
+## L. STRUCTURE DETAIL HEALTH
+
+Extend `auditCatMapStyle(map)` with optional signals:
+
+```js
+buildings: boolean
+addresses: boolean
+paths: boolean
+```
+
+These do **not** determine overall `ready` status because source coverage varies.
+
+At zoom >=16, if no building semantic layer exists, do not display a scary map failure.
+Optional dev/diagnostic text in Overlays may say:
+```text
+Structure detail: limited by map data
+```
+
+Do not blame the user or imply the provider failed.
+
+## M. DO NOT ADD THIS SLICE
+
+Do not add:
+- parcel/property boundary provider;
+- satellite imagery provider;
+- 3D buildings;
+- LiDAR;
+- automatic tree detection;
+- new geocoding provider.
+
+Those may be useful later, but building/address/service-road detail from the existing vector source should be fixed first.
+
+## N. MANUAL ACCEPTANCE FOR FIELD DETAIL
+
+At home area:
+
+1. 2-mile view:
+   - home + nearby Surveyor objects visible;
+   - roads/woodland/water readable.
+
+2. zoom 15–16:
+   - individual building footprints visible;
+   - local/service roads distinguishable;
+   - paths/trails visible where source data exists.
+
+3. zoom 17–19:
+   - house numbers visible where source data contains them;
+   - buildings have clear outlines;
+   - driveways/paths usable as placement references;
+   - NLCD no longer smears over structures;
+   - county/state boundaries no longer distract.
+
+4. Camera:
+   - select a camera;
+   - edit/move enters useful close scale;
+   - cone + handles easy to see;
+   - scale bar makes tens/hundreds of feet obvious.
+
+5. Mobile:
+   - pinch to z18+;
+   - place camera/marker relative to a building;
+   - scale bar and controls do not overlap bottom field controls.
+
+---
+
 # 1G. P0 — FACEBOOK SYNC MUST EXPLAIN WHAT HAPPENED
 
 Current:
@@ -1384,25 +1782,26 @@ One portrait pass: Layers + environment inspector + QuickAdd usable without over
 2. 24Pet inactive/dead-link suppression while retaining photos;
 3. single Overlays control + truthful off/zoom/species statuses;
 4. load search config + home/nearby initial viewport;
-5. surface Tonight readiness bar using existing outing plan;
-6. Marker type-first picker + placement cue + stale-subtype fix;
-7. Candidates/Surveyor one-line workflow orientation;
-8. stale-setting closure + network refresh discipline;
-9. environment layer order;
-10. bbox bucket correctness;
-11. hydro naming/pagination/partial failure;
-12. wildlife pagination/clustering;
-13. base health + retry;
-14. inspector exclusivity + safe environmental marker action;
-15. boundary inspection;
-16. centralized zone types + picker fix;
-17. candidate provenance cleanup;
-18. pointer/mobile polish;
-19. focused backend tests;
-20. one frontend build if dependencies already exist;
-21. manual acceptance;
-22. commit/push `main`;
-23. deploy per `AGENTS.md` only if real DietPi access exists.
+5. close-range field detail: buildings/addresses/driveways/paths/scale/camera precision;
+6. surface Tonight readiness bar using existing outing plan;
+7. Marker type-first picker + placement cue + stale-subtype fix;
+8. Candidates/Surveyor one-line workflow orientation;
+9. stale-setting closure + network refresh discipline;
+10. environment layer order;
+11. bbox bucket correctness;
+12. hydro naming/pagination/partial failure;
+13. wildlife pagination/clustering;
+14. base health + retry;
+15. inspector exclusivity + safe environmental marker action;
+16. boundary inspection;
+17. centralized zone types + picker fix;
+18. candidate provenance cleanup;
+19. pointer/mobile polish;
+20. focused backend tests;
+21. one frontend build if dependencies already exist;
+22. manual acceptance;
+23. commit/push `main`;
+24. deploy per `AGENTS.md` only if real DietPi access exists.
 
 ---
 
@@ -1431,6 +1830,12 @@ The disabled `Measure · coming soon` control is not part of 8B.
 - inactive/unavailable 24PetConnect records may retain photos but never render dead source links;
 - 24Pet source history explicitly distinguishes "Current photo" from "Listing inactive/link unavailable";
 - Surveyor opens framed around home + nearby local field markers;
+- close-range zoom exposes building footprints, house numbers where mapped, service roads/driveways, paths/trails, barriers where mapped, and small waterways;
+- normal manual zoom supports camera-scale editing to z20;
+- imperial scale bar is visible and unobtrusive;
+- Home / 1 mi / 2 mi map controls make the walkable search area easy to recover;
+- NLCD/wetland/admin context fades out as exact structure detail becomes more important;
+- camera move/edit enters a practical close zoom and current cone/handles are easy to manipulate;
 - HOME is visually identifiable without dominating the map;
 - only one user-facing Overlays control exists;
 - wetlands/wildlife show Off/Choose species/Zoom in instead of false Unavailable states;
